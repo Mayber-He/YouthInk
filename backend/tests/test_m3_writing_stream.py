@@ -1,0 +1,253 @@
+"""Unit and integration tests for M3 Writing Workbench (Scenes, Versions, Context, AI Smell, SSE, Export)."""
+
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+import json
+from pathlib import Path
+from fastapi.testclient import TestClient
+import httpx
+import pytest
+
+from app.core.config import reset_config_for_testing
+from app.db.manager import ensure_global_db_initialized, get_novel_db
+from app.main import create_app
+
+
+@pytest.fixture()
+def client(tmp_path: Path) -> TestClient:
+    reset_config_for_testing(tmp_path / "test_data_m3")
+    ensure_global_db_initialized()
+    app = create_app()
+    c = TestClient(app)
+    c.post(
+        "/api/v1/settings/llm-profiles",
+        json={
+            "name": "Test Writer",
+            "base_url": "https://api.example.com/v1",
+            "model": "deepseek-chat",
+            "api_key": "sk-testwriter123",
+            "is_default": True,
+        },
+    )
+    return c
+
+
+@pytest.fixture()
+def setup_chapter(client: TestClient) -> tuple[str, int, int]:
+    novel = client.post(
+        "/api/v1/novels",
+        json={
+            "title": "蝉鸣停止之前",
+            "genre": "校园",
+            "tone": "清新治愈",
+            "pov": "第三人称限知",
+            "protagonist_concept": "林夏 × 陆川",
+            "synopsis": "高二盛夏的广播站故事。",
+            "style_template_id": 1,
+        },
+    ).json()
+    uid = str(novel["novel_uid"])
+
+    char = client.post(
+        f"/api/v1/novels/{uid}/characters",
+        json={
+            "name": "林夏",
+            "role": "female_lead",
+            "personality": "慢热细致",
+            "speech_style": "说话轻声但笃定",
+        },
+    ).json()
+    client.post(
+        f"/api/v1/novels/{uid}/locations",
+        json={
+            "name": "广播站播音室",
+            "type": "校园场所",
+            "description": "隔音棉泛黄的小房间",
+            "sensory_details": "老式调音台指示灯闪烁，窗外香樟树叶沙沙响",
+        },
+    )
+    vol = client.post(
+        f"/api/v1/novels/{uid}/outline/volumes",
+        json={"title": "第一卷：盛夏频率"},
+    ).json()
+    arc = client.post(
+        f"/api/v1/novels/{uid}/outline/arcs",
+        json={"volume_id": vol["id"], "title": "第一弧：试音"},
+    ).json()
+    ch = client.post(
+        f"/api/v1/novels/{uid}/outline/chapters",
+        json={
+            "arc_id": arc["id"],
+            "title": "五点半的电流声",
+            "synopsis": "林夏第一次在放学后独自值班试音，偶遇走错门的陆川。",
+            "story_time": "九月第一个周五傍晚",
+        },
+    ).json()
+    return uid, int(ch["id"]), int(char["id"])
+
+
+def test_scenes_versions_context_and_export(
+    client: TestClient, setup_chapter: tuple[str, int, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    uid, ch_id, _ = setup_chapter
+
+    # 1. AI generate scenes
+    async def fake_post(self, url: str, **kwargs):  # type: ignore[no-untyped-def]
+        payload = json.dumps(
+            {
+                "scenes": [
+                    {
+                        "beat": "@林夏 在 @广播站播音室 调试麦克风，耳机里传来细微电流声。",
+                        "pov_character_name": "林夏",
+                        "location_name": "广播站播音室",
+                        "character_names": ["林夏"],
+                        "story_time": "17:30",
+                        "target_words": 800,
+                    },
+                    {
+                        "beat": "暮色降临，走廊外传来篮球拍击声。",
+                        "pov_character_name": "林夏",
+                        "location_name": "广播站播音室",
+                        "character_names": ["林夏"],
+                        "story_time": "17:50",
+                        "target_words": 900,
+                    },
+                ]
+            },
+            ensure_ascii=False,
+        )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": payload}}],
+                "usage": {"prompt_tokens": 120, "completion_tokens": 90},
+            },
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    scenes_resp = client.post(
+        f"/api/v1/novels/{uid}/chapters/{ch_id}/scenes/generate",
+        json={"scene_count": 2, "instruction": ""},
+    )
+    assert scenes_resp.status_code == 200
+    scenes = scenes_resp.json()
+    assert len(scenes) == 2
+    assert scenes[0]["pov_character"] is not None
+    assert scenes[0]["location_id"] is not None
+
+    # Chapter status should now be 'outline'
+    ws = client.get(f"/api/v1/novels/{uid}/chapters/{ch_id}/workspace").json()
+    assert ws["chapter"]["status"] == "outline"
+
+    # 2. Context preview & block toggle
+    ctx = client.get(
+        f"/api/v1/novels/{uid}/chapters/{ch_id}/context-preview?scene_id={scenes[0]['id']}"
+    ).json()
+    assert ctx["total_tokens"] > 0
+    assert any(b["key"] == "character_states" and "林夏" in b["content"] for b in ctx["blocks"])
+
+    ctx_disabled = client.get(
+        f"/api/v1/novels/{uid}/chapters/{ch_id}/context-preview?disabled_keys=character_states"
+    ).json()
+    assert ctx_disabled["total_tokens"] < ctx["total_tokens"]
+
+    # 3. Save versions & restore
+    v1_ws = client.put(
+        f"/api/v1/novels/{uid}/chapters/{ch_id}/content",
+        json={
+            "content": "第一版草稿：调音台的红灯亮起。",
+            "source": "manual",
+            "create_new_version": True,
+        },
+    ).json()
+    assert v1_ws["latest_version"] == 1
+    assert v1_ws["chapter"]["status"] == "draft"
+    assert v1_ws["chapter"]["word_count"] == 15
+
+    v2_ws = client.put(
+        f"/api/v1/novels/{uid}/chapters/{ch_id}/content",
+        json={
+            "content": "第二版AI生成：推开隔音门时，夕阳正好落在麦克风防风罩上。",
+            "source": "ai",
+            "create_new_version": True,
+        },
+    ).json()
+    assert v2_ws["latest_version"] == 2
+    assert len(v2_ws["versions"]) == 2
+
+    restored_ws = client.post(
+        f"/api/v1/novels/{uid}/chapters/{ch_id}/versions/1/restore"
+    ).json()
+    assert restored_ws["latest_version"] == 3
+    assert restored_ws["latest_content"] == "第一版草稿：调音台的红灯亮起。"
+
+    # 4. Export Markdown & TXT
+    md_resp = client.get(f"/api/v1/novels/{uid}/export?format=md")
+    assert md_resp.status_code == 200
+    assert "五点半的电流声" in md_resp.text
+    assert "第一版草稿：调音台的红灯亮起。" in md_resp.text
+
+
+def test_ai_smell_scanner_and_sse_streaming(
+    client: TestClient, setup_chapter: tuple[str, int, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    uid, ch_id, char_id = setup_chapter
+
+    # 1. Local AI smell detection
+    smell_resp = client.post(
+        f"/api/v1/novels/{uid}/ai-smell-scan",
+        json={
+            "text": "听到这句话，林夏不由得怔住了，陆川嘴角勾起一抹弧度。在那一刻，仿佛整个世界都安静了下来。"
+        },
+    )
+    assert smell_resp.status_code == 200
+    smell_data = smell_resp.json()
+    assert smell_data["total_hits"] >= 3
+    matched_words = [h["matched_text"] for h in smell_data["hits"]]
+    assert "不由得" in matched_words
+
+    # 2. Mock SSE stream for /api/stream/novels/{uid}/write and /rewrite
+    class FakeStreamResponse:
+        status_code = 200
+
+        async def aiter_lines(self):
+            yield 'data: {"choices": [{"delta": {"content": "夕阳把走廊拉得很长，"}}]}'
+            yield 'data: {"choices": [{"delta": {"content": "广播里传来试音的钢琴曲。"}}]}'
+            yield "data: [DONE]"
+
+        async def aread(self) -> bytes:
+            return b""
+
+    @asynccontextmanager
+    async def fake_stream(self, method: str, url: str, **kwargs):  # type: ignore[no-untyped-def]
+        yield FakeStreamResponse()
+
+    monkeypatch.setattr(httpx.AsyncClient, "stream", fake_stream)
+
+    write_sse = client.post(
+        f"/api/stream/novels/{uid}/write",
+        json={"chapter_id": ch_id, "mode": "chapter"},
+    )
+    assert write_sse.status_code == 200
+    assert "event: meta" in write_sse.text
+    assert "夕阳把走廊拉得很长，" in write_sse.text
+    assert "event: done" in write_sse.text
+
+    rewrite_sse = client.post(
+        f"/api/stream/novels/{uid}/rewrite",
+        json={
+            "chapter_id": ch_id,
+            "selected_text": "林夏不由得心里一紧。",
+            "action_type": "tone_shift",
+            "target_character_id": char_id,
+        },
+    )
+    assert rewrite_sse.status_code == 200
+    assert "event: delta" in rewrite_sse.text
+
+    # Verify generation_logs recorded both calls
+    with get_novel_db(uid) as conn:
+        cnt = conn.execute("SELECT COUNT(*) FROM generation_logs").fetchone()[0]
+        assert cnt >= 2

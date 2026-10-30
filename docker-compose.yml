@@ -1,0 +1,15 @@
+services:
+  youthink:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: youthink-workbench
+    ports:
+      - "8000:8000"
+    environment:
+      - YOUTHINK_DATA_DIR=/app/data
+      - YOUTHINK_HOST=0.0.0.0
+      - YOUTHINK_PORT=8000
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

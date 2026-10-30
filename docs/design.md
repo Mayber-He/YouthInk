@@ -1,4 +1,4 @@
-﻿# YouthInk 青春小说工作台 · 设计文档
+# YouthInk 青春小说工作台 · 设计文档
 
 > 状态：MVP 设计定稿（v0.1）
 > 本文档汇总前期讨论的全部结论，作为开发依据。后续调整请直接修改本文档并在「变更记录」中注明。
@@ -223,8 +223,7 @@ YOUTHINK_DATA_DIR/          # 默认：后端工作目录/data/
 
 ## 4. 数据模型
 
-> 逻辑模型与 SQLite 表结构一体呈现。所有表位于每部作品独立的 
-ovel.db 中；全局配置（模型档案、Prompt 模板等）存于 $YOUTHINK_DATA_DIR/global.db。
+> 逻辑模型与 SQLite 表结构一体呈现。所有表位于每部作品独立的 `novel.db` 中；全局配置（模型档案、Prompt 模板等）存于 `$YOUTHINK_DATA_DIR/global.db`。
 
 ### 4.1 作品（立项）
 
@@ -370,7 +369,7 @@ CREATE TABLE novels (
     growth_ending       TEXT,
     ending_note         TEXT,
     style_note          TEXT,
-    style_template_id   INTEGER REFERENCES style_templates(id),
+    style_template_id   INTEGER,                    -- 关联 global.db 的 style_templates(id)
     created_at          TEXT    NOT NULL DEFAULT (datetime('now')),
     updated_at          TEXT    NOT NULL DEFAULT (datetime('now'))
 );
@@ -650,19 +649,26 @@ CREATE TABLE generation_logs (
 ```sql
 -- 模型档案
 CREATE TABLE llm_profiles (
-    id          INTEGER PRIMARY KEY,
-    name        TEXT    NOT NULL UNIQUE,
-    base_url    TEXT    NOT NULL,
-    model       TEXT    NOT NULL,
-    -- api_key 不落盘，存入 Windows Credential Manager，键名 = "YouthInk/" || name
-    is_default  INTEGER NOT NULL DEFAULT 0,
-    created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+    id                INTEGER PRIMARY KEY,
+    name              TEXT    NOT NULL UNIQUE,
+    base_url          TEXT    NOT NULL,
+    model             TEXT    NOT NULL,
+    api_key_encrypted TEXT    NOT NULL,               -- 经 cryptography.fernet 加密后的密文
+    is_default        INTEGER NOT NULL DEFAULT 0,
+    created_at        TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
 -- 按任务类别分配模型
 CREATE TABLE task_model_assignments (
     task_category   TEXT    PRIMARY KEY,            -- writing/planning/extract
-    profile_id      INTEGER NOT NULL REFERENCES llm_profiles(id)
+    profile_id      INTEGER NOT NULL REFERENCES llm_profiles(id) ON DELETE CASCADE
+);
+
+-- 全局键值对配置（信任模式开关、Embedding 模型源等）
+CREATE TABLE app_settings (
+    key         TEXT    PRIMARY KEY,
+    value       TEXT    NOT NULL,                   -- JSON 编码值
+    updated_at  TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
 -- Prompt 模板（用户覆盖版本；默认模板以文件形式随程序发布）
@@ -948,3 +954,4 @@ CREATE TRIGGER trg_scenes_upd AFTER UPDATE ON scenes
 | 2026-10-30 | v0.1 | 补充 SQLite 完整表结构（novel.db + global.db），含索引和触发器 |
 
 | 2026-10-30 | v0.1 | 架构从 Tauri 桌面应用改为 Web（React + TypeScript + Python FastAPI），本地部署，浏览器访问 |
+| 2026-10-30 | v0.1 | 修正 `global.db` 的 `llm_profiles` 表补充 `api_key_encrypted` 字段，新增 `app_settings` 全局配置表 |
