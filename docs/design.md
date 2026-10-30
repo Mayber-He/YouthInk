@@ -1,4 +1,4 @@
-# YouthInk 青春小说工作台 · 设计文档
+﻿# YouthInk 青春小说工作台 · 设计文档
 
 > 状态：MVP 设计定稿（v0.1）
 > 本文档汇总前期讨论的全部结论，作为开发依据。后续调整请直接修改本文档并在「变更记录」中注明。
@@ -23,18 +23,18 @@
 
 ### 1.1 定位
 
-面向青春小说创作的 Windows 桌面工作台。用户填写大致内容后，系统依次生成世界观、人物、地点、主线剧情、分卷目录、章节细纲和正文，并通过记忆系统保证**百万字级**长篇写作的设定一致性。
+面向青春小说创作的 **Web 工作台**（浏览器访问）。用户填写大致内容后，系统依次生成世界观、人物、地点、主线剧情、分卷目录、章节细纲和正文，并通过记忆系统保证**百万字级**长篇写作的设定一致性。
 
 ### 1.2 基本约束
 
 | 项目 | 结论 |
 |---|---|
-| 目标平台 | 仅 Windows（Win10 / Win11） |
-| 使用模式 | 单机单用户，无账号、无云同步、无协作 |
+| 目标平台 | 现代浏览器（Chrome / Edge / Firefox），**无需安装客户端** |
+| 使用模式 | 本地部署，单用户；前端访问 `http://localhost`，数据留在本机 |
 | 大模型 | 云端 API，统一使用 **OpenAI 兼容格式** |
-| Embedding | 本地模型，首次启动时下载 |
+| Embedding | 服务端本地模型，首次启动时下载 |
 | 目标篇幅 | 百万字级（约 400 章 × 2500 字） |
-| 交付形式 | NSIS 安装包（`setup.exe`） |
+| 交付形式 | Python 后端（`uvicorn` 启动）+ 前端静态资源，用 `docker-compose` 或一键启动脚本分发 |
 
 ### 1.3 核心原则
 
@@ -51,36 +51,76 @@
 
 | 层 | 选型 | 说明 |
 |---|---|---|
-| 桌面壳 | Tauri 2 | 使用系统 WebView2，内置 sidecar 管理 |
-| 前端 | React + TypeScript | |
+| 前端 | React + TypeScript | Vite 构建，产物为静态文件，由后端直接 serve |
 | UI | shadcn/ui + Tailwind CSS | |
 | 编辑器 | TipTap | 富文本、中文输入法稳定 |
 | 前端状态 | Zustand + TanStack Query | |
-| 后端 | Python + FastAPI | 以 sidecar 形式运行，监听 `127.0.0.1` 随机端口 |
+| 后端 | Python + FastAPI | `uvicorn` 启动，监听 `0.0.0.0:8000`（默认） |
+
+| 静态托管 | FastAPI `StaticFiles` | 同进程 serve 前端 build 产物，无需单独 Nginx |
 | 业务数据 | SQLite | |
 | 向量库 | LanceDB | 嵌入式，支持元数据过滤 |
 | 全文检索 | SQLite FTS5 + jieba 预分词 | 解决中文分词问题 |
-| Embedding | bge-m3（ONNX int8，约 600MB）+ onnxruntime | 不依赖 PyTorch |
+| Embedding | bge-m3（ONNX int8，约 600MB）+ onnxruntime | 服务端运行，不依赖 PyTorch |
 | 重排（v0.2） | bge-reranker-v2-m3（ONNX） | |
-| 打包 | PyInstaller（onedir）→ Tauri sidecar → NSIS | |
+| 分发 | 一键启动脚本（`start.bat` / `start.sh`）+ 可选 `docker-compose.yml` | Docker 镜像含模型预载选项 |
 
 ### 2.2 进程结构
 
 ```
-┌──────────────────────────────┐
-│ Tauri 主进程（YouthInk.exe）   │
-│  └─ WebView2：React 前端       │
-└──────────────┬───────────────┘
-               │ 启动 / 退出管理（sidecar）
-               │ HTTP + SSE（流式输出）
-┌──────────────▼───────────────┐
-│ Python sidecar（FastAPI）      │
-│  ├─ LLM 调度（OpenAI 兼容）     │
-│  ├─ 上下文组装 / RAG            │
-│  ├─ 记忆抽取与入库               │
-│  ├─ Embedding（onnxruntime）    │
-│  └─ SQLite / LanceDB 读写       │
-└──────────────────────────────┘
+
+┌──────────────────────────────────────┐
+
+│  浏览器                                │
+
+│  └─ React 前端（Vite build 静态资源）    │
+
+└──────────────┬───────────────────────┘
+
+               │ HTTP REST + SSE（流式输出）
+
+┌──────────────▼───────────────────────┐
+
+│  Python FastAPI（uvicorn :8000）       │
+
+│  ├─ GET /         → 前端 index.html   │
+
+│  ├─ /api/*        → 业务路由          │
+
+│  ├─ /api/stream/* → SSE 流式生成      │
+
+│  ├─ LLM 调度（OpenAI 兼容）            │
+
+│  ├─ 上下文组装 / RAG                   │
+
+│  ├─ 记忆抽取与入库                     │
+
+│  ├─ Embedding（onnxruntime）           │
+
+│  └─ SQLite / LanceDB 读写             │
+
+└──────────────┬───────────────────────┘
+
+               │
+
+┌──────────────▼───────────────────────┐
+
+│  本机文件系统（YOUTHINK_DATA_DIR）      │
+
+│  ├─ global.db                        │
+
+│  ├─ models/bge-m3-onnx/              │
+
+│  └─ <novel_id>/                      │
+
+│      ├─ novel.db                     │
+
+│      ├─ vectors/                     │
+
+│      └─ backups/                     │
+
+└──────────────────────────────────────┘
+
 ```
 
 ### 2.3 LLM 接入
@@ -95,12 +135,12 @@
 | 摘要、抽取、状态更新、JSON 修复 | 便宜快速的模型 |
 
 - 流式输出通过 SSE 推送到前端，支持中途停止。
-- API Key 存入 Windows 凭据管理器（`keyring`），不明文落盘。
+- API Key 加密后存入 `global.db`，使用服务端启动时生成的本机密钥加密（`cryptography.fernet`），不明文落盘。
 - 每次调用都记录 token 消耗。
 
 ### 2.4 Embedding 模型下载
 
-- 存放位置：`%APPDATA%/YouthInk/models/`
+- 存放位置：`$YOUTHINK_DATA_DIR/models/`（默认为后端工作目录下的 `data/models/`）
 - 下载源：ModelScope / HF 镜像 / HuggingFace，可切换
 - 支持断点续传、文件校验、手动导入
 - 模型未就绪时可以正常进行立项和设定，只有记忆入库需要等待
@@ -110,10 +150,23 @@
 每部作品一个独立目录：
 
 ```
-<作品目录>/
-├─ novel.db        # SQLite：全部业务数据
-├─ vectors/        # LanceDB 向量索引
-└─ backups/        # 自动备份
+
+YOUTHINK_DATA_DIR/          # 默认：后端工作目录/data/
+
+├─ global.db                # 全局配置（模型档案、Prompt 模板等）
+
+├─ models/                  # Embedding 模型文件
+
+│   └─ bge-m3-onnx/
+
+└─ <novel_id>/              # 每部作品独立目录（UUID）
+
+    ├─ novel.db             # SQLite：全部业务数据
+
+    ├─ vectors/             # LanceDB 向量索引
+
+    └─ backups/             # 自动备份（每次定稿触发）
+
 ```
 
 ---
@@ -126,7 +179,7 @@
 
 | 模块 | 内容 |
 |---|---|
-| 基础设施 | Tauri + sidecar 启停、模型档案、任务分配、Embedding 下载 |
+| 基础设施 | FastAPI 服务启动、前端静态 serve、模型档案、任务分配、Embedding 下载 |
 | 作品管理 | 新建、打开、删除，自动备份 |
 | 立项 | 立项表单（含感情线结局、成长线结局） |
 | 设定生成 | 世界观、人物卡、地点：生成、编辑、锁定 |
@@ -151,26 +204,27 @@
 **v0.3 及以后**
 - EPUB / DOCX 导出
 - 一键连续写多章
-- 代码签名、自动更新
+- Docker Hub 发布、自动更新脚本
 - 灵感库、素材库
 
 ### 3.2 里程碑
 
 | 阶段 | 目标 | 验收标准 |
 |---|---|---|
-| M1 骨架 | 壳 + sidecar + 配置 + 作品管理 + **打包流水线** | 能打出可安装的 exe，并调通一次 LLM |
+| M1 骨架 | FastAPI + 前端静态 serve + 配置 + 作品管理 + **启动脚本和 Docker** | 浏览器能访问，并调通一次 LLM |
 | M2 设定链路 | 立项 → 世界观 → 人物 → 地点 → 主线 → 目录 | 从一句话梗概生成完整目录，可编辑、可锁定 |
 | M3 写作 | 细纲 + 编辑器 + 流式生成 | 能顺畅写完一章 |
 | M4 记忆闭环 | 入库、摘要、抽取、状态、认知、伏笔、检索、上下文组装 | 连续写 30 章，人物状态正确延续 |
 | M5 压测 | 脚本模拟生成 100 章以上 | 召回准确、矛盾率可接受 |
 
-> 打包流水线放在 M1，尽早暴露 PyInstaller、onnxruntime、sidecar 的打包问题。
+> 启动脚本与 Docker 镜像放在 M1，尽早验证跨平台运行和 onnxruntime 依赖。
 
 ---
 
 ## 4. 数据模型
 
-> 以下为逻辑模型，具体表结构在开发阶段细化。
+> 逻辑模型与 SQLite 表结构一体呈现。所有表位于每部作品独立的 
+ovel.db 中；全局配置（模型档案、Prompt 模板等）存于 $YOUTHINK_DATA_DIR/global.db。
 
 ### 4.1 作品（立项）
 
@@ -290,6 +344,373 @@
 分块以场景为单位，过长的场景按 500~800 字切分，相邻块保留少量重叠。
 
 **生成记录**：任务类型、模型、模板版本、完整 prompt、输出、token 数、耗时。
+
+
+### 4.6 SQLite 表结构
+
+> [!NOTE]
+> 所有表统一使用 `INTEGER PRIMARY KEY` 作为自增主键（即 SQLite rowid 别名）。时间戳字段统一存为 ISO-8601 文本（`TEXT`）。布尔字段使用 `INTEGER`（0 / 1）。JSON 数组（如别名列表、ID 列表）存为 `TEXT`（JSON 格式）。
+
+#### 4.6.1 结构层级（novel.db）
+
+```sql
+-- 作品基本信息
+CREATE TABLE novels (
+    id                  INTEGER PRIMARY KEY,
+    title               TEXT    NOT NULL,
+    genre               TEXT,                       -- 题材
+    tone                TEXT,                       -- 基调
+    pov                 TEXT,                       -- 叙事视角
+    protagonist_concept TEXT,
+    synopsis            TEXT,                       -- 故事梗概
+    target_words        INTEGER DEFAULT 1000000,
+    estimated_chapters  INTEGER,
+    words_per_chapter   INTEGER DEFAULT 2500,
+    romance_ending      TEXT,                       -- HE/BE/开放式/遗憾向/自定义
+    growth_ending       TEXT,
+    ending_note         TEXT,
+    style_note          TEXT,
+    style_template_id   INTEGER REFERENCES style_templates(id),
+    created_at          TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at          TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 卷
+CREATE TABLE volumes (
+    id          INTEGER PRIMARY KEY,
+    novel_id    INTEGER NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
+    sort_order  REAL    NOT NULL,                   -- 用浮点便于插入排序
+    title       TEXT    NOT NULL,
+    synopsis    TEXT,
+    goal        TEXT,
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 情节弧
+CREATE TABLE arcs (
+    id              INTEGER PRIMARY KEY,
+    volume_id       INTEGER NOT NULL REFERENCES volumes(id) ON DELETE CASCADE,
+    sort_order      REAL    NOT NULL,
+    title           TEXT    NOT NULL,
+    goal            TEXT,
+    core_conflict   TEXT,
+    start_chapter   INTEGER,                        -- 起始章节 sort_order（逻辑引用）
+    end_chapter     INTEGER,
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 章节
+CREATE TABLE chapters (
+    id              INTEGER PRIMARY KEY,
+    arc_id          INTEGER NOT NULL REFERENCES arcs(id) ON DELETE CASCADE,
+    sort_order      REAL    NOT NULL,               -- 与显示"第几章"分离
+    title           TEXT,
+    synopsis        TEXT,
+    status          TEXT    NOT NULL DEFAULT 'pending'
+                        CHECK(status IN ('pending','outline','draft','final')),
+    word_count      INTEGER DEFAULT 0,
+    story_time      TEXT,                           -- 故事内时间，自由文本
+    locked          INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_chapters_arc ON chapters(arc_id, sort_order);
+
+-- 场景
+CREATE TABLE scenes (
+    id              INTEGER PRIMARY KEY,
+    chapter_id      INTEGER NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+    sort_order      REAL    NOT NULL,
+    beat            TEXT,                           -- 节拍描述
+    pov_character   INTEGER REFERENCES characters(id),
+    location_id     INTEGER REFERENCES locations(id),
+    character_ids   TEXT,                           -- JSON 数组 [id, ...]
+    story_time      TEXT,
+    target_words    INTEGER,
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_scenes_chapter ON scenes(chapter_id, sort_order);
+
+-- 章节版本（正文历史）
+CREATE TABLE chapter_versions (
+    id          INTEGER PRIMARY KEY,
+    chapter_id  INTEGER NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+    version     INTEGER NOT NULL,
+    content     TEXT    NOT NULL,
+    source      TEXT    NOT NULL CHECK(source IN ('ai','manual')),
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_chapter_versions ON chapter_versions(chapter_id, version DESC);
+```
+
+#### 4.6.2 设定实体（novel.db）
+
+```sql
+-- 世界观条目
+CREATE TABLE worldview_entries (
+    id          INTEGER PRIMARY KEY,
+    category    TEXT    NOT NULL
+                    CHECK(category IN ('era','city','school','rules','culture','term')),
+    content     TEXT    NOT NULL,
+    locked      INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 人物卡（静态基准信息）
+CREATE TABLE characters (
+    id              INTEGER PRIMARY KEY,
+    name            TEXT    NOT NULL,
+    aliases         TEXT,                           -- JSON 数组，用于实体识别
+    role            TEXT    NOT NULL
+                        CHECK(role IN ('female_lead','male_lead','major','minor','extra')),
+    gender          TEXT,
+    initial_age     TEXT,                           -- 可以是"高一"等文字
+    appearance      TEXT,                           -- 外貌基准
+    personality     TEXT,                           -- 性格内核
+    speech_style    TEXT,                           -- 说话风格、口头禅
+    background      TEXT,                           -- 家庭背景、过往经历
+    arc_design      TEXT,                           -- 人物弧光设计
+    locked          INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 地点
+CREATE TABLE locations (
+    id              INTEGER PRIMARY KEY,
+    name            TEXT    NOT NULL,
+    aliases         TEXT,                           -- JSON 数组
+    type            TEXT,
+    description     TEXT,
+    sensory_details TEXT,                           -- 声音、气味、光线等
+    related_chars   TEXT,                           -- JSON 数组 [character_id, ...]
+    locked          INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 主线剧情（每部作品一条）
+CREATE TABLE main_plots (
+    id              INTEGER PRIMARY KEY,
+    novel_id        INTEGER NOT NULL UNIQUE REFERENCES novels(id) ON DELETE CASCADE,
+    core_conflict   TEXT,
+    romance_arc     TEXT,
+    growth_arc      TEXT,
+    key_turning_pts TEXT,                           -- JSON 数组 [{desc, chapter_sort}]
+    locked          INTEGER NOT NULL DEFAULT 0,
+    updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+```
+
+#### 4.6.3 随时间变化的状态（novel.db）
+
+所有变更表都通过 `chapter_id + sort_order` 定位时序；查询"第 N 章的状态"时，取该字段在 `chapter.sort_order ≤ N` 范围内最新的一条（`ORDER BY chapter sort_order DESC LIMIT 1`）。
+
+```sql
+-- 人物状态变更
+CREATE TABLE character_state_changes (
+    id              INTEGER PRIMARY KEY,
+    character_id    INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    chapter_id      INTEGER NOT NULL REFERENCES chapters(id),
+    scene_id        INTEGER REFERENCES scenes(id),
+    field           TEXT    NOT NULL
+                        CHECK(field IN ('location','body','emotion','goal',
+                                        'identity','item','appearance')),
+    value           TEXT    NOT NULL,
+    source_quote    TEXT,                           -- 原文引用片段
+    confirm_status  TEXT    NOT NULL DEFAULT 'pending'
+                        CHECK(confirm_status IN ('pending','confirmed','discarded')),
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_char_state ON character_state_changes(character_id, field, chapter_id);
+
+-- 认知记录（谁知道什么）
+CREATE TABLE cognitive_records (
+    id              INTEGER PRIMARY KEY,
+    secret          TEXT    NOT NULL,               -- 秘密或事实的描述
+    knower_ids      TEXT    NOT NULL,               -- JSON 数组 [character_id, ...]
+    chapter_id      INTEGER REFERENCES chapters(id),
+    learned_by      TEXT,                           -- 得知方式
+    source_quote    TEXT,
+    confirm_status  TEXT    NOT NULL DEFAULT 'pending'
+                        CHECK(confirm_status IN ('pending','confirmed','discarded')),
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 人物关系变更
+CREATE TABLE relationship_changes (
+    id              INTEGER PRIMARY KEY,
+    char_a_id       INTEGER NOT NULL REFERENCES characters(id),
+    char_b_id       INTEGER NOT NULL REFERENCES characters(id),
+    chapter_id      INTEGER NOT NULL REFERENCES chapters(id),
+    scene_id        INTEGER REFERENCES scenes(id),
+    rel_type        TEXT    NOT NULL,               -- 同学/朋友/暗恋/恋人/敌对……
+    intimacy        INTEGER,                        -- 1~10
+    publicity       TEXT    CHECK(publicity IN ('public','mutual','one_sided')),
+    change_reason   TEXT,
+    source_quote    TEXT,
+    confirm_status  TEXT    NOT NULL DEFAULT 'pending'
+                        CHECK(confirm_status IN ('pending','confirmed','discarded')),
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_rel_chars ON relationship_changes(char_a_id, char_b_id, chapter_id);
+
+-- 时间线事件
+CREATE TABLE timeline_events (
+    id          INTEGER PRIMARY KEY,
+    story_time  TEXT    NOT NULL,
+    description TEXT    NOT NULL,
+    chapter_id  INTEGER REFERENCES chapters(id),
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 伏笔台账
+CREATE TABLE foreshadowing (
+    id                  INTEGER PRIMARY KEY,
+    description         TEXT    NOT NULL,
+    planted_chapter_id  INTEGER REFERENCES chapters(id),
+    plan_recover_start  INTEGER,                    -- 计划回收起始 chapter sort_order
+    plan_recover_end    INTEGER,
+    status              TEXT    NOT NULL DEFAULT 'planted'
+                            CHECK(status IN ('planted','hinted','recovered','abandoned')),
+    related_chapter_ids TEXT,                       -- JSON 数组
+    source_quote        TEXT,
+    confirm_status      TEXT    NOT NULL DEFAULT 'pending'
+                            CHECK(confirm_status IN ('pending','confirmed','discarded')),
+    created_at          TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at          TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+```
+
+#### 4.6.4 记忆与检索（novel.db）
+
+```sql
+-- 事实库
+CREATE TABLE facts (
+    id              INTEGER PRIMARY KEY,
+    content         TEXT    NOT NULL,
+    fact_type       TEXT    NOT NULL,               -- char_attr/event/item/agreement/place_detail
+    entity_ids      TEXT,                           -- JSON {characters:[...], locations:[...]}
+    chapter_id      INTEGER REFERENCES chapters(id),
+    scene_id        INTEGER REFERENCES scenes(id),
+    source_quote    TEXT,
+    status          TEXT    NOT NULL DEFAULT 'pending'
+                        CHECK(status IN ('pending','confirmed','locked','discarded')),
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE VIRTUAL TABLE facts_fts USING fts5(content, content='facts', content_rowid='id');
+
+-- 分层摘要
+CREATE TABLE summaries (
+    id          INTEGER PRIMARY KEY,
+    level       TEXT    NOT NULL CHECK(level IN ('chapter','arc','volume','novel')),
+    ref_id      INTEGER NOT NULL,                   -- 对应 chapter_id / arc_id / volume_id / novel_id
+    content     TEXT    NOT NULL,
+    is_stale    INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(level, ref_id)
+);
+
+-- FTS5 全文检索（章节正文，jieba 预分词后写入）
+CREATE VIRTUAL TABLE chapters_fts USING fts5(
+    content,
+    content='chapter_versions',
+    content_rowid='id',
+    tokenize='unicode61'                            -- 实际写入时由 Python 完成 jieba 分词
+);
+
+-- 生成记录
+CREATE TABLE generation_logs (
+    id              INTEGER PRIMARY KEY,
+    task_type       TEXT    NOT NULL,
+    model           TEXT    NOT NULL,
+    template_id     TEXT,
+    template_ver    TEXT,
+    prompt          TEXT    NOT NULL,
+    output          TEXT,
+    input_tokens    INTEGER,
+    output_tokens   INTEGER,
+    elapsed_ms      INTEGER,
+    chapter_id      INTEGER REFERENCES chapters(id),
+    scene_id        INTEGER REFERENCES scenes(id),
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+```
+
+#### 4.6.5 全局配置（global.db）
+
+`global.db` 随应用安装目录存放，**不**随作品目录备份。
+
+```sql
+-- 模型档案
+CREATE TABLE llm_profiles (
+    id          INTEGER PRIMARY KEY,
+    name        TEXT    NOT NULL UNIQUE,
+    base_url    TEXT    NOT NULL,
+    model       TEXT    NOT NULL,
+    -- api_key 不落盘，存入 Windows Credential Manager，键名 = "YouthInk/" || name
+    is_default  INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 按任务类别分配模型
+CREATE TABLE task_model_assignments (
+    task_category   TEXT    PRIMARY KEY,            -- writing/planning/extract
+    profile_id      INTEGER NOT NULL REFERENCES llm_profiles(id)
+);
+
+-- Prompt 模板（用户覆盖版本；默认模板以文件形式随程序发布）
+CREATE TABLE prompt_templates (
+    id          INTEGER PRIMARY KEY,
+    task_type   TEXT    NOT NULL UNIQUE,
+    content     TEXT    NOT NULL,
+    version     TEXT    NOT NULL DEFAULT '1.0',
+    updated_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 风格模板
+CREATE TABLE style_templates (
+    id              INTEGER PRIMARY KEY,
+    name            TEXT    NOT NULL UNIQUE,
+    is_builtin      INTEGER NOT NULL DEFAULT 0,
+    pov             TEXT,
+    tense_feel      TEXT,
+    tone            TEXT,
+    sentence_pref   TEXT,
+    dialogue_ratio  TEXT,
+    desc_focus      TEXT,
+    pacing          TEXT,
+    example_paras   TEXT,                           -- JSON 数组，1~3 段示例
+    forbidden_exprs TEXT,                           -- JSON 数组，禁用词/短语
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+```
+
+#### 4.6.6 索引与约束补充
+
+```sql
+-- novel.db：常用查询索引
+CREATE INDEX idx_facts_status   ON facts(status);
+CREATE INDEX idx_facts_entities ON facts(entity_ids);           -- 部分查询用 json_each
+CREATE INDEX idx_summaries_ref  ON summaries(level, ref_id);
+CREATE INDEX idx_gen_logs_task  ON generation_logs(task_type, created_at DESC);
+CREATE INDEX idx_foreshadow_st  ON foreshadowing(status);
+
+-- 触发器：novels / chapters / scenes 更新时维护 updated_at
+CREATE TRIGGER trg_novels_upd AFTER UPDATE ON novels
+    BEGIN UPDATE novels SET updated_at = datetime('now') WHERE id = NEW.id; END;
+CREATE TRIGGER trg_chapters_upd AFTER UPDATE ON chapters
+    BEGIN UPDATE chapters SET updated_at = datetime('now') WHERE id = NEW.id; END;
+CREATE TRIGGER trg_scenes_upd AFTER UPDATE ON scenes
+    BEGIN UPDATE scenes SET updated_at = datetime('now') WHERE id = NEW.id; END;
+```
 
 ---
 
@@ -507,9 +928,9 @@
 
 | 风险 | 应对 |
 |---|---|
-| Python sidecar 被杀毒软件误报 | onedir 模式、代码签名，必要时改用 Nuitka |
+| 浏览器安全策略限制（CORS / CSP） | 后端同源 serve 前端，无跨域问题；CSP 头统一在 FastAPI 配置 |
 | 首次模型下载失败 | 镜像源 + 断点续传 + 手动导入 |
-| 安装包体积过大 | 不引入 PyTorch，使用 onnxruntime；模型不打包 |
+| Docker 镜像体积过大 | 分层构建，模型单独 volume 挂载，不打入镜像 |
 | 抽取或一致性检查成本高 | 使用便宜模型，只处理本章涉及的实体 |
 | 一次生成大量细纲质量下降 | 按情节弧滚动生成 |
 | 修改前文导致状态链断裂 | 标记过期并提示；v0.2 提供自动重算 |
@@ -524,3 +945,6 @@
 |---|---|---|
 | 2026-10-24 | v0.1 | 初版：汇总技术栈、MVP 范围、数据模型、界面、Prompt 体系的讨论结论 |
 | 2026-10-30 | v0.1 | 明确信任模式默认开启，统一抽取记忆的确认规则 |
+| 2026-10-30 | v0.1 | 补充 SQLite 完整表结构（novel.db + global.db），含索引和触发器 |
+
+| 2026-10-30 | v0.1 | 架构从 Tauri 桌面应用改为 Web（React + TypeScript + Python FastAPI），本地部署，浏览器访问 |
