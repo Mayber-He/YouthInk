@@ -3,10 +3,45 @@ export type MemoryItemCategory =
   | "char_state"
   | "cognitive"
   | "relationship"
-  | "foreshadowing";
+  | "foreshadowing"
+  | "constraint_check";
 
 export type ForeshadowStatus = "planted" | "hinted" | "recovered" | "abandoned";
 export type SummaryLevel = "chapter" | "arc" | "volume" | "novel";
+
+export type ConsistencyCheckType = "constraint" | "fact" | "character";
+export type ConsistencyVerdict = "violation" | "suspicious";
+
+export interface ConsistencyIssue {
+  check_type: ConsistencyCheckType;
+  ref_id: number | null;
+  ref_label: string;
+  verdict: ConsistencyVerdict;
+  evidence_quote: string;
+  description: string;
+  suggestion: string;
+}
+
+export interface ConsistencyReviewResponse {
+  id: number;
+  chapter_id: number;
+  version_id: number | null;
+  summary: string;
+  issue_count: number;
+  violation_count: number;
+  issues: ConsistencyIssue[];
+  model: string;
+  created_at: string;
+}
+
+export interface ConsistencyReviewSummary {
+  id: number;
+  chapter_id: number;
+  summary: string;
+  issue_count: number;
+  violation_count: number;
+  created_at: string;
+}
 
 export interface PendingQueueItem {
   item_type: MemoryItemCategory;

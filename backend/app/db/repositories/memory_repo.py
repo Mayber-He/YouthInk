@@ -197,6 +197,14 @@ class MemoryRepository:
                 "chapter_id",
             ),
             ("foreshadowing", "SELECT * FROM foreshadowing WHERE confirm_status = ? ORDER BY id DESC", "planted_chapter_id"),
+            (
+                "constraint_check",
+                "SELECT cc.*, cc.evidence_quote AS source_quote, c.content AS constraint_content "
+                "FROM constraint_checks cc "
+                "JOIN constraints c ON c.id = cc.constraint_id "
+                "WHERE cc.confirm_status = ? ORDER BY cc.id DESC",
+                "chapter_id",
+            ),
         ]
         for cat, sql, ch_col in specs:
             if item_type and item_type != cat:
@@ -232,6 +240,9 @@ class MemoryRepository:
             return f"秘密认知：{r['secret']}"
         if cat == "relationship":
             return f"{r['char_a_name']} ↔ {r['char_b_name']}：{r['rel_type']} (亲密度 {r['intimacy']})"
+        if cat == "constraint_check":
+            tag = "违反硬约束" if r["verdict"] == "violated" else "约束疑似解除"
+            return f"[{tag}] {r['description']}"
         return f"[{r['status']}] {r['description']}"
 
     def update_pending_item(
@@ -244,6 +255,7 @@ class MemoryRepository:
             "cognitive": ("cognitive_records", "confirm_status", "secret"),
             "relationship": ("relationship_changes", "confirm_status", "rel_type"),
             "foreshadowing": ("foreshadowing", "confirm_status", "description"),
+            "constraint_check": ("constraint_checks", "confirm_status", "description"),
         }
         tbl, st_col, txt_col = table_map[item_type]
         if req.updated_text:
@@ -259,6 +271,32 @@ class MemoryRepository:
             row = self.conn.execute("SELECT content FROM facts WHERE id = ?", (item_id,)).fetchone()
             if row:
                 self.index_fact_fts(item_id, str(row["content"]))
+        if item_type == "constraint_check" and target == "confirmed":
+            self._apply_constraint_check_verdict(item_id)
+
+    def _apply_constraint_check_verdict(self, check_id: int) -> None:
+        """Apply a confirmed violation/resolution verdict to the constraint itself."""
+        row = self.conn.execute(
+            "SELECT constraint_id, chapter_id, verdict FROM constraint_checks WHERE id = ?",
+            (check_id,),
+        ).fetchone()
+        if row is None:
+            return
+        if row["verdict"] == "violated":
+            # The rule still holds for future chapters; flag it for the author's attention.
+            self.conn.execute(
+                "UPDATE constraints SET status = 'violated' WHERE id = ?",
+                (row["constraint_id"],),
+            )
+        else:
+            self.conn.execute(
+                """
+                UPDATE constraints
+                SET status = 'resolved', valid_until_chapter_id = ?
+                WHERE id = ?
+                """,
+                (row["chapter_id"], row["constraint_id"]),
+            )
 
     def batch_update_pending(self, req: BatchQueueActionRequest) -> int:
         count = 0
@@ -266,7 +304,7 @@ class MemoryRepository:
         for entry in req.items:
             itype = str(entry.get("item_type", ""))
             iid = int(entry.get("id", 0))
-            if itype in ("fact", "char_state", "cognitive", "relationship", "foreshadowing") and iid > 0:
+            if itype in ("fact", "char_state", "cognitive", "relationship", "foreshadowing", "constraint_check") and iid > 0:
                 self.update_pending_item(itype, iid, single_req)  # type: ignore[arg-type]
                 count += 1
         return count

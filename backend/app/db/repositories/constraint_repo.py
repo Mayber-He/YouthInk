@@ -101,6 +101,28 @@ class ConstraintRepository:
         )
         return cur.rowcount or 0
 
+    # --- Violation / resolution detection records ---
+
+    def create_constraint_check(
+        self,
+        constraint_id: int,
+        chapter_id: int,
+        verdict: str,
+        evidence_quote: str,
+        description: str,
+    ) -> int:
+        """Record an LLM verdict on a constraint; always enters pending queue."""
+        self.get_constraint(constraint_id)  # validate target exists
+        cur = self.conn.execute(
+            """
+            INSERT INTO constraint_checks (
+                constraint_id, chapter_id, verdict, evidence_quote, description, confirm_status
+            ) VALUES (?, ?, ?, ?, ?, 'pending')
+            """,
+            (constraint_id, chapter_id, verdict, evidence_quote, description),
+        )
+        return int(cur.lastrowid or 0)
+
     # --- Active constraints for writing ---
 
     def list_active_for_chapter(
@@ -113,8 +135,9 @@ class ConstraintRepository:
         """Return constraints in effect for the given chapter.
 
         Scope: novel-wide + this chapter + active characters + active locations,
-        filtered by status='active' and the chapter validity window.
-        Hard constraints come first.
+        filtered by status in ('active', 'violated') and the chapter validity window.
+        A 'violated' constraint still holds for future writing (the rule stands),
+        it is just flagged. Hard constraints come first.
         """
         char_ids = character_ids or []
         loc_ids = location_ids or []
@@ -122,7 +145,7 @@ class ConstraintRepository:
             SELECT c.* FROM constraints c
             LEFT JOIN chapters cf ON cf.id = c.valid_from_chapter_id
             LEFT JOIN chapters cu ON cu.id = c.valid_until_chapter_id
-            WHERE c.status = 'active'
+            WHERE c.status IN ('active', 'violated')
               AND (cf.id IS NULL OR cf.sort_order <= ?)
               AND (cu.id IS NULL OR cu.sort_order >= ?)
               AND (

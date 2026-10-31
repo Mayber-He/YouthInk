@@ -34,6 +34,7 @@ const TYPE_META: Record<
   relationship: { label: "人物关系", tone: "indigo" },
   foreshadowing: { label: "埋设/回收伏笔", tone: "emerald" },
   fact: { label: "剧情事实", tone: "default" },
+  constraint_check: { label: "约束检查", tone: "rose" },
 };
 
 export const PendingQueueSection: React.FC<PendingQueueSectionProps> = ({
@@ -119,6 +120,7 @@ export const PendingQueueSection: React.FC<PendingQueueSectionProps> = ({
             ["relationship", "人物关系"],
             ["foreshadowing", "伏笔"],
             ["fact", "事实"],
+            ["constraint_check", "约束检查"],
           ].map(([k, label]) => (
             <button
               key={k}

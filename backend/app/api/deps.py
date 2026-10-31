@@ -14,6 +14,7 @@ from app.db.repositories.outline_repo import OutlineRepository
 from app.db.repositories.settings_repo import SettingsRepository
 from app.db.repositories.writing_repo import WritingRepository
 from app.services.context.assembler import ContextAssembler
+from app.services.memory.consistency import ConsistencyReviewService
 from app.services.memory.finalizer import ChapterFinalizerService
 from app.services.rag.retriever import HybridRagRetriever
 from app.services.setting_generator import SettingGeneratorService
@@ -122,6 +123,18 @@ def get_chapter_finalizer(
             novel_uid=novel_uid,
             novel_conn=novel_conn,
             global_conn=global_conn,
+        )
+
+
+def get_consistency_service(
+    novel_uid: str = Path(..., description="Unique novel directory identifier"),
+) -> Iterator[ConsistencyReviewService]:
+    """Yield a ConsistencyReviewService connected to both novel.db and global.db."""
+    with get_novel_db(novel_uid) as novel_conn, get_global_db() as global_conn:
+        yield ConsistencyReviewService(
+            novel_uid=novel_uid,
+            novel_conn=novel_conn,
+            settings_repo=SettingsRepository(global_conn),
         )
 
 

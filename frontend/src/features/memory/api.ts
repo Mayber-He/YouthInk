@@ -1,6 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/http";
 import type {
+  ConsistencyReviewResponse,
+  ConsistencyReviewSummary,
   FinalizeChapterResponse,
   ForeshadowItem,
   ForeshadowStatus,
@@ -209,6 +211,27 @@ export function useRebuildMemoryIndex(novelUid: string) {
       apiRequest<{ chapters_reindexed: number; chunks_indexed: number }>(
         `/api/v1/novels/${novelUid}/memory/rebuild-index`,
         { method: "POST" }
+      ),
+  });
+}
+
+export function useRunConsistencyReview(novelUid: string, chapterId: number) {
+  return useMutation({
+    mutationFn: () =>
+      apiRequest<ConsistencyReviewResponse>(
+        `/api/v1/novels/${novelUid}/chapters/${chapterId}/consistency-review`,
+        { method: "POST" }
+      ),
+  });
+}
+
+export function useConsistencyReviews(novelUid: string | null, chapterId: number | null) {
+  return useQuery({
+    queryKey: ["consistency-reviews", novelUid, chapterId],
+    enabled: !!novelUid && !!chapterId,
+    queryFn: () =>
+      apiRequest<ConsistencyReviewSummary[]>(
+        `/api/v1/novels/${novelUid}/chapters/${chapterId}/consistency-reviews`
       ),
   });
 }

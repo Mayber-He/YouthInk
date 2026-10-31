@@ -6,7 +6,8 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 MemoryItemCategory = Literal[
-    "fact", "char_state", "cognitive", "relationship", "foreshadowing"
+    "fact", "char_state", "cognitive", "relationship", "foreshadowing",
+    "constraint_check",
 ]
 ConfirmStatus = Literal["pending", "confirmed", "locked", "discarded"]
 ForeshadowStatus = Literal["planted", "hinted", "recovered", "abandoned"]
@@ -150,9 +151,19 @@ class LlmExtractedForeshadow(BaseModel):
     source_quote: str = ""
 
 
+class LlmConstraintCheck(BaseModel):
+    """LLM verdict on one active constraint against the finalized chapter text."""
+
+    constraint_id: int
+    verdict: Literal["violated", "resolved"]
+    evidence_quote: str = ""
+    description: str = ""
+
+
 class LlmMemoryExtractionOutput(BaseModel):
     facts: list[LlmExtractedFact] = Field(default_factory=list)
     state_changes: list[LlmExtractedStateChange] = Field(default_factory=list)
     cognitive_records: list[LlmExtractedCognitive] = Field(default_factory=list)
     relationship_changes: list[LlmExtractedRelationship] = Field(default_factory=list)
     foreshadowing: list[LlmExtractedForeshadow] = Field(default_factory=list)
+    constraint_checks: list[LlmConstraintCheck] = Field(default_factory=list)

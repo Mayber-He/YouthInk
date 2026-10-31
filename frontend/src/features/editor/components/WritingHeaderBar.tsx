@@ -8,6 +8,7 @@ import {
   Play,
   Save,
   SearchCheck,
+  ShieldCheck,
   Square,
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
@@ -30,6 +31,7 @@ interface WritingHeaderBarProps {
   onWriteWholeChapter: () => void;
   onStopStream: () => void;
   onScanSmell: () => void;
+  onRunConsistencyReview: () => void;
   onOpenHistory: () => void;
   onSaveNewVersion: () => void;
 }
@@ -49,6 +51,7 @@ export const WritingHeaderBar: React.FC<WritingHeaderBarProps> = ({
   onWriteWholeChapter,
   onStopStream,
   onScanSmell,
+  onRunConsistencyReview,
   onOpenHistory,
   onSaveNewVersion,
 }) => {
@@ -94,6 +97,11 @@ export const WritingHeaderBar: React.FC<WritingHeaderBarProps> = ({
           <Button variant="outline" size="sm" onClick={onScanSmell}>
             <SearchCheck className="h-3.5 w-3.5" />
             AI 味检测
+          </Button>
+
+          <Button variant="outline" size="sm" onClick={onRunConsistencyReview}>
+            <ShieldCheck className="h-3.5 w-3.5" />
+            一致性审查
           </Button>
 
           <Button variant="outline" size="sm" onClick={onOpenHistory}>

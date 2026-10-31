@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.v1 import entities, memory, novels, outline, settings, stream, writing
 from app.api.v1 import constraints as constraints_router
+from app.api.v1 import consistency as consistency_router
 from app.core.config import get_config
 from app.core.exceptions import register_exception_handlers
 from app.db.manager import ensure_global_db_initialized
@@ -42,6 +43,7 @@ def create_app() -> FastAPI:
     app.include_router(writing.router, prefix="/api/v1")
     app.include_router(memory.router, prefix="/api/v1")
     app.include_router(constraints_router.router, prefix="/api/v1")
+    app.include_router(consistency_router.router, prefix="/api/v1")
     app.include_router(stream.router, prefix="/api")
 
     @app.get("/api/health", tags=["system"])

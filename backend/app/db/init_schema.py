@@ -337,6 +337,32 @@ CREATE TABLE IF NOT EXISTS generation_logs (
 
 CREATE INDEX IF NOT EXISTS idx_constraints_target ON constraints(target_type, target_id);
 CREATE INDEX IF NOT EXISTS idx_constraints_status ON constraints(status);
+
+CREATE TABLE IF NOT EXISTS constraint_checks (
+    id              INTEGER PRIMARY KEY,
+    constraint_id   INTEGER NOT NULL REFERENCES constraints(id) ON DELETE CASCADE,
+    chapter_id      INTEGER REFERENCES chapters(id) ON DELETE SET NULL,
+    verdict         TEXT    NOT NULL CHECK(verdict IN ('violated','resolved')),
+    evidence_quote  TEXT,
+    description     TEXT    NOT NULL,
+    confirm_status  TEXT    NOT NULL DEFAULT 'pending'
+                        CHECK(confirm_status IN ('pending','confirmed','discarded')),
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_constraint_checks_status ON constraint_checks(confirm_status);
+
+CREATE TABLE IF NOT EXISTS consistency_reviews (
+    id              INTEGER PRIMARY KEY,
+    chapter_id      INTEGER NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+    version_id      INTEGER REFERENCES chapter_versions(id) ON DELETE SET NULL,
+    summary         TEXT    NOT NULL DEFAULT '',
+    issue_count     INTEGER NOT NULL DEFAULT 0,
+    violation_count INTEGER NOT NULL DEFAULT 0,
+    issues_json     TEXT    NOT NULL DEFAULT '[]',
+    model           TEXT,
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_consistency_reviews_chapter ON consistency_reviews(chapter_id);
 CREATE INDEX IF NOT EXISTS idx_facts_status   ON facts(status);
 CREATE INDEX IF NOT EXISTS idx_facts_entities ON facts(entity_ids);
 CREATE INDEX IF NOT EXISTS idx_summaries_ref  ON summaries(level, ref_id);

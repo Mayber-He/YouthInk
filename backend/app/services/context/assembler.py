@@ -156,6 +156,7 @@ class ContextAssembler:
         )
         for con in active_constraints:
             sev = "硬约束" if con.severity == "hard" else "软约束"
+            violated_mark = "⚠️已确认违反" if con.status == "violated" else ""
             scope = {
                 "character": "人物",
                 "location": "地点",
@@ -164,7 +165,7 @@ class ContextAssembler:
                 "novel": "全书",
             }.get(con.target_type, con.target_type)
             name_part = f"「{con.target_name}」" if con.target_name else ""
-            constraint_lines.append(f"• 【{sev}·{scope}{name_part}】{con.content}")
+            constraint_lines.append(f"• 【{sev}{violated_mark}·{scope}{name_part}】{con.content}")
         if constraint_lines:
             constraint_lines.append(
                 "⚠️ 动笔前请先复述以上硬约束，写作全程不得违反；"

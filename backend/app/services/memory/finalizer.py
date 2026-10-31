@@ -7,6 +7,7 @@ import json
 import sqlite3
 
 from app.core.exceptions import AppError
+from app.db.repositories.constraint_repo import ConstraintRepository
 from app.db.repositories.entity_repo import EntityRepository
 from app.db.repositories.memory_repo import MemoryRepository
 from app.db.repositories.outline_repo import OutlineRepository
@@ -59,6 +60,7 @@ class ChapterFinalizerService:
         self.outline_repo = OutlineRepository(novel_conn)
         self.writing_repo = WritingRepository(novel_conn)
         self.entity_repo = EntityRepository(novel_conn)
+        self.constraint_repo = ConstraintRepository(novel_conn)
         self.memory_repo = MemoryRepository(novel_conn)
         self.vector_store = NovelVectorStore(novel_uid)
 
@@ -198,10 +200,37 @@ class ChapterFinalizerService:
         self, chapter_id: int, title: str, content: str
     ) -> LlmMemoryExtractionOutput:
         char_names = [c.name for c in self.entity_repo.list_characters()]
+        ch = self.outline_repo.get_chapter(chapter_id)
+        scenes = self.writing_repo.list_scenes(chapter_id)
+        char_ids = sorted(
+            {cid for s in scenes for cid in ([s.pov_character] if s.pov_character else []) + s.character_ids}
+        )
+        loc_ids = sorted({s.location_id for s in scenes if s.location_id})
+        active_constraints = self.constraint_repo.list_active_for_chapter(
+            chapter_id, ch.sort_order, char_ids, loc_ids
+        )
+        constraint_lines = "\n".join(
+            f"[#{c.id}] 【{'硬约束' if c.severity == 'hard' else '软约束'}"
+            f"·{c.target_type}{'「' + c.target_name + '」' if c.target_name else ''}】{c.content}"
+            for c in active_constraints
+        )
+        constraint_section = (
+            f"\n\n本章生效中的硬约束清单（必须逐条判定）：\n{constraint_lines}\n"
+            "对每条约束给出判定：ok（本章遵守或无关，不输出）；"
+            "violated（本章正文违反了该约束，必须附原文证据 evidence_quote）；"
+            "resolved（本章剧情表明该约束已自然解除，如人物已熟悉校园，必须附证据）。"
+            "只输出 violated / resolved 的条目。"
+            if constraint_lines
+            else ""
+        )
         prompt = (
             f"请从章节《{title}》正文中抽取结构化设定变更与记忆条目（每项必须含原文引用 source_quote）。\n"
             f"已知角色：{', '.join(char_names) or '无'}\n"
-            "输出 JSON (facts, state_changes, cognitive_records, relationship_changes, foreshadowing)。\n\n"
+            "输出 JSON (facts, state_changes, cognitive_records, relationship_changes, foreshadowing, constraint_checks)，"
+            "其中 constraint_checks 数组每项为 "
+            '{"constraint_id": 约束编号, "verdict": "violated|resolved", '
+            '"evidence_quote": "原文证据", "description": "判定说明"}。\n'
+            f"{constraint_section}\n\n"
             f"章节正文：\n{content[:5000]}"
         )
         try:
@@ -294,5 +323,23 @@ class ChapterFinalizerService:
             )
             auto_cnt += 1 if fs_st == "confirmed" else 0
             pend_cnt += 0 if fs_st == "confirmed" else 1
+
+        # Constraint violation/resolution verdicts always enter the pending queue:
+        # they are judgments about the text, never auto-confirmed.
+        for cc in extraction.constraint_checks:
+            if cc.verdict not in ("violated", "resolved"):
+                continue
+            try:
+                self.constraint_repo.create_constraint_check(
+                    constraint_id=cc.constraint_id,
+                    chapter_id=chapter_id,
+                    verdict=cc.verdict,
+                    evidence_quote=cc.evidence_quote,
+                    description=cc.description or f"约束 #{cc.constraint_id} 判定为 {cc.verdict}",
+                )
+                pend_cnt += 1
+            except AppError:
+                # Unknown constraint id (e.g. hallucinated by the model): skip silently.
+                continue
 
         return auto_cnt, pend_cnt

@@ -4,6 +4,9 @@ import { EmptyState } from "@/components/common/EmptyState";
 import { useOutlineTree } from "@/features/outline/api";
 import { useCharacters, useLocations } from "@/features/settings-entity/api";
 import { MemoryChapterPanel } from "@/features/memory/MemoryChapterPanel";
+import { ConsistencyReviewModal } from "@/features/memory/ConsistencyReviewModal";
+import { useRunConsistencyReview } from "@/features/memory/api";
+import type { ConsistencyReviewResponse } from "@/features/memory/types";
 import { useUiStore } from "@/stores/uiStore";
 import {
   useAiSmellScan,
@@ -51,6 +54,10 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
   const [autoSavedAt, setAutoSavedAt] = useState<string | null>(null);
   const [selectionRange, setSelectionRange] = useState({ start: 0, end: 0, text: "" });
   const [smellHits, setSmellHits] = useState<AiSmellHit[]>([]);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [reviewResult, setReviewResult] = useState<ConsistencyReviewResponse | null>(null);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const reviewMut = useRunConsistencyReview(novelUid, effectiveChapterId ?? 0);
   const isComposingRef = useRef(false);
 
   const { data: contextPreview, isLoading: isCtxLoading } = useContextPreview(
@@ -192,6 +199,18 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
             const res = await smellMut.mutateAsync(content);
             setSmellHits(res.hits);
           }}
+          onRunConsistencyReview={async () => {
+            if (!effectiveChapterId) return;
+            setReviewOpen(true);
+            setReviewResult(null);
+            setReviewError(null);
+            try {
+              const res = await reviewMut.mutateAsync();
+              setReviewResult(res);
+            } catch (e) {
+              setReviewError(e instanceof Error ? e.message : "审查请求失败");
+            }
+          }}
           onOpenHistory={() => setHistoryOpen(true)}
           onSaveNewVersion={() => saveMut.mutate({ content, source: "manual", create_new_version: true })}
         />
@@ -305,6 +324,13 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
         versions={workspace.versions}
         onRestore={(ver) => restoreMut.mutate(ver)}
         isRestoring={restoreMut.isPending}
+      />
+      <ConsistencyReviewModal
+        open={reviewOpen}
+        onClose={() => setReviewOpen(false)}
+        review={reviewResult}
+        running={reviewMut.isPending}
+        error={reviewError}
       />
     </div>
   );

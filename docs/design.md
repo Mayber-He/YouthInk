@@ -795,8 +795,8 @@ CREATE TRIGGER trg_scenes_upd AFTER UPDATE ON scenes
 - **写作注入**：上下文组装器新增 `hard_constraints` 区块（required 优先级），按章节时序筛选生效中的约束（全书通用 + 本章 + 出场人物/地点），硬约束置顶，并附"动笔前复述"自检指令。前端上下文预览可开关。
 - **生命周期**：约束可标记为已解除（剧情推进使其失效）或重新激活；人物卡重新生成时，旧人物绑定的约束一并清理。
 - **API**：`GET/POST /constraints`、`PUT/DELETE /constraints/{id}`、`GET /chapters/{id}/active-constraints`。
-
-（后续：抽取器增加"约束违反/解除"检测进待确认队列；v0.2 一致性审查以约束清单为检查表。）
+- **违反/解除检测（定稿时）**：抽取阶段，LLM 逐条判定本章生效中的约束，输出 `violated`（附原文证据）或 `resolved`（剧情显示约束已自然解除）；检测记录写入 `constraint_checks` 表，**一律进待确认队列**（不自动确认）。确认违反 → 约束状态置为 `violated`（规则对后续章节依然有效，prompt 中以 ⚠️ 标记）；确认解除 → 约束状态置为 `resolved` 并记录生效截止章节。
+- **一致性审查（Phase 3，按需）**：写作页"一致性审查"按钮，对本章最新版本跑独立审查员。检查表 = 生效约束（A）+ 已确认事实（B）+ 出场人物核心属性（C），逐项判定只输出 `violation`/`suspicious` 项，附证据与修改建议；**只标红、不自动改**。审查报告存 `consistency_reviews` 表，可回看历史。
 
 ---
 
