@@ -6,8 +6,10 @@ import json
 import sqlite3
 
 from app.core.exceptions import AppError
+from app.core.text_hash import text_sha256
 from app.db.repositories.constraint_repo import ConstraintRepository
 from app.db.repositories.entity_repo import EntityRepository
+from app.db.repositories.memory_repo import MemoryRepository
 from app.db.repositories.outline_repo import OutlineRepository
 from app.db.repositories.settings_repo import SettingsRepository
 from app.db.repositories.writing_repo import WritingRepository
@@ -42,7 +44,8 @@ class ConsistencyReviewService:
         ch = self._outline_repo.get_chapter(chapter_id)
         versions = self._writing_repo.list_versions(chapter_id)
         latest = versions[0] if versions else None
-        content = latest.content.strip() if latest else ""
+        raw_content = latest.content if latest else ""
+        content = raw_content.strip()
         if not content:
             raise AppError("EMPTY_CHAPTER_CONTENT", "章节正文为空，无法执行一致性审查。", 400)
 
@@ -62,6 +65,12 @@ class ConsistencyReviewService:
             timeout_sec=90.0,
         )
         parsed = await parse_and_validate_json(res.content, LlmConsistencyOutput)
+        content_hash = text_sha256(raw_content)
+        upstream_rows = self._conn.execute(
+            "SELECT id, content_hash, continuity_review_required FROM chapters WHERE sort_order < ? ORDER BY sort_order, id",
+            (ch.sort_order,),
+        ).fetchall()
+        upstream_hash = text_sha256("|".join(f"{r['id']}:{r['content_hash'] or ''}:{r['continuity_review_required']}" for r in upstream_rows))
         issues = [i for i in parsed.issues if i.verdict in ("violation", "suspicious")]
         violation_count = sum(1 for i in issues if i.verdict == "violation")
         suspicious_count = len(issues) - violation_count
@@ -78,12 +87,14 @@ class ConsistencyReviewService:
         cur = self._conn.execute(
             """
             INSERT INTO consistency_reviews (
-                chapter_id, version_id, summary, issue_count, violation_count, issues_json, model
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                chapter_id, version_id, content_hash, upstream_hash, summary, issue_count, violation_count, issues_json, model
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 chapter_id,
                 latest.id if latest else None,
+                content_hash,
+                upstream_hash,
                 summary,
                 len(issues),
                 violation_count,
@@ -91,8 +102,47 @@ class ConsistencyReviewService:
                 model,
             ),
         )
+        if not issues:
+            prior_dirty = self._conn.execute(
+                "SELECT 1 FROM chapters WHERE sort_order < ? AND continuity_review_required = 1 LIMIT 1",
+                (ch.sort_order,),
+            ).fetchone()
+            current = self._conn.execute("SELECT continuity_review_required FROM chapters WHERE id = ?", (chapter_id,)).fetchone()
+            if current and current[0] and not prior_dirty:
+                self._conn.execute(
+                    "UPDATE chapters SET continuity_review_required = 0, continuity_dirty_from_chapter_id = NULL WHERE id = ? AND content_hash = ?",
+                    (chapter_id, content_hash),
+                )
+                self._refresh_arc_summary(chapter_id)
         self._conn.commit()
         return self.get_review(int(cur.lastrowid or 0))
+
+    def _refresh_arc_summary(self, chapter_id: int) -> None:
+        arc = self._conn.execute("SELECT arc_id FROM chapters WHERE id = ?", (chapter_id,)).fetchone()
+        if arc is None:
+            return
+        arc_id = int(arc[0])
+        pending = self._conn.execute(
+            "SELECT 1 FROM chapters WHERE arc_id = ? AND continuity_review_required = 1 LIMIT 1",
+            (arc_id,),
+        ).fetchone()
+        if pending:
+            return
+        rows = self._conn.execute(
+            "SELECT s.content, c.title FROM summaries s JOIN chapters c ON c.id = s.ref_id "
+            "WHERE s.level = 'chapter' AND c.arc_id = ? AND s.is_stale = 0 "
+            "AND s.source_hash = c.content_hash AND c.status = 'final' ORDER BY c.sort_order",
+            (arc_id,),
+        ).fetchall()
+        if rows:
+            merged = "；".join(f"《{r['title']}》：{r['content'][:100]}" for r in rows)
+            self._conn.execute(
+                "UPDATE summaries SET is_stale = 0 WHERE level = 'arc' AND ref_id = ?",
+                (arc_id,),
+            )
+            MemoryRepository(self._conn).upsert_summary(
+                "arc", arc_id, merged[:800], is_stale=False
+            )
 
     def get_review(self, review_id: int) -> ConsistencyReviewResponse:
         row = self._conn.execute(
@@ -110,6 +160,7 @@ class ConsistencyReviewService:
             issues=[ConsistencyIssue(**d) for d in json.loads(row["issues_json"] or "[]")],
             model=str(row["model"] or ""),
             created_at=str(row["created_at"]),
+            is_stale=self._review_is_stale(row),
         )
 
     def list_reviews(self, chapter_id: int) -> list[ConsistencyReviewSummary]:
@@ -125,9 +176,27 @@ class ConsistencyReviewService:
                 issue_count=int(r["issue_count"]),
                 violation_count=int(r["violation_count"]),
                 created_at=str(r["created_at"]),
+                is_stale=self._review_is_stale(r),
             )
             for r in rows
         ]
+
+    def _review_is_stale(self, review_row: sqlite3.Row) -> bool:
+        chapter = self._conn.execute(
+            "SELECT sort_order, content_hash FROM chapters WHERE id = ?",
+            (int(review_row["chapter_id"]),),
+        ).fetchone()
+        if chapter is None or not review_row["content_hash"] or not review_row["upstream_hash"]:
+            return True
+        upstream_rows = self._conn.execute(
+            "SELECT id, content_hash, continuity_review_required FROM chapters WHERE sort_order < ? ORDER BY sort_order, id",
+            (float(chapter["sort_order"]),),
+        ).fetchall()
+        upstream_hash = text_sha256("|".join(f"{r['id']}:{r['content_hash'] or ''}:{r['continuity_review_required']}" for r in upstream_rows))
+        return (
+            str(review_row["content_hash"]) != str(chapter["content_hash"] or "")
+            or str(review_row["upstream_hash"]) != upstream_hash
+        )
 
     def _build_checklist(self, chapter_id: int, sort_order: float) -> str:
         ch = self._outline_repo.get_chapter(chapter_id)
@@ -168,7 +237,9 @@ class ConsistencyReviewService:
             SELECT f.id, f.content FROM facts f
             LEFT JOIN chapters c ON c.id = f.chapter_id
             WHERE f.status IN ('confirmed', 'locked')
+              AND f.is_stale = 0
               AND (c.sort_order IS NULL OR c.sort_order <= ?)
+              AND (c.id IS NULL OR (f.origin = 'manual' OR (f.source_hash = c.content_hash AND c.status = 'final' AND c.continuity_review_required = 0)))
             ORDER BY f.id DESC LIMIT 15
             """,
             (sort_order,),

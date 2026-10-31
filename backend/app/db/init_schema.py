@@ -6,6 +6,7 @@ import json
 import sqlite3
 
 from app.builtin.style_presets import BUILTIN_STYLE_TEMPLATES
+from app.core.text_hash import text_sha256
 
 GLOBAL_DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS llm_profiles (
@@ -109,6 +110,9 @@ CREATE TABLE IF NOT EXISTS chapters (
     status          TEXT    NOT NULL DEFAULT 'pending'
                         CHECK(status IN ('pending','outline','draft','final')),
     word_count      INTEGER DEFAULT 0,
+    content_hash    TEXT,
+    continuity_review_required INTEGER NOT NULL DEFAULT 0,
+    continuity_dirty_from_chapter_id INTEGER,
     story_time      TEXT,
     locked          INTEGER NOT NULL DEFAULT 0,
     created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
@@ -202,6 +206,9 @@ CREATE TABLE IF NOT EXISTS character_state_changes (
                         CHECK(field IN ('location','body','emotion','goal',
                                         'identity','item','appearance')),
     value           TEXT    NOT NULL,
+    source_hash     TEXT,
+    origin          TEXT    NOT NULL DEFAULT 'legacy',
+    is_stale        INTEGER NOT NULL DEFAULT 0,
     source_quote    TEXT,
     confirm_status  TEXT    NOT NULL DEFAULT 'pending'
                         CHECK(confirm_status IN ('pending','confirmed','discarded')),
@@ -215,6 +222,9 @@ CREATE TABLE IF NOT EXISTS cognitive_records (
     knower_ids      TEXT    NOT NULL,
     chapter_id      INTEGER REFERENCES chapters(id) ON DELETE CASCADE,
     learned_by      TEXT,
+    source_hash     TEXT,
+    origin          TEXT    NOT NULL DEFAULT 'legacy',
+    is_stale        INTEGER NOT NULL DEFAULT 0,
     source_quote    TEXT,
     confirm_status  TEXT    NOT NULL DEFAULT 'pending'
                         CHECK(confirm_status IN ('pending','confirmed','discarded')),
@@ -231,6 +241,9 @@ CREATE TABLE IF NOT EXISTS relationship_changes (
     intimacy        INTEGER,
     publicity       TEXT    CHECK(publicity IN ('public','mutual','one_sided')),
     change_reason   TEXT,
+    source_hash     TEXT,
+    origin          TEXT    NOT NULL DEFAULT 'legacy',
+    is_stale        INTEGER NOT NULL DEFAULT 0,
     source_quote    TEXT,
     confirm_status  TEXT    NOT NULL DEFAULT 'pending'
                         CHECK(confirm_status IN ('pending','confirmed','discarded')),
@@ -256,6 +269,9 @@ CREATE TABLE IF NOT EXISTS foreshadowing (
                             CHECK(status IN ('planted','hinted','recovered','abandoned')),
     related_chapter_ids TEXT,
     source_quote        TEXT,
+    source_hash         TEXT,
+    origin              TEXT    NOT NULL DEFAULT 'legacy',
+    is_stale            INTEGER NOT NULL DEFAULT 0,
     confirm_status      TEXT    NOT NULL DEFAULT 'pending'
                             CHECK(confirm_status IN ('pending','confirmed','discarded')),
     created_at          TEXT    NOT NULL DEFAULT (datetime('now')),
@@ -270,6 +286,9 @@ CREATE TABLE IF NOT EXISTS facts (
     chapter_id      INTEGER REFERENCES chapters(id) ON DELETE CASCADE,
     scene_id        INTEGER REFERENCES scenes(id) ON DELETE SET NULL,
     source_quote    TEXT,
+    source_hash     TEXT,
+    origin          TEXT    NOT NULL DEFAULT 'legacy',
+    is_stale        INTEGER NOT NULL DEFAULT 0,
     status          TEXT    NOT NULL DEFAULT 'pending'
                         CHECK(status IN ('pending','confirmed','locked','discarded')),
     created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
@@ -306,6 +325,7 @@ CREATE TABLE IF NOT EXISTS summaries (
     level       TEXT    NOT NULL CHECK(level IN ('chapter','arc','volume','novel')),
     ref_id      INTEGER NOT NULL,
     content     TEXT    NOT NULL,
+    source_hash TEXT,
     is_stale    INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
     updated_at  TEXT    NOT NULL DEFAULT (datetime('now')),
@@ -345,6 +365,9 @@ CREATE TABLE IF NOT EXISTS constraint_checks (
     verdict         TEXT    NOT NULL CHECK(verdict IN ('violated','resolved')),
     evidence_quote  TEXT,
     description     TEXT    NOT NULL,
+    source_hash     TEXT,
+    origin          TEXT    NOT NULL DEFAULT 'legacy',
+    is_stale        INTEGER NOT NULL DEFAULT 0,
     confirm_status  TEXT    NOT NULL DEFAULT 'pending'
                         CHECK(confirm_status IN ('pending','confirmed','discarded')),
     created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
@@ -355,6 +378,8 @@ CREATE TABLE IF NOT EXISTS consistency_reviews (
     id              INTEGER PRIMARY KEY,
     chapter_id      INTEGER NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
     version_id      INTEGER REFERENCES chapter_versions(id) ON DELETE SET NULL,
+    content_hash    TEXT,
+    upstream_hash   TEXT,
     summary         TEXT    NOT NULL DEFAULT '',
     issue_count     INTEGER NOT NULL DEFAULT 0,
     violation_count INTEGER NOT NULL DEFAULT 0,
@@ -433,3 +458,120 @@ def init_global_db(conn: sqlite3.Connection) -> None:
 def init_novel_db(conn: sqlite3.Connection) -> None:
     """Create all tables, FTS5 virtual tables, indexes, and triggers in a novel.db."""
     conn.executescript(NOVEL_DB_SCHEMA)
+    _migrate_novel_memory_revision_columns(conn)
+
+
+def _migrate_novel_memory_revision_columns(conn: sqlite3.Connection) -> None:
+    columns: dict[str, dict[str, str]] = {
+        "chapters": {
+            "content_hash": "TEXT",
+            "continuity_review_required": "INTEGER NOT NULL DEFAULT 0",
+            "continuity_dirty_from_chapter_id": "INTEGER",
+        },
+        "summaries": {"source_hash": "TEXT"},
+        "facts": {
+            "source_hash": "TEXT",
+            "origin": "TEXT NOT NULL DEFAULT 'legacy'",
+            "is_stale": "INTEGER NOT NULL DEFAULT 0",
+        },
+        "character_state_changes": {
+            "source_hash": "TEXT",
+            "origin": "TEXT NOT NULL DEFAULT 'legacy'",
+            "is_stale": "INTEGER NOT NULL DEFAULT 0",
+        },
+        "cognitive_records": {
+            "source_hash": "TEXT",
+            "origin": "TEXT NOT NULL DEFAULT 'legacy'",
+            "is_stale": "INTEGER NOT NULL DEFAULT 0",
+        },
+        "relationship_changes": {
+            "source_hash": "TEXT",
+            "origin": "TEXT NOT NULL DEFAULT 'legacy'",
+            "is_stale": "INTEGER NOT NULL DEFAULT 0",
+        },
+        "foreshadowing": {
+            "source_hash": "TEXT",
+            "origin": "TEXT NOT NULL DEFAULT 'legacy'",
+            "is_stale": "INTEGER NOT NULL DEFAULT 0",
+        },
+        "constraint_checks": {
+            "source_hash": "TEXT",
+            "origin": "TEXT NOT NULL DEFAULT 'legacy'",
+            "is_stale": "INTEGER NOT NULL DEFAULT 0",
+        },
+        "consistency_reviews": {"content_hash": "TEXT", "upstream_hash": "TEXT"},
+    }
+    for table, table_columns in columns.items():
+        existing = {str(row[1]) for row in conn.execute(f'PRAGMA table_info("{table}")')}
+        for column, declaration in table_columns.items():
+            if column not in existing:
+                conn.execute(
+                    f'ALTER TABLE "{table}" ADD COLUMN "{column}" {declaration}'
+                )
+
+    with conn:
+        chapters = conn.execute(
+            "SELECT id, status FROM chapters WHERE content_hash IS NULL"
+        ).fetchall()
+        for chapter in chapters:
+            latest = conn.execute(
+                "SELECT content FROM chapter_versions WHERE chapter_id = ? "
+                "ORDER BY version DESC LIMIT 1",
+                (int(chapter["id"]),),
+            ).fetchone()
+            content = str(latest["content"] or "") if latest else ""
+            if content:
+                conn.execute(
+                    "UPDATE chapters SET content_hash = ? WHERE id = ?",
+                    (text_sha256(content), int(chapter["id"])),
+                )
+
+        conn.execute(
+            "UPDATE summaries SET is_stale = 1 WHERE level = 'chapter' AND source_hash IS NULL"
+        )
+
+        artifact_specs = (
+            ("facts", "chapter_id", "source_quote"),
+            ("character_state_changes", "chapter_id", "source_quote"),
+            ("cognitive_records", "chapter_id", "source_quote"),
+            ("relationship_changes", "chapter_id", "source_quote"),
+            ("foreshadowing", "planted_chapter_id", "source_quote"),
+            ("constraint_checks", "chapter_id", "evidence_quote"),
+        )
+        for table, chapter_column, quote_column in artifact_specs:
+            rows = conn.execute(
+                f"SELECT id, \"{chapter_column}\" AS chapter_id, \"{quote_column}\" AS source_quote "
+                f"FROM \"{table}\" WHERE source_hash IS NULL AND is_stale = 0"
+            ).fetchall()
+            for row in rows:
+                chapter_id = row["chapter_id"]
+                if chapter_id is None:
+                    conn.execute(
+                        f"UPDATE \"{table}\" SET origin = 'manual' WHERE id = ?",
+                        (int(row["id"]),),
+                    )
+                    continue
+                chapter = conn.execute(
+                    "SELECT c.status, c.content_hash, cv.content FROM chapters c "
+                    "LEFT JOIN chapter_versions cv ON cv.id = ("
+                    "SELECT v.id FROM chapter_versions v WHERE v.chapter_id = c.id "
+                    "ORDER BY v.version DESC, v.id DESC LIMIT 1) "
+                    "WHERE c.id = ?",
+                    (int(chapter_id),),
+                ).fetchone()
+                quote = str(row["source_quote"] or "").strip()
+                if (
+                    chapter
+                    and chapter["status"] == "final"
+                    and quote
+                    and quote in str(chapter["content"] or "")
+                ):
+                    conn.execute(
+                        f"UPDATE \"{table}\" SET source_hash = ?, origin = 'extracted' WHERE id = ?",
+                        (str(chapter["content_hash"]), int(row["id"])),
+                    )
+                else:
+                    conn.execute(
+                        f"UPDATE \"{table}\" SET origin = 'legacy', is_stale = 1 WHERE id = ?",
+                        (int(row["id"]),),
+                    )

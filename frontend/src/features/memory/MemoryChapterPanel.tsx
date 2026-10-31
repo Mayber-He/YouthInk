@@ -14,6 +14,7 @@ interface MemoryChapterPanelProps {
   novelUid: string;
   chapterId: number;
   chapterStatus: string;
+  continuityReviewRequired: boolean;
 }
 
 const CATEGORY_LABEL: Record<string, string> = {
@@ -28,6 +29,7 @@ export const MemoryChapterPanel: React.FC<MemoryChapterPanelProps> = ({
   novelUid,
   chapterId,
   chapterStatus,
+  continuityReviewRequired,
 }) => {
   const finalizeMut = useFinalizeChapter(novelUid, chapterId);
   const { data: summaries = [] } = useSummaries(novelUid, "chapter");
@@ -96,6 +98,12 @@ export const MemoryChapterPanel: React.FC<MemoryChapterPanelProps> = ({
         )}
       </div>
 
+      {continuityReviewRequired && (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
+          本章或前文正文有修改，后续上下文记忆暂不参与生成。请按章节顺序完成定稿和逻辑一致性复核；正文不会被自动改写。
+        </div>
+      )}
+
       {/* 本章摘要 */}
       <div className="rounded-xl border border-slate-200 p-3 dark:border-slate-800">
         <div className="flex items-center justify-between">
@@ -139,6 +147,9 @@ export const MemoryChapterPanel: React.FC<MemoryChapterPanelProps> = ({
                 <Badge tone="indigo">
                   {CATEGORY_LABEL[item.item_type] ?? item.item_type}
                 </Badge>
+                {Boolean(item.raw_payload.is_stale) && (
+                  <Badge tone="amber">来源正文已修改</Badge>
+                )}
                 <div className="flex items-center gap-1">
                   <button
                     type="button"

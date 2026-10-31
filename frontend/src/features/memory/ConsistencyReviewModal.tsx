@@ -165,6 +165,11 @@ export const ConsistencyReviewModal: React.FC<Props> = ({
             {review.model} · {review.created_at}
           </span>
         </div>
+        {review.is_stale && (
+          <p className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950/30 dark:text-amber-200">
+            本次审查之后章节正文或前文发生过修改，审查结果已过期，请重新审查。
+          </p>
+        )}
         {review.issue_count === 0 ? (
           <p className="text-xs text-slate-500 dark:text-slate-400">
             本次审查覆盖了生效中的约束清单、已确认事实、出场人物核心属性及情境常理逻辑（环境熟悉度、人际初见边界、限知视角边界、时空物理连续性、在场状态），未发现冲突。

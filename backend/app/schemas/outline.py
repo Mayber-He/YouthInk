@@ -98,6 +98,7 @@ class ChapterResponse(BaseModel):
     word_count: int
     story_time: str
     locked: bool
+    continuity_review_required: bool = False
     created_at: str
     updated_at: str
 

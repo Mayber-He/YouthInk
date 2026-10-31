@@ -8,6 +8,7 @@ import sqlite3
 from typing import Literal
 
 from app.core.exceptions import AppError
+from app.core.text_hash import text_sha256
 from app.db.repositories.outline_repo import OutlineRepository
 from app.schemas.writing import (
     ChapterVersionResponse,
@@ -153,6 +154,8 @@ class WritingRepository:
             "SELECT * FROM chapter_versions WHERE chapter_id = ? ORDER BY version DESC LIMIT 1",
             (chapter_id,),
         ).fetchone()
+        content_changed = latest_row is None or str(latest_row["content"]) != content
+        content_hash = text_sha256(content)
 
         if latest_row is None or create_new_version or latest_row["source"] != source:
             next_ver = (int(latest_row["version"]) + 1) if latest_row else 1
@@ -177,19 +180,57 @@ class WritingRepository:
         next_status = ch.status
         if words > 0 and ch.status in ("pending", "outline"):
             next_status = "draft"
-        elif ch.status == "final":
-            # Modifying a finalized chapter marks its summary stale (Design Doc 5.6)
+        elif ch.status == "final" and content_changed:
             next_status = "draft"
-            self._conn.execute(
-                "UPDATE summaries SET is_stale = 1 WHERE level = 'chapter' AND ref_id = ?",
-                (chapter_id,),
-            )
+
+        if content_changed:
+            self._invalidate_chapter_memory(chapter_id, ch.sort_order, ch.arc_id)
 
         self._conn.execute(
-            "UPDATE chapters SET word_count = ?, status = ? WHERE id = ?",
-            (words, next_status, chapter_id),
+            "UPDATE chapters SET word_count = ?, status = ?, content_hash = ? WHERE id = ?",
+            (words, next_status, content_hash, chapter_id),
         )
         return self.get_chapter_workspace(chapter_id)
+
+    def _invalidate_chapter_memory(
+        self, chapter_id: int, sort_order: float, arc_id: int
+    ) -> None:
+        prior_dirty = self._conn.execute(
+            "SELECT continuity_dirty_from_chapter_id FROM chapters "
+            "WHERE sort_order <= ? AND continuity_review_required = 1 "
+            "ORDER BY sort_order, id LIMIT 1",
+            (sort_order,),
+        ).fetchone()
+        dirty_from_id = int(prior_dirty[0]) if prior_dirty and prior_dirty[0] else chapter_id
+        self._conn.execute(
+            """UPDATE chapters SET continuity_review_required = 1,
+                   continuity_dirty_from_chapter_id = ?
+               WHERE sort_order >= ? AND (word_count > 0 OR status = 'final')""",
+            (dirty_from_id, sort_order),
+        )
+        volume = self._conn.execute(
+            "SELECT volume_id FROM arcs WHERE id = ?", (arc_id,)
+        ).fetchone()
+        self._conn.execute(
+            """UPDATE summaries SET is_stale = 1
+               WHERE (level = 'chapter' AND ref_id = ?)
+                  OR (level = 'arc' AND ref_id = ?)
+                  OR (level = 'volume' AND ref_id = ?)
+                  OR level = 'novel'""",
+            (chapter_id, arc_id, int(volume[0]) if volume else -1),
+        )
+        for table, chapter_column in (
+            ("facts", "chapter_id"),
+            ("character_state_changes", "chapter_id"),
+            ("cognitive_records", "chapter_id"),
+            ("relationship_changes", "chapter_id"),
+            ("foreshadowing", "planted_chapter_id"),
+            ("constraint_checks", "chapter_id"),
+        ):
+            self._conn.execute(
+                f"UPDATE {table} SET is_stale = 1 WHERE {chapter_column} = ? AND origin != 'manual'",
+                (chapter_id,),
+            )
 
     def restore_chapter_version(
         self, chapter_id: int, version_num: int

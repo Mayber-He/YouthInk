@@ -42,6 +42,7 @@ class MemoryRepository:
         self.conn = conn
 
     def index_chapter_version_fts(self, version_id: int, content: str) -> None:
+        self.conn.execute("DELETE FROM chapters_fts WHERE rowid = ?", (version_id,))
         segmented = tokenize_for_fts(content)
         if segmented:
             self.conn.execute(
@@ -50,6 +51,7 @@ class MemoryRepository:
             )
 
     def index_fact_fts(self, fact_id: int, content: str) -> None:
+        self.conn.execute("DELETE FROM facts_fts WHERE rowid = ?", (fact_id,))
         segmented = tokenize_for_fts(content)
         if segmented:
             self.conn.execute(
@@ -72,6 +74,7 @@ class MemoryRepository:
             JOIN chapter_versions cv ON cv.id = fts.rowid
             JOIN chapters c ON c.id = cv.chapter_id
             WHERE c.status = 'final'
+              AND c.continuity_review_required = 0
               AND cv.version = (
                   SELECT MAX(v2.version) FROM chapter_versions v2 WHERE v2.chapter_id = c.id
               )
@@ -85,16 +88,22 @@ class MemoryRepository:
         return [dict(r) for r in self.conn.execute(sql, tuple(params)).fetchall()]
 
     def upsert_summary(
-        self, level: SummaryLevel, ref_id: int, content: str, is_stale: bool = False
+        self,
+        level: SummaryLevel,
+        ref_id: int,
+        content: str,
+        is_stale: bool = False,
+        source_hash: str | None = None,
     ) -> SummaryResponse:
         self.conn.execute(
             """
-            INSERT INTO summaries (level, ref_id, content, is_stale, updated_at)
-            VALUES (?, ?, ?, ?, datetime('now'))
+            INSERT INTO summaries (level, ref_id, content, source_hash, is_stale, updated_at)
+            VALUES (?, ?, ?, ?, ?, datetime('now'))
             ON CONFLICT(level, ref_id) DO UPDATE SET
-                content = excluded.content, is_stale = excluded.is_stale, updated_at = datetime('now')
+                content = excluded.content, source_hash = excluded.source_hash,
+                is_stale = excluded.is_stale, updated_at = datetime('now')
             """,
-            (level, ref_id, content, 1 if is_stale else 0),
+            (level, ref_id, content, source_hash, 1 if is_stale else 0),
         )
         row = self.conn.execute(
             "SELECT * FROM summaries WHERE level = ? AND ref_id = ?", (level, ref_id)
@@ -124,8 +133,8 @@ class MemoryRepository:
             """
             INSERT INTO foreshadowing (
                 description, planted_chapter_id, plan_recover_start, plan_recover_end,
-                status, related_chapter_ids, source_quote, confirm_status
-            ) VALUES (?, ?, ?, ?, ?, '[]', ?, ?)
+                status, related_chapter_ids, source_quote, confirm_status, origin, is_stale
+            ) VALUES (?, ?, ?, ?, ?, '[]', ?, ?, 'manual', 0)
             """,
             (
                 data.description,
@@ -158,7 +167,11 @@ class MemoryRepository:
             """
             UPDATE foreshadowing
             SET description = ?, plan_recover_start = ?, plan_recover_end = ?,
-                status = ?, confirm_status = ?, updated_at = datetime('now')
+                status = ?, confirm_status = ?,
+                origin = CASE WHEN ? THEN 'manual' ELSE origin END,
+                source_hash = CASE WHEN ? THEN NULL ELSE source_hash END,
+                is_stale = CASE WHEN ? THEN 0 ELSE is_stale END,
+                updated_at = datetime('now')
             WHERE id = ?
             """,
             (
@@ -167,6 +180,9 @@ class MemoryRepository:
                 data.plan_recover_end if data.plan_recover_end is not None else cur.plan_recover_end,
                 data.status if data.status is not None else cur.status,
                 data.confirm_status if data.confirm_status is not None else cur.confirm_status,
+                data.description is not None and data.description != cur.description,
+                data.description is not None and data.description != cur.description,
+                data.description is not None and data.description != cur.description,
                 fid,
             ),
         )
@@ -260,13 +276,20 @@ class MemoryRepository:
         tbl, st_col, txt_col = table_map[item_type]
         if req.updated_text:
             self.conn.execute(
-                f"UPDATE {tbl} SET {txt_col} = ?, {st_col} = ? WHERE id = ?",
+                f"UPDATE {tbl} SET {txt_col} = ?, {st_col} = ?, origin = 'manual', "
+                f"source_hash = NULL, is_stale = 0 WHERE id = ?",
                 (req.updated_text, target, item_id),
             )
         else:
-            self.conn.execute(
-                f"UPDATE {tbl} SET {st_col} = ? WHERE id = ?", (target, item_id)
-            )
+            if req.action == "confirm":
+                self.conn.execute(
+                    f"UPDATE {tbl} SET {st_col} = ?, origin = 'manual', source_hash = NULL, is_stale = 0 WHERE id = ?",
+                    (target, item_id),
+                )
+            else:
+                self.conn.execute(
+                    f"UPDATE {tbl} SET {st_col} = ? WHERE id = ?", (target, item_id)
+                )
         if item_type == "fact" and target == "confirmed":
             row = self.conn.execute("SELECT content FROM facts WHERE id = ?", (item_id,)).fetchone()
             if row:

@@ -555,6 +555,7 @@ class OutlineRepository:
             word_count=int(row["word_count"] or 0),
             story_time=str(row["story_time"] or ""),
             locked=bool(row["locked"]),
+            continuity_review_required=bool(row["continuity_review_required"]),
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
         )

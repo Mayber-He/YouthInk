@@ -7,6 +7,7 @@ import json
 import sqlite3
 
 from app.core.exceptions import AppError
+from app.core.text_hash import text_sha256
 from app.db.repositories.constraint_repo import ConstraintRepository
 from app.db.repositories.entity_repo import EntityRepository
 from app.db.repositories.memory_repo import MemoryRepository
@@ -68,31 +69,34 @@ class ChapterFinalizerService:
         ch = self.outline_repo.get_chapter(chapter_id)
         versions = self.writing_repo.list_versions(chapter_id)
         latest_ver = versions[0] if versions else None
-        content = latest_ver.content.strip() if latest_ver else ""
+        raw_content = latest_ver.content if latest_ver else ""
+        content = raw_content.strip()
         if not content:
             raise AppError("EMPTY_CHAPTER_CONTENT", "章节正文为空，无法执行定稿入库。", 400)
 
+        source_hash = text_sha256(raw_content)
         backup_info = create_novel_backup(self.novel_uid, reason=f"finalize_ch_{chapter_id}")
         chunks_count = await self._index_chapter_chunks_and_fts(
             chapter_id=chapter_id,
             chapter_sort_order=ch.sort_order,
             story_time=ch.story_time or "",
             version_id=latest_ver.id if latest_ver else chapter_id,
-            content=content,
+            content=raw_content,
+            source_hash=source_hash,
         )
         self.conn.commit()
 
         summary_text = await self._generate_chapter_summary(chapter_id, ch.title, content)
-        self.memory_repo.upsert_summary("chapter", chapter_id, summary_text, is_stale=False)
-        self._rollup_arc_summary(ch.arc_id)
+        self.memory_repo.upsert_summary("chapter", chapter_id, summary_text, is_stale=False, source_hash=source_hash)
+        self.conn.execute("UPDATE chapters SET status = 'final', content_hash = ?, continuity_review_required = 1 WHERE id = ?", (source_hash, chapter_id))
         self.conn.commit()
 
         extraction = await self._extract_chapter_memories(chapter_id, ch.title, content)
-        auto_confirmed, pending_cnt = self._persist_extracted_memories(chapter_id, extraction)
+        auto_confirmed, pending_cnt = self._persist_extracted_memories(chapter_id, extraction, source_hash)
 
         self.conn.execute(
-            "UPDATE chapters SET status = 'final', updated_at = datetime('now') WHERE id = ?",
-            (chapter_id,),
+            "UPDATE chapters SET status = 'final', content_hash = ?, updated_at = datetime('now') WHERE id = ?",
+            (source_hash, chapter_id),
         )
         return FinalizeChapterResponse(
             chapter_id=chapter_id,
@@ -113,7 +117,7 @@ class ChapterFinalizerService:
         self.vector_store.clear_all_vectors()
         emb_model = self._current_embedding_model_id()
         rows = self.conn.execute(
-            "SELECT id, sort_order, story_time FROM chapters WHERE status = 'final' ORDER BY sort_order ASC"
+            "SELECT id, sort_order, story_time, content_hash FROM chapters WHERE status = 'final' AND continuity_review_required = 0 ORDER BY sort_order ASC"
         ).fetchall()
         total_chunks = 0
         for r in rows:
@@ -122,7 +126,7 @@ class ChapterFinalizerService:
             ver = versions[0] if versions else None
             if ver and ver.content.strip():
                 total_chunks += await self._index_chapter_chunks_and_fts(
-                    cid, float(r["sort_order"]), str(r["story_time"] or ""), ver.id, ver.content, emb_model
+                    cid, float(r["sort_order"]), str(r["story_time"] or ""), ver.id, ver.content, emb_model, text_sha256(ver.content)
                 )
         return {"chapters_reindexed": len(rows), "chunks_indexed": total_chunks}
 
@@ -134,8 +138,10 @@ class ChapterFinalizerService:
         version_id: int,
         content: str,
         model_id: str | None = None,
+        source_hash: str | None = None,
     ) -> int:
         emb_model = model_id or self._current_embedding_model_id()
+        source_hash = source_hash or text_sha256(content)
         scenes = self.writing_repo.list_scenes(chapter_id)
         char_ids = sorted(
             {cid for s in scenes for cid in ([s.pov_character] if s.pov_character else []) + s.character_ids}
@@ -157,6 +163,7 @@ class ChapterFinalizerService:
                     embedding_model_id=emb_model,
                     text=piece,
                     vector=vec,
+                    source_hash=source_hash,
                 )
             )
         self.vector_store.upsert_chapter_chunks(chapter_id, records)
@@ -182,19 +189,6 @@ class ChapterFinalizerService:
         except Exception:
             pass
         return f"【《{title}》章节摘要】" + content[:240].replace("\n", " ")
-
-    def _rollup_arc_summary(self, arc_id: int) -> None:
-        rows = self.conn.execute(
-            """
-            SELECT s.content, c.title FROM summaries s
-            JOIN chapters c ON s.level = 'chapter' AND s.ref_id = c.id
-            WHERE c.arc_id = ? ORDER BY c.sort_order ASC
-            """,
-            (arc_id,),
-        ).fetchall()
-        if rows:
-            merged = "；".join(f"《{r['title']}》：{r['content'][:100]}" for r in rows)
-            self.memory_repo.upsert_summary("arc", arc_id, merged[:800], is_stale=False)
 
     async def _extract_chapter_memories(
         self, chapter_id: int, title: str, content: str
@@ -261,8 +255,10 @@ class ChapterFinalizerService:
             )
 
     def _persist_extracted_memories(
-        self, chapter_id: int, extraction: LlmMemoryExtractionOutput
+        self, chapter_id: int, extraction: LlmMemoryExtractionOutput, source_hash: str
     ) -> tuple[int, int]:
+        for table, column in (("facts", "chapter_id"), ("character_state_changes", "chapter_id"), ("cognitive_records", "chapter_id"), ("relationship_changes", "chapter_id"), ("foreshadowing", "planted_chapter_id"), ("constraint_checks", "chapter_id")):
+            self.conn.execute(f"UPDATE {table} SET is_stale = 1 WHERE {column} = ? AND origin = 'extracted'", (chapter_id,))
         trust = self.settings_repo.get_trust_mode()
         chars = self.entity_repo.list_characters()
         name_to_id = {c.name: c.id for c in chars}
@@ -273,8 +269,8 @@ class ChapterFinalizerService:
         for f in extraction.facts:
             eids = [name_to_id[n] for n in f.character_names if n in name_to_id]
             cur = self.conn.execute(
-                "INSERT INTO facts (content, fact_type, entity_ids, chapter_id, source_quote, status) VALUES (?, ?, ?, ?, ?, ?)",
-                (f.content, f.fact_type or "event", json.dumps(eids), chapter_id, f.source_quote, fact_st),
+                "INSERT INTO facts (content, fact_type, entity_ids, chapter_id, source_quote, status, source_hash, origin, is_stale) VALUES (?, ?, ?, ?, ?, ?, ?, 'extracted', 0)",
+                (f.content, f.fact_type or "event", json.dumps(eids), chapter_id, f.source_quote, fact_st, source_hash),
             )
             if fact_st == "confirmed":
                 self.memory_repo.index_fact_fts(int(cur.lastrowid or 0), f.content)
@@ -287,8 +283,8 @@ class ChapterFinalizerService:
             cid = name_to_id.get(sc.character_name, default_cid)
             if cid is not None:
                 self.conn.execute(
-                    "INSERT INTO character_state_changes (character_id, chapter_id, field, value, source_quote, confirm_status) VALUES (?, ?, ?, ?, ?, ?)",
-                    (cid, chapter_id, sc.field, sc.value, sc.source_quote, cs_st),
+                    "INSERT INTO character_state_changes (character_id, chapter_id, field, value, source_quote, confirm_status, source_hash, origin, is_stale) VALUES (?, ?, ?, ?, ?, ?, ?, 'extracted', 0)",
+                    (cid, chapter_id, sc.field, sc.value, sc.source_quote, cs_st, source_hash),
                 )
                 auto_cnt += 1 if cs_st == "confirmed" else 0
                 pend_cnt += 0 if cs_st == "confirmed" else 1
@@ -297,8 +293,8 @@ class ChapterFinalizerService:
         for cog in extraction.cognitive_records:
             kids = [name_to_id[n] for n in cog.knower_names if n in name_to_id] or ([default_cid] if default_cid else [])
             self.conn.execute(
-                "INSERT INTO cognitive_records (secret, knower_ids, chapter_id, learned_by, source_quote, confirm_status) VALUES (?, ?, ?, ?, ?, ?)",
-                (cog.secret, json.dumps(kids), chapter_id, cog.learned_by, cog.source_quote, cog_st),
+                "INSERT INTO cognitive_records (secret, knower_ids, chapter_id, learned_by, source_quote, confirm_status, source_hash, origin, is_stale) VALUES (?, ?, ?, ?, ?, ?, ?, 'extracted', 0)",
+                (cog.secret, json.dumps(kids), chapter_id, cog.learned_by, cog.source_quote, cog_st, source_hash),
             )
             auto_cnt += 1 if cog_st == "confirmed" else 0
             pend_cnt += 0 if cog_st == "confirmed" else 1
@@ -308,8 +304,8 @@ class ChapterFinalizerService:
             ca, cb = name_to_id.get(rel.char_a_name), name_to_id.get(rel.char_b_name)
             if ca and cb and ca != cb:
                 self.conn.execute(
-                    "INSERT INTO relationship_changes (char_a_id, char_b_id, chapter_id, rel_type, intimacy, publicity, change_reason, source_quote, confirm_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (ca, cb, chapter_id, rel.rel_type, rel.intimacy, rel.publicity, rel.change_reason, rel.source_quote, rel_st),
+                    "INSERT INTO relationship_changes (char_a_id, char_b_id, chapter_id, rel_type, intimacy, publicity, change_reason, source_quote, confirm_status, source_hash, origin, is_stale) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'extracted', 0)",
+                    (ca, cb, chapter_id, rel.rel_type, rel.intimacy, rel.publicity, rel.change_reason, rel.source_quote, rel_st, source_hash),
                 )
                 auto_cnt += 1 if rel_st == "confirmed" else 0
                 pend_cnt += 0 if rel_st == "confirmed" else 1
@@ -318,8 +314,8 @@ class ChapterFinalizerService:
             flag = trust.auto_confirm_foreshadow_hint if fs.status == "hinted" else trust.auto_confirm_foreshadow_plant_recover
             fs_st = "confirmed" if (trust.enabled and flag) else "pending"
             self.conn.execute(
-                "INSERT INTO foreshadowing (description, planted_chapter_id, plan_recover_start, plan_recover_end, status, related_chapter_ids, source_quote, confirm_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (fs.description, chapter_id, fs.plan_recover_start, fs.plan_recover_end, fs.status, json.dumps([chapter_id]), fs.source_quote, fs_st),
+                "INSERT INTO foreshadowing (description, planted_chapter_id, plan_recover_start, plan_recover_end, status, related_chapter_ids, source_quote, confirm_status, source_hash, origin, is_stale) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'extracted', 0)",
+                (fs.description, chapter_id, fs.plan_recover_start, fs.plan_recover_end, fs.status, json.dumps([chapter_id]), fs.source_quote, fs_st, source_hash),
             )
             auto_cnt += 1 if fs_st == "confirmed" else 0
             pend_cnt += 0 if fs_st == "confirmed" else 1
@@ -336,6 +332,7 @@ class ChapterFinalizerService:
                     verdict=cc.verdict,
                     evidence_quote=cc.evidence_quote,
                     description=cc.description or f"约束 #{cc.constraint_id} 判定为 {cc.verdict}",
+                    source_hash=source_hash,
                 )
                 pend_cnt += 1
             except AppError:

@@ -216,12 +216,17 @@ export function useRebuildMemoryIndex(novelUid: string) {
 }
 
 export function useRunConsistencyReview(novelUid: string, chapterId: number) {
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: () =>
       apiRequest<ConsistencyReviewResponse>(
         `/api/v1/novels/${novelUid}/chapters/${chapterId}/consistency-review`,
         { method: "POST" }
       ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["novels", novelUid, "outline"] });
+      qc.invalidateQueries({ queryKey: ["novels", novelUid, "chapters"] });
+    },
   });
 }
 

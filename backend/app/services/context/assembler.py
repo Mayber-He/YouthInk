@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import sqlite3
 
+from app.core.text_hash import text_sha256
 from app.db.repositories.entity_repo import EntityRepository
 from app.db.repositories.constraint_repo import ConstraintRepository
 from app.db.repositories.novel_repo import NovelRepository
@@ -231,7 +232,9 @@ class ContextAssembler:
             SELECT s.content, c.title, c.sort_order
             FROM summaries s
             JOIN chapters c ON s.level = 'chapter' AND s.ref_id = c.id
-            WHERE c.sort_order < ?
+            WHERE c.sort_order < ? AND s.is_stale = 0
+              AND s.source_hash = c.content_hash
+              AND c.status = 'final' AND c.continuity_review_required = 0
             ORDER BY c.sort_order DESC LIMIT 6
             """,
             (ch.sort_order,),
@@ -240,16 +243,30 @@ class ContextAssembler:
             f"• 《{r['title']}》摘要：{r['content']}" for r in reversed(sum_rows)
         ]
         prev_row = self._conn.execute(
-            "SELECT title, synopsis FROM chapters WHERE sort_order < ? ORDER BY sort_order DESC LIMIT 1",
+            """
+            SELECT c.id, c.title, c.synopsis, c.continuity_review_required,
+                   c.content_hash, cv.content AS latest_content
+            FROM chapters c
+            LEFT JOIN chapter_versions cv ON cv.id = (
+                SELECT v.id FROM chapter_versions v WHERE v.chapter_id = c.id
+                ORDER BY v.version DESC, v.id DESC LIMIT 1
+            )
+            WHERE c.sort_order < ? ORDER BY c.sort_order DESC, c.id DESC LIMIT 1
+            """,
             (ch.sort_order,),
         ).fetchone()
-        if prev_row and prev_row["synopsis"]:
+        prev_is_fresh = bool(
+            prev_row
+            and not prev_row["continuity_review_required"]
+            and prev_row["content_hash"]
+            and str(prev_row["content_hash"])
+            == text_sha256(str(prev_row["latest_content"] or ""))
+        )
+        if prev_is_fresh and prev_row["synopsis"]:
             sum_lines.append(
                 f"【上一章《{prev_row['title']}》梗概（事实与剧情连续性依据）】{prev_row['synopsis']}"
             )
-        prev_content = self._writing_repo.get_previous_chapter_text(
-            ch.sort_order, tail_chars=None
-        )
+        prev_content = str(prev_row["latest_content"] or "") if prev_is_fresh else ""
         if prev_content:
             sum_lines.append(prev_content)
         next_row = self._conn.execute(
@@ -285,9 +302,14 @@ class ContextAssembler:
         # 6. 计划伏笔与已确认事实
         fs_rows = self._conn.execute(
             """
-            SELECT description, status FROM foreshadowing
-            WHERE confirm_status = 'confirmed' AND status IN ('planted', 'hinted')
-            ORDER BY id DESC LIMIT 8
+            SELECT f.description, f.status FROM foreshadowing f
+            LEFT JOIN chapters c ON c.id = f.planted_chapter_id
+            WHERE f.confirm_status = 'confirmed' AND f.status IN ('planted', 'hinted')
+              AND f.is_stale = 0
+              AND (f.origin = 'manual' OR f.planted_chapter_id IS NULL OR
+                   (f.origin = 'extracted' AND f.source_hash = c.content_hash
+                    AND c.status = 'final' AND c.continuity_review_required = 0))
+            ORDER BY f.id DESC LIMIT 8
             """
         ).fetchall()
         fact_rows = self._conn.execute(
@@ -295,6 +317,10 @@ class ContextAssembler:
             SELECT f.content FROM facts f
             LEFT JOIN chapters c ON c.id = f.chapter_id
             WHERE f.status IN ('confirmed', 'locked')
+              AND f.is_stale = 0
+              AND (f.chapter_id IS NULL OR f.origin = 'manual' OR
+                   (f.origin = 'extracted' AND f.source_hash = c.content_hash
+                    AND c.status = 'final' AND c.continuity_review_required = 0))
               AND (c.sort_order IS NULL OR c.sort_order <= ?)
             ORDER BY f.id DESC LIMIT 10
             """,
@@ -316,11 +342,21 @@ class ContextAssembler:
         # 7. RAG 历史高相关场景片段
         rag_lines: list[str] = []
         if self._vector_store.store_file.exists():
+            fresh_chapter_hashes = {
+                int(row["id"]): str(row["content_hash"])
+                for row in self._conn.execute(
+                    "SELECT id, content_hash FROM chapters WHERE sort_order < ? "
+                    "AND status = 'final' AND continuity_review_required = 0 "
+                    "AND content_hash IS NOT NULL",
+                    (ch.sort_order,),
+                ).fetchall()
+            }
             query_str = combined_beats.strip() or ch.title
             q_vec = encode_text_sync(query_str)
             vec_hits = self._vector_store.search_vectors(
                 query_vec=q_vec,
                 max_chapter_sort=ch.sort_order - 0.0001,
+                allowed_chapter_hashes=fresh_chapter_hashes,
                 top_k=3,
             )
             rag_lines = [

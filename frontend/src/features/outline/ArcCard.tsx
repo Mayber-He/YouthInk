@@ -140,6 +140,9 @@ export const ArcCard: React.FC<ArcCardProps> = ({
               <Badge tone={STATUS_BADGE[ch.status].tone}>
                 {STATUS_BADGE[ch.status].label}
               </Badge>
+              {ch.continuity_review_required && (
+                <Badge tone="amber">连续性待复核</Badge>
+              )}
               <LockToggle
                 locked={ch.locked}
                 onToggle={(next) => onUpdateChapter(ch.id, { locked: next })}

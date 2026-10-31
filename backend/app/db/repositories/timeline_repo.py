@@ -29,7 +29,9 @@ def build_character_timeline_snapshot(
         SELECT s.field, s.value, c.sort_order, s.id
         FROM character_state_changes s
         JOIN chapters c ON c.id = s.chapter_id
-        WHERE s.character_id = ? AND s.confirm_status = 'confirmed' {sort_filter}
+        WHERE s.character_id = ? AND s.confirm_status = 'confirmed' AND s.is_stale = 0
+          AND (s.origin = 'manual' OR (s.origin = 'extracted' AND s.source_hash = c.content_hash
+               AND c.status = 'final' AND c.continuity_review_required = 0)) {sort_filter}
         ORDER BY c.sort_order DESC, s.id DESC
         """,
         params,
@@ -60,6 +62,9 @@ def build_character_timeline_snapshot(
         JOIN characters ca ON ca.id = r.char_a_id
         JOIN characters cb ON cb.id = r.char_b_id
         WHERE (r.char_a_id = ? OR r.char_b_id = ?) AND r.confirm_status = 'confirmed' {sort_filter}
+          AND r.is_stale = 0
+          AND (r.origin = 'manual' OR (r.origin = 'extracted' AND r.source_hash = c.content_hash
+               AND c.status = 'final' AND c.continuity_review_required = 0))
         ORDER BY c.sort_order DESC, r.id DESC
         """,
         rel_params,
@@ -94,7 +99,11 @@ def build_character_timeline_snapshot(
         SELECT cg.secret, cg.knower_ids, cg.learned_by, c.title AS chapter_title
         FROM cognitive_records cg
         LEFT JOIN chapters c ON c.id = cg.chapter_id
-        WHERE cg.confirm_status = 'confirmed' {sort_filter if up_to_chapter_sort is not None else ''}
+        WHERE cg.confirm_status = 'confirmed' AND cg.is_stale = 0
+          AND (cg.chapter_id IS NULL OR cg.origin = 'manual' OR
+               (cg.origin = 'extracted' AND cg.source_hash = c.content_hash
+                AND c.status = 'final' AND c.continuity_review_required = 0))
+          {sort_filter if up_to_chapter_sort is not None else ''}
         ORDER BY cg.id ASC
         """,
         cog_params,

@@ -50,6 +50,7 @@ class ConsistencyReviewResponse(BaseModel):
     issues: list[ConsistencyIssue]
     model: str = ""
     created_at: str
+    is_stale: bool = False
 
 
 class ConsistencyReviewSummary(BaseModel):
@@ -59,3 +60,4 @@ class ConsistencyReviewSummary(BaseModel):
     issue_count: int
     violation_count: int
     created_at: str
+    is_stale: bool = False

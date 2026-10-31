@@ -621,6 +621,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
                 novelUid={novelUid}
                 chapterId={effectiveChapterId}
                 chapterStatus={workspace.chapter.status}
+                continuityReviewRequired={workspace.chapter.continuity_review_required}
               />
             )}
           </div>

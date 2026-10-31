@@ -47,6 +47,7 @@ export function useSaveChapterContent(novelUid: string, chapterId: number) {
       ),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: editorKeys.workspace(novelUid, chapterId) });
+      qc.invalidateQueries({ queryKey: ["novels", novelUid, "chapters"] });
       qc.invalidateQueries({ queryKey: outlineKeys.tree(novelUid) });
       qc.invalidateQueries({ queryKey: novelKeys.detail(novelUid) });
     },
@@ -63,6 +64,7 @@ export function useRestoreChapterVersion(novelUid: string, chapterId: number) {
       ),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: editorKeys.workspace(novelUid, chapterId) });
+      qc.invalidateQueries({ queryKey: ["novels", novelUid, "chapters"] });
       qc.invalidateQueries({ queryKey: outlineKeys.tree(novelUid) });
     },
   });

@@ -38,6 +38,7 @@ export interface ConsistencyReviewResponse {
   issues: ConsistencyIssue[];
   model: string;
   created_at: string;
+  is_stale: boolean;
 }
 
 export interface ConsistencyReviewSummary {
@@ -47,6 +48,7 @@ export interface ConsistencyReviewSummary {
   issue_count: number;
   violation_count: number;
   created_at: string;
+  is_stale: boolean;
 }
 
 export interface PendingQueueItem {

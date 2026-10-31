@@ -110,16 +110,18 @@ class ConstraintRepository:
         verdict: str,
         evidence_quote: str,
         description: str,
+        source_hash: str | None = None,
     ) -> int:
         """Record an LLM verdict on a constraint; always enters pending queue."""
         self.get_constraint(constraint_id)  # validate target exists
         cur = self.conn.execute(
             """
             INSERT INTO constraint_checks (
-                constraint_id, chapter_id, verdict, evidence_quote, description, confirm_status
-            ) VALUES (?, ?, ?, ?, ?, 'pending')
+                constraint_id, chapter_id, verdict, evidence_quote, description,
+                confirm_status, source_hash, origin, is_stale
+            ) VALUES (?, ?, ?, ?, ?, 'pending', ?, 'extracted', 0)
             """,
-            (constraint_id, chapter_id, verdict, evidence_quote, description),
+            (constraint_id, chapter_id, verdict, evidence_quote, description, source_hash),
         )
         return int(cur.lastrowid or 0)
 

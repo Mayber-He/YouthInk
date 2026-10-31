@@ -13,6 +13,7 @@ export interface ChapterItem {
   word_count: number;
   story_time: string;
   locked: boolean;
+  continuity_review_required: boolean;
   created_at: string;
   updated_at: string;
 }

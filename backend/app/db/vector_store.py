@@ -23,6 +23,7 @@ class VectorChunkRecord:
     embedding_model_id: str
     text: str
     vector: list[float]
+    source_hash: str = ""
 
 
 class NovelVectorStore:
@@ -64,6 +65,7 @@ class NovelVectorStore:
                             ),
                             text=str(item.get("text", "")),
                             vector=[float(v) for v in item.get("vector", [])],
+                            source_hash=str(item.get("source_hash", "")),
                         )
                     )
             return records
@@ -105,6 +107,7 @@ class NovelVectorStore:
         max_chapter_sort: float | None = None,
         character_ids: list[int] | None = None,
         location_id: int | None = None,
+        allowed_chapter_hashes: dict[int, str] | None = None,
         top_k: int = 8,
     ) -> list[tuple[VectorChunkRecord, float]]:
         """
@@ -116,6 +119,11 @@ class NovelVectorStore:
         char_filter = set(character_ids) if character_ids else None
 
         for rec in records:
+            if allowed_chapter_hashes is not None and (
+                rec.chapter_id not in allowed_chapter_hashes
+                or rec.source_hash != allowed_chapter_hashes[rec.chapter_id]
+            ):
+                continue
             if (
                 max_chapter_sort is not None
                 and rec.chapter_sort_order > max_chapter_sort
