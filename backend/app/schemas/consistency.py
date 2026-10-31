@@ -18,6 +18,7 @@ class ConsistencyIssue(BaseModel):
     ref_label: str = ""
     verdict: ConsistencyVerdict
     evidence_quote: str = ""
+    historical_evidence: str = ""
     description: str = ""
     suggestion: str = ""
     suggested_rewrite: str = ""

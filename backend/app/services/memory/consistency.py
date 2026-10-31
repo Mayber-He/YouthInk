@@ -13,6 +13,7 @@ from app.db.repositories.memory_repo import MemoryRepository
 from app.db.repositories.outline_repo import OutlineRepository
 from app.db.repositories.settings_repo import SettingsRepository
 from app.db.repositories.writing_repo import WritingRepository
+from app.db.vector_store import NovelVectorStore, VectorChunkRecord
 from app.schemas.consistency import (
     ConsistencyIssue,
     ConsistencyReviewResponse,
@@ -21,6 +22,14 @@ from app.schemas.consistency import (
 )
 from app.services.llm.client import complete_chat
 from app.services.llm.json_parser import parse_and_validate_json
+from app.services.embedding.encoder import encode_text_sync
+from app.services.memory.finalizer import split_text_chunks
+
+_HISTORY_TOP_K = 3
+_HISTORY_QUERY_TOP_K = 5
+_HISTORY_MAX_QUERY_CHUNKS = 12
+_HISTORY_SNIPPET_CHARS = 420
+_HISTORY_MIN_SIMILARITY = 0.18
 
 
 class ConsistencyReviewService:
@@ -50,6 +59,9 @@ class ConsistencyReviewService:
             raise AppError("EMPTY_CHAPTER_CONTENT", "章节正文为空，无法执行一致性审查。", 400)
 
         checklist = self._build_checklist(chapter_id, ch.sort_order)
+        history_context = self._retrieve_historical_context(chapter_id, content)
+        if history_context:
+            checklist += "\n\n" + history_context
         prompt = self._build_prompt(ch, content, checklist)
 
         _pid, base_url, model, api_key = self._settings_repo.get_credentials_for_task("extract")
@@ -198,6 +210,93 @@ class ConsistencyReviewService:
             or str(review_row["upstream_hash"]) != upstream_hash
         )
 
+    def _retrieve_historical_context(self, chapter_id: int, content: str) -> str:
+        """Return a few fresh finalized vector matches; retrieval is best-effort only."""
+        try:
+            vector_store = NovelVectorStore(self._novel_uid)
+            if not vector_store.store_file.exists():
+                return ""
+
+            ordered_rows = self._conn.execute(
+                """
+                SELECT c.id, c.title, c.story_time, c.content_hash,
+                       c.status, c.continuity_review_required
+                FROM chapters c
+                JOIN arcs a ON a.id = c.arc_id
+                JOIN volumes v ON v.id = a.volume_id
+                ORDER BY v.sort_order, a.sort_order, c.sort_order, c.id
+                """
+            ).fetchall()
+            allowed_hashes: dict[int, str] = {}
+            chapter_info: dict[int, dict[str, object]] = {}
+            for display_index, row in enumerate(ordered_rows, start=1):
+                cid = int(row["id"])
+                if (
+                    cid == chapter_id
+                    or row["status"] != "final"
+                    or bool(row["continuity_review_required"])
+                    or not row["content_hash"]
+                ):
+                    continue
+                allowed_hashes[cid] = str(row["content_hash"])
+                chapter_info[cid] = {
+                    "display_index": display_index,
+                    "title": str(row["title"] or "未命名章节"),
+                    "story_time": str(row["story_time"] or ""),
+                }
+            if not allowed_hashes:
+                return ""
+
+            best_by_chunk: dict[str, tuple[VectorChunkRecord, float]] = {}
+            query_chunks = split_text_chunks(content)
+            if len(query_chunks) > _HISTORY_MAX_QUERY_CHUNKS:
+                last_index = len(query_chunks) - 1
+                query_chunks = [
+                    query_chunks[round(i * last_index / (_HISTORY_MAX_QUERY_CHUNKS - 1))]
+                    for i in range(_HISTORY_MAX_QUERY_CHUNKS)
+                ]
+            for query_text in query_chunks:
+                query_vec = encode_text_sync(query_text)
+                hits = vector_store.search_vectors(
+                    query_vec=query_vec,
+                    allowed_chapter_hashes=allowed_hashes,
+                    top_k=_HISTORY_QUERY_TOP_K,
+                )
+                for record, score in hits:
+                    if score < _HISTORY_MIN_SIMILARITY:
+                        continue
+                    previous = best_by_chunk.get(record.chunk_id)
+                    if previous is None or score > previous[1]:
+                        best_by_chunk[record.chunk_id] = (record, score)
+
+            ranked = sorted(best_by_chunk.values(), key=lambda hit: hit[1], reverse=True)
+            lines: list[str] = []
+            for record, _score in ranked:
+                info = chapter_info.get(int(record.chapter_id))
+                if info is None:
+                    continue
+                time_label = f"；故事时间：{info['story_time']}" if info["story_time"] else ""
+                snippet = record.text.strip()[:_HISTORY_SNIPPET_CHARS]
+                if not snippet:
+                    continue
+                lines.append(
+                    f"[历史片段{len(lines) + 1}｜第{info['display_index']}章《{info['title']}》{time_label}] "
+                    f"{snippet}"
+                )
+                if len(lines) >= _HISTORY_TOP_K:
+                    break
+            if not lines:
+                return ""
+            return (
+                "【检查表F：向量检索到的定稿章节参考片段】\n"
+                + "\n".join(lines)
+                + "\n注意：检索片段是少量、不完整的参考证据；未检索到不代表历史中没有发生。"
+                "历史章节片段只提供作者层面的剧情参照；若片段来自待查章节之后，不能据此认定人物在待查时点已知晓后续信息。"
+            )
+        except Exception:
+            # Search is supplemental; a missing or unhealthy index must not block review.
+            return ""
+
     def _build_checklist(self, chapter_id: int, sort_order: float) -> str:
         ch = self._outline_repo.get_chapter(chapter_id)
         scenes = self._writing_repo.list_scenes(chapter_id)
@@ -309,15 +408,16 @@ class ConsistencyReviewService:
     @staticmethod
     def _build_prompt(ch, content: str, checklist: str) -> str:
         return (
-            "你是小说一致性与常理逻辑审查员。请逐项检查【待审正文】是否违反以下检查表（含A硬软约束、B已确认事实、C人物属性、D情境常理逻辑与E跨章连贯），"
+            "你是小说一致性与常理逻辑审查员。请逐项检查【待审正文】是否违反以下检查表（含A硬软约束、B已确认事实、C人物属性、D情境常理逻辑、E跨章连贯及F向量检索参考片段），"
             "只输出存在问题的项（遵守的项不要输出）。\n\n"
             f"{checklist}\n\n"
             f"待审正文（第 {ch.display_index} 章《{ch.title}》）：\n{content[:6000]}\n\n"
             "输出严格 JSON：{\"issues\": [{\"check_type\": \"constraint|fact|character|common_sense|continuity\", "
-            "\"ref_id\": 检查表编号, \"ref_label\": \"如 硬约束#1、常理#901 或 连贯#951\", "
+            "\"ref_id\": 检查表编号或 null, \"ref_label\": \"如 硬约束#1、常理#901、连贯#951 或 历史片段1·第X章\", "
             "\"verdict\": \"violation|suspicious\", "
-            "\"evidence_quote\": \"正文原句证据\", "
+            "\"evidence_quote\": \"待审正文原句证据\", \"historical_evidence\": \"若依据F指出问题，填写对应历史片段原文；否则留空\", "
             "\"description\": \"违反说明（指出为何违背设定或常理）\", \"suggestion\": \"一句话修改思路\", \"suggested_rewrite\": \"修改后的正文片段（必须可无缝直接替换evidence_quote，保留叙事口吻并修正逻辑漏洞）\"}]}。\n"
             "判定标准：violation=明确违反检查表或违反情境常理（例如新生刚报到却对学校熟门熟路、初见未介绍却直呼姓名、上帝视角读心等）；suspicious=疑似但证据不足。"
+            "若依据F报告冲突或剧情重复，check_type使用continuity，ref_id填null，ref_label必须写清历史片段编号和章节，historical_evidence必须引用检索结果中的原句，evidence_quote仍引用待审正文原句；检索内容不足以支撑明确结论时标为suspicious或不报告。"
             "不要输出任何解释文字。"
         )

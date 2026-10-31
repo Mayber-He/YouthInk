@@ -74,6 +74,14 @@ const IssueCard: React.FC<{
           </blockquote>
         </div>
       )}
+      {issue.historical_evidence && (
+        <div className="mt-2">
+          <span className="text-[11px] font-medium text-indigo-600 dark:text-indigo-400">历史参考依据：</span>
+          <blockquote className="mt-1 border-l-2 border-indigo-300 pl-3 text-xs text-slate-600 italic dark:border-indigo-800 dark:text-slate-400">
+            {issue.historical_evidence}
+          </blockquote>
+        </div>
+      )}
       {issue.suggestion && (
         <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
           <span className="font-medium">修改思路：</span>

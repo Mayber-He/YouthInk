@@ -23,6 +23,7 @@ export interface ConsistencyIssue {
   ref_label: string;
   verdict: ConsistencyVerdict;
   evidence_quote: string;
+  historical_evidence: string;
   description: string;
   suggestion: string;
   suggested_rewrite?: string;
