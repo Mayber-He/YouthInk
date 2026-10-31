@@ -22,6 +22,7 @@ import { ContextPreviewPanel } from "./components/ContextPreviewPanel";
 import { VersionHistoryModal } from "./components/VersionHistoryModal";
 import { SelectionToolbar } from "./components/SelectionToolbar";
 import { WritingHeaderBar } from "./components/WritingHeaderBar";
+import { WritingPipelineBar, type WritingPipelineStep } from "./components/WritingPipelineBar";
 import { ConfirmModal } from "@/components/ui/ConfirmModal";
 import type { AiSmellHit, RewriteActionType, SceneItem, SelectionCritiqueResult } from "./types";
 
@@ -62,6 +63,9 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [confirmOverwriteOpen, setConfirmOverwriteOpen] = useState(false);
   const [critiqueResult, setCritiqueResult] = useState<SelectionCritiqueResult | null>(null);
+  const [pipelineStep, setPipelineStep] = useState<WritingPipelineStep>("idle");
+  const [streamModelName, setStreamModelName] = useState("");
+  const [generatedWordsCount, setGeneratedWordsCount] = useState(0);
   const critiqueMut = useCritiqueSelection(novelUid, effectiveChapterId ?? 0);
   const reviewMut = useRunConsistencyReview(novelUid, effectiveChapterId ?? 0);
   const isComposingRef = useRef(false);
@@ -88,11 +92,18 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
       setContent(workspace.latest_content);
       setHasScannedSmell(false);
       setSmellHits([]);
+      setPipelineStep("idle");
       if (!activeSceneId && workspace.scenes.length > 0) {
         setActiveSceneId(workspace.scenes[0].id);
       }
     }
   }, [workspace?.chapter.id, workspace?.latest_version]);
+
+  useEffect(() => {
+    if (streamError) {
+      setPipelineStep("idle");
+    }
+  }, [streamError]);
 
   const triggerAutoSave = (nextText: string) => {
     if (!effectiveChapterId || isComposingRef.current || isStreaming) return;
@@ -108,6 +119,11 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
     const isChapterRewrite = mode === "chapter";
     const prefix = !isChapterRewrite && content.trim() ? `${content.trim()}\n\n` : "";
     setContent(prefix);
+    setGeneratedWordsCount(0);
+    setReviewResult(null);
+    setReviewError(null);
+    setPipelineStep("assembling");
+
     startWriteStream(
       {
         chapter_id: effectiveChapterId,
@@ -118,9 +134,33 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
         custom_context: customContext,
         instruction: "",
       },
-      (delta) => setContent((prev) => prev + delta),
-      (fullGenerated) => {
-        saveMut.mutate({ content: `${prefix}${fullGenerated}`, source: "ai", create_new_version: true });
+      (delta) => {
+        setPipelineStep((prev) => (prev === "generating" ? prev : "generating"));
+        setGeneratedWordsCount((c) => c + delta.replace(/\s+/g, "").length);
+        setContent((prev) => prev + delta);
+      },
+      async (fullGenerated) => {
+        const fullContent = `${prefix}${fullGenerated}`;
+        try {
+          await saveMut.mutateAsync({ content: fullContent, source: "ai", create_new_version: true });
+        } catch {
+          // ignore save error
+        }
+
+        // 正文生成完毕，自动进行常理与一致性检查
+        setPipelineStep("reviewing");
+        try {
+          const res = await reviewMut.mutateAsync();
+          setReviewResult(res);
+          setPipelineStep("completed");
+        } catch (e) {
+          setReviewError(e instanceof Error ? e.message : "自动审查失败");
+          setPipelineStep("completed");
+        }
+      },
+      (meta) => {
+        setStreamModelName(meta.model);
+        setPipelineStep("connecting");
       }
     );
   };
@@ -243,7 +283,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
           onSelectChapter={setSelectedChapterId}
           onSelectScene={setActiveSceneId}
           onWriteWholeChapter={handleWriteWholeChapter}
-          onStopStream={stopStream}
+          onStopStream={() => { stopStream(); setPipelineStep("idle"); }}
           onScanSmell={async () => {
             const res = await smellMut.mutateAsync(content);
             setSmellHits(res.hits);
@@ -263,6 +303,17 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
           }}
           onOpenHistory={() => setHistoryOpen(true)}
           onSaveNewVersion={() => saveMut.mutate({ content, source: "manual", create_new_version: true })}
+        />
+
+        <WritingPipelineBar
+          currentStep={pipelineStep}
+          modelName={streamModelName || metrics?.model}
+          generatedWordCount={generatedWordsCount}
+          issueCount={reviewResult?.issue_count ?? 0}
+          violationCount={reviewResult?.violation_count ?? 0}
+          reviewSummary={reviewResult?.summary}
+          onOpenReviewDetail={() => setReviewOpen(true)}
+          onDismiss={() => setPipelineStep("idle")}
         />
 
         {streamError && (

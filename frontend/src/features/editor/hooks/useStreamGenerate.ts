@@ -45,7 +45,8 @@ export function useStreamGenerate(novelUid: string) {
         instruction: string;
       },
       onChunk: (delta: string) => void,
-      onComplete?: (fullGenerated: string) => void
+      onComplete?: (fullGenerated: string) => void,
+      onMeta?: (meta: { model: string; context_tokens: number }) => void
     ) => {
       stopStream();
       const controller = new AbortController();
@@ -67,6 +68,7 @@ export function useStreamGenerate(novelUid: string) {
                 outputTokens: 0,
                 elapsedMs: 0,
               });
+              onMeta?.(meta);
             },
             onDelta: (delta) => {
               accumulated += delta;
