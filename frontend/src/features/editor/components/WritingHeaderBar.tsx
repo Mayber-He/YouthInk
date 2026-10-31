@@ -58,6 +58,13 @@ export const WritingHeaderBar: React.FC<WritingHeaderBarProps> = ({
   onSaveNewVersion,
 }) => {
   const [showTopBeats, setShowTopBeats] = useState(true);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+
+  const currentChapter = allChapters.find((ch) => ch.id === effectiveChapterId);
+  const currentChapterName = currentChapter
+    ? `第${currentChapter.display_index}章 ${currentChapter.title.replace(/[\\/*?:"<>|]/g, "_").trim()}`
+    : "章节";
+  const chapterFileName = `${currentChapterName}.md`;
 
   return (
     <div>
@@ -121,14 +128,48 @@ export const WritingHeaderBar: React.FC<WritingHeaderBarProps> = ({
             存为新版本
           </Button>
 
-          <a
-            href={`/api/v1/novels/${novelUid}/export?format=md`}
-            download
-            className="inline-flex items-center gap-1 rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200"
-          >
-            <Download className="h-3.5 w-3.5" />
-            导出 MD
-          </a>
+          <div className="relative inline-flex items-center">
+            <a
+              href={`/api/v1/novels/${novelUid}/export?format=md&chapter_id=${effectiveChapterId}`}
+              download={chapterFileName}
+              title={`导出本章：${chapterFileName}`}
+              className="inline-flex items-center gap-1 rounded-l-lg border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200"
+            >
+              <Download className="h-3.5 w-3.5" />
+              导出本章 MD
+            </a>
+            <button
+              type="button"
+              onClick={() => setExportMenuOpen(!exportMenuOpen)}
+              className="inline-flex items-center rounded-r-lg border-y border-r border-slate-300 px-1 py-1.5 text-xs text-slate-500 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300"
+              title="更多导出选项"
+            >
+              <ChevronDown className="h-3 w-3" />
+            </button>
+            {exportMenuOpen && (
+              <div
+                className="absolute right-0 top-full z-20 mt-1 w-36 rounded-lg border border-slate-200 bg-white py-1 shadow-lg dark:border-slate-700 dark:bg-slate-800"
+                onMouseLeave={() => setExportMenuOpen(false)}
+              >
+                <a
+                  href={`/api/v1/novels/${novelUid}/export?format=md&chapter_id=${effectiveChapterId}`}
+                  download={chapterFileName}
+                  onClick={() => setExportMenuOpen(false)}
+                  className="flex items-center gap-2 px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700"
+                >
+                  导出本章 (MD)
+                </a>
+                <a
+                  href={`/api/v1/novels/${novelUid}/export?format=md`}
+                  download
+                  onClick={() => setExportMenuOpen(false)}
+                  className="flex items-center gap-2 px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700"
+                >
+                  导出全书 (MD)
+                </a>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 

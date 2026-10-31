@@ -183,11 +183,19 @@ def test_scenes_versions_context_and_export(
     assert restored_ws["latest_version"] == 3
     assert restored_ws["latest_content"] == "第一版草稿：调音台的红灯亮起。"
 
-    # 4. Export Markdown & TXT
+    # 4. Export Markdown & TXT (Full novel & single chapter)
     md_resp = client.get(f"/api/v1/novels/{uid}/export?format=md")
     assert md_resp.status_code == 200
     assert "五点半的电流声" in md_resp.text
     assert "第一版草稿：调音台的红灯亮起。" in md_resp.text
+
+    # Single chapter export
+    ch_md_resp = client.get(f"/api/v1/novels/{uid}/export?format=md&chapter_id={ch_id}")
+    assert ch_md_resp.status_code == 200
+    assert "Content-Disposition" in ch_md_resp.headers
+    assert "filename*=" in ch_md_resp.headers["Content-Disposition"]
+    assert "五点半的电流声" in ch_md_resp.text
+    assert "第一版草稿：调音台的红灯亮起。" in ch_md_resp.text
 
 
 def test_ai_smell_scanner_and_sse_streaming(

@@ -159,9 +159,10 @@ def check_ai_smell(
 @router.get("/export")
 def export_manuscript(
     format: Literal["txt", "md"] = Query(default="md"),
+    chapter_id: int | None = Query(default=None),
     repo: WritingRepository = Depends(get_writing_repo),
 ) -> PlainTextResponse:
-    filename, body = repo.export_novel_manuscript(format)
+    filename, body = repo.export_novel_manuscript(format, chapter_id=chapter_id)
     encoded_name = quote(filename)
     return PlainTextResponse(
         content=body,
@@ -169,6 +170,6 @@ def export_manuscript(
         if format == "md"
         else "text/plain; charset=utf-8",
         headers={
-            "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}"
+            "Content-Disposition": f'attachment; filename="{encoded_name}"; filename*=UTF-8\'\'{encoded_name}'
         },
     )

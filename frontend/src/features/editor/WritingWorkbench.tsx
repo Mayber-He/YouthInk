@@ -100,14 +100,22 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
   const runStreamWrite = (mode: "scene" | "chapter", sceneId: number | null) => {
     if (!effectiveChapterId) return;
     if (sceneId) setActiveSceneId(sceneId);
-    const prefix = content.trim() ? `${content.trim()}\n\n` : "";
+    const isChapterRewrite = mode === "chapter";
+    if (
+      isChapterRewrite &&
+      content.trim() &&
+      !window.confirm("将用全新生成的正文替换本章当前内容（旧内容可在「版本历史」中恢复），是否继续？")
+    ) {
+      return;
+    }
+    const prefix = !isChapterRewrite && content.trim() ? `${content.trim()}\n\n` : "";
     setContent(prefix);
     startWriteStream(
       {
         chapter_id: effectiveChapterId,
         scene_id: sceneId,
         mode,
-        existing_content: content,
+        existing_content: isChapterRewrite ? "" : content,
         disabled_context_keys: disabledContextKeys,
         custom_context: customContext,
         instruction: "",

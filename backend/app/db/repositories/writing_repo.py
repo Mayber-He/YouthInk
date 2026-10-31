@@ -27,6 +27,12 @@ def count_novel_words(text: str) -> int:
     return len(_WHITESPACE_RE.sub("", text))
 
 
+def sanitize_filename(name: str) -> str:
+    """Strip illegal filename characters for cross-platform compatibility."""
+    cleaned = re.sub(r'[\\/*?:"<>|]+', "_", name).strip()
+    return cleaned or "未命名"
+
+
 class WritingRepository:
     """Data access layer for scenes, chapter_versions, and manuscript export."""
 
@@ -226,10 +232,32 @@ class WritingRepository:
 
     # --- Export (TXT / Markdown) ---
 
-    def export_novel_manuscript(self, fmt: Literal["txt", "md"] = "md") -> tuple[str, str]:
-        """Export all chapters in sort_order as TXT or Markdown. Returns (filename, content)."""
+    def export_novel_manuscript(
+        self, fmt: Literal["txt", "md"] = "md", chapter_id: int | None = None
+    ) -> tuple[str, str]:
+        """Export a single chapter or all chapters in sort_order as TXT or Markdown. Returns (filename, content)."""
+        ext = "md" if fmt == "md" else "txt"
+
+        if chapter_id is not None:
+            ch = self._outline_repo.get_chapter(chapter_id)
+            ver = self._conn.execute(
+                "SELECT content FROM chapter_versions WHERE chapter_id = ? ORDER BY version DESC LIMIT 1",
+                (ch.id,),
+            ).fetchone()
+            body = str(ver["content"]).strip() if ver and ver["content"] else "（本章尚未撰写正文）"
+            header = f"第{ch.display_index}章 {ch.title}".strip()
+            safe_name = sanitize_filename(header)
+            filename = f"{safe_name}.{ext}"
+
+            if fmt == "md":
+                content = f"# {header}\n\n{body}\n"
+            else:
+                content = f"{header}\n\n{body}\n"
+            return filename, content
+
         novel_row = self._conn.execute("SELECT title, synopsis FROM novels ORDER BY id ASC LIMIT 1").fetchone()
         title = str(novel_row["title"]) if novel_row else "未命名作品"
+        safe_title = sanitize_filename(title)
         synopsis = str(novel_row["synopsis"] or "") if novel_row else ""
 
         tree = self._outline_repo.get_outline_tree()
@@ -259,8 +287,7 @@ class WritingRepository:
                     else:
                         lines.append(f"\n{header}\n\n{body}\n")
 
-        ext = "md" if fmt == "md" else "txt"
-        return f"{title}.{ext}", "\n".join(lines)
+        return f"{safe_title}.{ext}", "\n".join(lines)
 
     @staticmethod
     def _row_to_scene(row: sqlite3.Row) -> SceneResponse:
