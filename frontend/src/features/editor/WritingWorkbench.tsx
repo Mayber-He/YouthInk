@@ -21,6 +21,7 @@ import { ContextPreviewPanel } from "./components/ContextPreviewPanel";
 import { VersionHistoryModal } from "./components/VersionHistoryModal";
 import { SelectionToolbar } from "./components/SelectionToolbar";
 import { WritingHeaderBar } from "./components/WritingHeaderBar";
+import { ConfirmModal } from "@/components/ui/ConfirmModal";
 import type { AiSmellHit, RewriteActionType, SceneItem } from "./types";
 
 export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) => {
@@ -58,6 +59,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
   const [reviewOpen, setReviewOpen] = useState(false);
   const [reviewResult, setReviewResult] = useState<ConsistencyReviewResponse | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
+  const [confirmOverwriteOpen, setConfirmOverwriteOpen] = useState(false);
   const reviewMut = useRunConsistencyReview(novelUid, effectiveChapterId ?? 0);
   const isComposingRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -97,17 +99,10 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
     );
   };
 
-  const runStreamWrite = (mode: "scene" | "chapter", sceneId: number | null) => {
+  const executeStreamWrite = (mode: "scene" | "chapter", sceneId: number | null) => {
     if (!effectiveChapterId) return;
     if (sceneId) setActiveSceneId(sceneId);
     const isChapterRewrite = mode === "chapter";
-    if (
-      isChapterRewrite &&
-      content.trim() &&
-      !window.confirm("将用全新生成的正文替换本章当前内容（旧内容可在「版本历史」中恢复），是否继续？")
-    ) {
-      return;
-    }
     const prefix = !isChapterRewrite && content.trim() ? `${content.trim()}\n\n` : "";
     setContent(prefix);
     startWriteStream(
@@ -125,6 +120,14 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
         saveMut.mutate({ content: `${prefix}${fullGenerated}`, source: "ai", create_new_version: true });
       }
     );
+  };
+
+  const handleWriteWholeChapter = () => {
+    if (content.trim()) {
+      setConfirmOverwriteOpen(true);
+    } else {
+      executeStreamWrite("chapter", null);
+    }
   };
 
   const handleRewriteSelection = (
@@ -218,7 +221,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
           isScanningSmell={smellMut.isPending}
           onSelectChapter={setSelectedChapterId}
           onSelectScene={setActiveSceneId}
-          onWriteWholeChapter={() => runStreamWrite("chapter", null)}
+          onWriteWholeChapter={handleWriteWholeChapter}
           onStopStream={stopStream}
           onScanSmell={async () => {
             const res = await smellMut.mutateAsync(content);
@@ -323,7 +326,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
                 activeSceneId={activeSceneId}
                 isStreaming={isStreaming}
                 onSelectScene={setActiveSceneId}
-                onWriteScene={(s: SceneItem) => runStreamWrite("scene", s.id)}
+                onWriteScene={(s: SceneItem) => executeStreamWrite("scene", s.id)}
               />
             )}
             {rightTab === "context" && (
@@ -364,6 +367,16 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
         review={reviewResult}
         running={reviewMut.isPending}
         error={reviewError}
+      />
+      <ConfirmModal
+        open={confirmOverwriteOpen}
+        onClose={() => setConfirmOverwriteOpen(false)}
+        onConfirm={() => executeStreamWrite("chapter", null)}
+        title="替换正文确认"
+        description="将用全新生成的正文替换本章当前内容（旧内容可在「版本历史」中恢复），是否继续？"
+        confirmText="确认替换并生成"
+        cancelText="取消"
+        confirmVariant="primary"
       />
     </div>
   );
