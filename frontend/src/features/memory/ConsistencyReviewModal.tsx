@@ -19,6 +19,8 @@ const TYPE_LABEL: Record<ConsistencyIssue["check_type"], string> = {
   constraint: "约束",
   fact: "事实",
   character: "人物",
+  common_sense: "常理逻辑",
+  continuity: "跨章连贯",
 };
 
 const IssueCard: React.FC<{ issue: ConsistencyIssue }> = ({ issue }) => {
@@ -35,7 +37,7 @@ const IssueCard: React.FC<{ issue: ConsistencyIssue }> = ({ issue }) => {
         <Badge tone={isViolation ? "rose" : "amber"}>
           {isViolation ? "违反" : "可疑"}
         </Badge>
-        <Badge tone="default">{TYPE_LABEL[issue.check_type]}</Badge>
+        <Badge tone="default">{TYPE_LABEL[issue.check_type] ?? "其他"}</Badge>
         {issue.ref_label && (
           <span className="text-xs text-slate-500 dark:text-slate-400">
             {issue.ref_label}
@@ -71,7 +73,7 @@ export const ConsistencyReviewModal: React.FC<Props> = ({
     {running && (
       <div className="flex items-center gap-3 py-8 text-sm text-slate-500">
         <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-indigo-500" />
-        审查员正在逐项核对检查表，请稍候……
+        审查员正在逐项核对检查表与情境常理，请稍候……
       </div>
     )}
     {!running && error && (
@@ -103,7 +105,7 @@ export const ConsistencyReviewModal: React.FC<Props> = ({
         </div>
         {review.issue_count === 0 ? (
           <p className="text-xs text-slate-500 dark:text-slate-400">
-            本次审查覆盖了生效中的约束清单、已确认事实与出场人物核心属性，未发现冲突。注意：审查结论基于检查表，未列入检查表的问题不在覆盖范围内。
+            本次审查覆盖了生效中的约束清单、已确认事实、出场人物核心属性及情境常理逻辑（环境熟悉度、人际初见边界、限知视角边界、时空物理连续性、在场状态），未发现冲突。
           </p>
         ) : (
           <div className="space-y-3">

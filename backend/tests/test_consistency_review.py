@@ -164,6 +164,76 @@ def test_consistency_review_detects_violation(
     assert detail["issues"][0]["description"].startswith("违反硬约束")
 
 
+def test_consistency_review_detects_common_sense_without_explicit_constraint(
+    client: TestClient, novel_uid: str, monkeypatch: pytest.MonkeyPatch, character_id: int
+) -> None:
+    """Even without a manually added constraint, Checklist D checks situational & common-sense rules."""
+    _setup_llm_profile(client)
+    ch = _make_chapter_with_content(
+        client,
+        novel_uid,
+        character_id,
+        "刚来大学报到的林夏熟门熟路地穿过三条近道，还一眼叫出了迎面走来的陌生学长陆川的名字。",
+    )
+
+    # Verify ContextPreview includes identity background & common-sense boundary warnings
+    preview = client.get(f"/api/v1/novels/{novel_uid}/chapters/{ch}/context-preview").json()
+    blocks_by_key = {b["key"]: b["content"] for b in preview["blocks"]}
+    assert "大一新生" in blocks_by_key["character_states"]
+    assert "视角与人际常理边界" in blocks_by_key["character_states"]
+    assert "视角(POV)：林夏" in blocks_by_key["chapter_beats"]
+
+    captured_prompts: list[str] = []
+
+    async def fake_post(self, url: str, **kwargs):
+        req = httpx.Request("POST", url)
+        payload = kwargs.get("json", {})
+        user_msg = payload["messages"][-1]["content"]
+        captured_prompts.append(user_msg)
+        issues = [
+            {
+                "check_type": "common_sense",
+                "ref_id": 901,
+                "ref_label": "常理#901",
+                "verdict": "violation",
+                "evidence_quote": "刚来大学报到的林夏熟门熟路地穿过三条近道",
+                "description": "违反环境熟悉度常理：大一新生刚报到不应熟知校园近道",
+                "suggestion": "改为林夏看着校园指示牌摸索前行",
+            },
+            {
+                "check_type": "common_sense",
+                "ref_id": 902,
+                "ref_label": "常理#902",
+                "verdict": "violation",
+                "evidence_quote": "一眼叫出了迎面走来的陌生学长陆川的名字",
+                "description": "违反人际初见边界：初次见面未经自我介绍便知晓陌生学长姓名",
+                "suggestion": "改为先看到对方工作牌或经人介绍后再得知姓名",
+            },
+        ]
+        body = {
+            "choices": [
+                {"message": {"content": json.dumps({"issues": issues}, ensure_ascii=False)}}
+            ],
+            "usage": {"prompt_tokens": 220, "completion_tokens": 140},
+        }
+        return httpx.Response(200, json=body, request=req)
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    r = client.post(f"/api/v1/novels/{novel_uid}/chapters/{ch}/consistency-review")
+    assert r.status_code == 201
+    assert len(captured_prompts) == 1
+    assert "【检查表D：本章情境与六大常理逻辑自洽】" in captured_prompts[0]
+    assert "[#901]【环境与空间熟悉度常理】" in captured_prompts[0]
+    assert "[#902]【人际关系与初见边界】" in captured_prompts[0]
+
+    data = r.json()
+    assert data["issue_count"] == 2
+    assert data["violation_count"] == 2
+    assert data["issues"][0]["check_type"] == "common_sense"
+    assert data["issues"][0]["ref_id"] == 901
+
+
 def test_consistency_review_clean(
     client: TestClient, novel_uid: str, monkeypatch: pytest.MonkeyPatch, character_id: int
 ) -> None:
@@ -202,3 +272,67 @@ def test_consistency_review_empty_content_rejected(
 
     r = client.post(f"/api/v1/novels/{novel_uid}/chapters/{ch}/consistency-review")
     assert r.status_code == 400
+
+
+def test_cross_chapter_continuity_guards(
+    client: TestClient, novel_uid: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Context injects prev tail + next synopsis boundary; review adds Checklist E (continuity)."""
+    _setup_llm_profile(client)
+    base = f"/api/v1/novels/{novel_uid}"
+    v_id = client.post(f"{base}/outline/volumes", json={"title": "第一卷"}).json()["id"]
+    a_id = client.post(
+        f"{base}/outline/arcs", json={"volume_id": v_id, "title": "开学篇"}
+    ).json()["id"]
+    ch1 = client.post(
+        f"{base}/outline/chapters",
+        json={"arc_id": a_id, "title": "深夜聊天", "synopsis": "她说明天再说学校的事"},
+    ).json()["id"]
+    ch2 = client.post(
+        f"{base}/outline/chapters",
+        json={"arc_id": a_id, "title": "她说她要去迎新", "synopsis": "她透露自己是临江大学的学姐"},
+    ).json()["id"]
+    for cid, text in ((ch1, "她说下周要去迎新，学校的事明天再说。"), (ch2, "她说：我下周要去迎新！")):
+        r = client.put(
+            f"{base}/chapters/{cid}/content",
+            json={"content": text, "source": "manual", "create_new_version": True},
+        )
+        assert r.status_code == 200
+
+    prev1 = client.get(f"{base}/chapters/{ch1}/context-preview").json()
+    block1 = {b["key"]: b["content"] for b in prev1["blocks"]}["summaries_and_prev"]
+    assert "下一章《她说她要去迎新》梗概" in block1
+    assert "跨章衔接边界" in block1
+
+    prev2 = client.get(f"{base}/chapters/{ch2}/context-preview").json()
+    block2 = {b["key"]: b["content"] for b in prev2["blocks"]}["summaries_and_prev"]
+    assert "学校的事明天再说" in block2
+    assert "严禁当作新信息重新揭示" in block2
+
+    captured: list[str] = []
+
+    async def fake_post(self, url: str, **kwargs):
+        captured.append(kwargs["json"]["messages"][-1]["content"])
+        issues = [
+            {
+                "check_type": "continuity",
+                "ref_id": 951,
+                "ref_label": "连贯#951",
+                "verdict": "violation",
+                "evidence_quote": "我下周要去迎新！",
+                "description": "上一章已交代迎新，本章重复揭示",
+                "suggestion": "直接承接上一章的“明天再说”",
+            }
+        ]
+        body = {
+            "choices": [{"message": {"content": json.dumps({"issues": issues}, ensure_ascii=False)}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 50},
+        }
+        return httpx.Response(200, json=body, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    r = client.post(f"{base}/chapters/{ch2}/consistency-review")
+    assert r.status_code == 201
+    assert "【检查表E：跨章连贯】" in captured[0]
+    assert "学校的事明天再说" in captured[0]
+    assert r.json()["issues"][0]["check_type"] == "continuity"

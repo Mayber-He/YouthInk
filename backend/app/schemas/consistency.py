@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-ConsistencyCheckType = Literal["constraint", "fact", "character"]
+ConsistencyCheckType = Literal["constraint", "fact", "character", "common_sense", "continuity"]
 ConsistencyVerdict = Literal["violation", "suspicious"]
 
 

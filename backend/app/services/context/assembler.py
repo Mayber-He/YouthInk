@@ -49,6 +49,8 @@ class ContextAssembler:
         scenes = self._writing_repo.list_scenes(chapter_id)
         all_chars = self._entity_repo.list_characters()
         all_locs = self._entity_repo.list_locations()
+        char_name_by_id = {c.id: c.name for c in all_chars}
+        loc_name_by_id = {l.id: l.name for l in all_locs}
 
         active_char_ids: set[int] = set()
         active_loc_ids: set[int] = set()
@@ -88,8 +90,21 @@ class ContextAssembler:
         ]
         for idx, s in enumerate(scenes, start=1):
             marker = "👉 [当前生成场景]" if s.id == scene_id else ""
+            meta_parts: list[str] = []
+            if s.pov_character and s.pov_character in char_name_by_id:
+                meta_parts.append(f"视角(POV)：{char_name_by_id[s.pov_character]}")
+            if s.location_id and s.location_id in loc_name_by_id:
+                meta_parts.append(f"地点：{loc_name_by_id[s.location_id]}")
+            present_names = [
+                char_name_by_id[cid] for cid in s.character_ids if cid in char_name_by_id
+            ]
+            if present_names:
+                meta_parts.append(f"在场人物：{'、'.join(present_names)}")
+            if s.story_time:
+                meta_parts.append(f"时间：{s.story_time}")
+            meta_str = f" [{' | '.join(meta_parts)}]" if meta_parts else ""
             beats_lines.append(
-                f"场景 {idx} {marker}（目标 {s.target_words} 字）：{s.beat}"
+                f"场景 {idx} {marker}（目标 {s.target_words} 字）{meta_str}：{s.beat}"
             )
         blocks.append(
             self._make_block("chapter_beats", "本章细纲与场景节拍", "\n".join(beats_lines), disabled)
@@ -112,12 +127,14 @@ class ContextAssembler:
                     f"{r['char_a_name']}↔{r['char_b_name']}({r['rel_type']})"
                     for r in snap.relationships
                 )
-                or "无变更"
+                or "尚未建立熟稔关系（初见或普通不熟状态）"
             )
+            age_part = f"{c.initial_age}岁" if c.initial_age else "未填"
+            bg_part = c.background or "未填"
             char_lines.append(
-                f"• 【{c.name}】({c.role}) 外貌：{snap.effective_appearance} | "
-                f"性格：{c.personality} | 说话风格：{c.speech_style} | "
-                f"当前状态：{state_str} | 关系：{rel_str}"
+                f"• 【{c.name}】({c.role}，年龄：{age_part}) 身份背景：{bg_part} | "
+                f"外貌：{snap.effective_appearance} | 性格：{c.personality} | "
+                f"说话风格：{c.speech_style} | 当前状态：{state_str} | 关系：{rel_str}"
             )
             if snap.known_secrets:
                 sec_list = "；".join(str(s["secret"]) for s in snap.known_secrets)
@@ -126,6 +143,11 @@ class ContextAssembler:
                 known_secrets_lines.append(
                     f"• 【{c.name}】目前尚不知晓任何隐藏秘密（严禁在言行中提前剧透）"
                 )
+
+        if char_lines:
+            char_lines.append(
+                "⚠️ 视角与人际常理边界：以上人物背景仅供作者把控人设。视角人物（POV）绝不能凭空知晓其他初见/不熟角色的背景履历、家庭隐私或内心独白；称呼与亲疏分寸必须严格匹配「关系」栏状态，严禁初见自来熟或未自我介绍便直呼姓名。"
+            )
 
         blocks.append(
             self._make_block(
@@ -190,6 +212,10 @@ class ContextAssembler:
                 )
         for wv in self._entity_repo.list_worldview()[:6]:
             loc_lines.append(f"• 世界观[{wv.category}]：{wv.content}")
+        if loc_lines:
+            loc_lines.append(
+                "⚠️ 环境熟悉度与物理常理边界：以上地点设定仅供作者镜头描写参考，绝不等于角色脑中的既有记忆！若角色属于初次到访（如新生刚报到、刚转学、初访某场所），言行必须体现陌生感、四处打量、看路牌或问路，严禁表现得熟门熟路；空间移动需有合理动作过渡，严禁瞬移。"
+            )
         blocks.append(
             self._make_block(
                 "location_and_worldview",
@@ -216,6 +242,21 @@ class ContextAssembler:
         prev_tail = self._writing_repo.get_previous_chapter_text(ch.sort_order)
         if prev_tail:
             sum_lines.append(prev_tail)
+        next_row = self._conn.execute(
+            "SELECT title, synopsis FROM chapters WHERE sort_order > ? ORDER BY sort_order ASC LIMIT 1",
+            (ch.sort_order,),
+        ).fetchone()
+        if next_row and next_row["synopsis"]:
+            sum_lines.append(
+                f"【下一章《{next_row['title']}》梗概（仅作边界，本章严禁提前写入）】{next_row['synopsis']}"
+            )
+        if prev_tail or next_row:
+            sum_lines.append(
+                "⚠️ 跨章衔接边界：①上一章已交代的信息，角色均已知晓，本章严禁当作新信息重新揭示或让角色再次询问；"
+                "若本章梗概与上一章正文内容重复，以已写正文为准，跳过重复部分直接推进；"
+                "②开篇须先承接上一章结尾留下的悬念、承诺（如“明天再说”）与人物情绪，并交代时间跨度；"
+                "③不得写入下一章梗概中的事件；④避免与上一章使用相同的结构套路与收尾意象。"
+            )
         blocks.append(
             self._make_block(
                 "summaries_and_prev",

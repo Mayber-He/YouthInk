@@ -54,7 +54,7 @@ class ConsistencyReviewService:
             base_url=base_url,
             api_key=api_key,
             model=model,
-            system_prompt="你是小说一致性审查员，只输出严格 JSON，不做任何解释。",
+            system_prompt="你是小说一致性与常理逻辑审查员，只输出严格 JSON，不做任何解释。",
             user_prompt=prompt,
             novel_uid=self._novel_uid,
             task_type="consistency_review",
@@ -65,7 +65,7 @@ class ConsistencyReviewService:
         violation_count = sum(1 for i in issues if i.verdict == "violation")
         suspicious_count = len(issues) - violation_count
         if not issues:
-            summary = "未发现问题：正文与检查表一致"
+            summary = "未发现问题：正文与检查表及常理逻辑一致"
         else:
             parts = []
             if violation_count:
@@ -129,7 +129,11 @@ class ConsistencyReviewService:
         ]
 
     def _build_checklist(self, chapter_id: int, sort_order: float) -> str:
+        ch = self._outline_repo.get_chapter(chapter_id)
         scenes = self._writing_repo.list_scenes(chapter_id)
+        all_chars = self._entity_repo.list_characters()
+        char_name_by_id = {c.id: c.name for c in all_chars}
+
         char_ids = sorted(
             {
                 cid
@@ -141,7 +145,7 @@ class ConsistencyReviewService:
         if not char_ids:
             char_ids = [
                 c.id
-                for c in self._entity_repo.list_characters()
+                for c in all_chars
                 if c.role in ("female_lead", "male_lead", "major")
             ]
 
@@ -180,27 +184,64 @@ class ConsistencyReviewService:
                 continue
             snap = self._entity_repo.get_character_timeline_snapshot(cid, sort_order)
             states = "；".join(f"{k}:{v}" for k, v in snap.current_states.items())
+            rels = (
+                "；".join(
+                    f"{r['char_a_name']}↔{r['char_b_name']}({r['rel_type']})"
+                    for r in snap.relationships
+                )
+                or "尚未熟稔/初见"
+            )
             char_lines.append(
-                f"[人物#{c.id}「{c.name}」] {c.role}；{c.background or ''}"
-                f"{'；当前状态：' + states if states else ''}"
+                f"[人物#{c.id}「{c.name}」] {c.role}；身份背景：{c.background or '未填'}"
+                f"{'；当前状态：' + states if states else ''}；当前关系：{rels}"
             )
         if char_lines:
-            sections.append("【检查表C：出场人物核心属性】\n" + "\n".join(char_lines))
+            sections.append("【检查表C：出场人物核心属性与时序状态】\n" + "\n".join(char_lines))
+
+        scene_summary_lines = [
+            f"本章梗概：{ch.synopsis or '无'}（故事时间：{ch.story_time or '未指定'}）"
+        ]
+        for idx, s in enumerate(scenes, start=1):
+            pov_name = char_name_by_id.get(s.pov_character, "未指定") if s.pov_character else "未指定"
+            present = [char_name_by_id[cid] for cid in s.character_ids if cid in char_name_by_id]
+            scene_summary_lines.append(
+                f"场景{idx}（POV：{pov_name}；在场：{'、'.join(present) or '未指定'}）：{s.beat}"
+            )
+
+        common_sense_lines = [
+            *scene_summary_lines,
+            "[#901]【环境与空间熟悉度常理】若角色属于初次到访（如新生刚报到、刚转学、首次踏足某场所），绝不能表现得对校园/建筑/路线熟门熟路、轻车熟路；空间移动需有合理过渡，不能瞬移。",
+            "[#902]【人际关系与初见边界】初次见面或尚未熟稔的角色之间，绝不能无铺垫自来熟、绝不能未经自我介绍或他人提及便直呼对方姓名/绰号/知晓对方过往隐私。",
+            "[#903]【限知视角与超知边界】POV 视角人物绝不能开启上帝视角直接读取他人内心独白，也绝不能知晓其不在场时发生的事件或尚未揭晓的秘密。",
+            "[#904]【时间、季节与物理状态连续性】正文中的昼夜时间流速、季节气候与人物穿着、身体伤病限制、随身携带物品必须前后自洽，不能出现物理与季节常识矛盾。",
+            "[#905]【在场状态与身份常识】未到场或已离场的角色绝不能凭空插话或参与互动；人物言行、消费与技能不得违背其年龄、学生身份或时代背景常识。",
+        ]
+        sections.append("【检查表D：本章情境与六大常理逻辑自洽】\n" + "\n".join(common_sense_lines))
+
+        prev_tail = self._writing_repo.get_previous_chapter_text(sort_order, tail_chars=1200)
+        if prev_tail:
+            sections.append(
+                "【检查表E：跨章连贯】\n"
+                f"{prev_tail}\n"
+                "[#951]【重复揭示】上一章已交代的信息，本章不得当作新信息重新揭示，角色不得再次询问已知答案。\n"
+                "[#952]【悬念承接】上一章结尾留下的悬念、承诺或人物情绪，本章须有承接或交代，不能凭空断档。\n"
+                "[#953]【时间日期衔接】本章故事时间、日期与上一章及已交代的计划（如报到日、“下周”“明天”）须一致。"
+            )
 
         return "\n\n".join(sections)
 
     @staticmethod
     def _build_prompt(ch, content: str, checklist: str) -> str:
         return (
-            "你是小说一致性审查员。请逐项检查【待审正文】是否违反以下检查表，"
+            "你是小说一致性与常理逻辑审查员。请逐项检查【待审正文】是否违反以下检查表（含A硬软约束、B已确认事实、C人物属性、D情境常理逻辑与E跨章连贯），"
             "只输出存在问题的项（遵守的项不要输出）。\n\n"
             f"{checklist}\n\n"
             f"待审正文（第 {ch.display_index} 章《{ch.title}》）：\n{content[:6000]}\n\n"
-            "输出严格 JSON：{\"issues\": [{\"check_type\": \"constraint|fact|character\", "
-            "\"ref_id\": 检查表编号, \"ref_label\": \"如 硬约束#1\", "
+            "输出严格 JSON：{\"issues\": [{\"check_type\": \"constraint|fact|character|common_sense|continuity\", "
+            "\"ref_id\": 检查表编号, \"ref_label\": \"如 硬约束#1、常理#901 或 连贯#951\", "
             "\"verdict\": \"violation|suspicious\", "
             "\"evidence_quote\": \"正文原句证据\", "
-            "\"description\": \"违反说明\", \"suggestion\": \"一句话修改建议\"}]}。\n"
-            "判定标准：violation=明确违反检查表；suspicious=疑似但证据不足。"
+            "\"description\": \"违反说明（指出为何违背设定或常理）\", \"suggestion\": \"一句话修改建议\"}]}。\n"
+            "判定标准：violation=明确违反检查表或违反情境常理（例如新生刚报到却对学校熟门熟路、初见未介绍却直呼姓名、上帝视角读心等）；suspicious=疑似但证据不足。"
             "不要输出任何解释文字。"
         )

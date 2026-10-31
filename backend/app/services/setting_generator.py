@@ -397,7 +397,13 @@ class SettingGeneratorService:
             f"全书主线冲突：{main_plot.core_conflict}\n"
             f"本弧已锁定章节：{json.dumps([{'title': c.title, 'synopsis': c.synopsis} for c in existing_locked], ensure_ascii=False)}"
         )
-        inst = f"请为情节弧「{arc.title}」滚动生成 {chapter_count} 章的章节目录（含章节标题、单章详细梗概、故事内时间）。"
+        inst = (
+            f"请为情节弧「{arc.title}」滚动生成 {chapter_count} 章的章节目录（含章节标题、单章详细梗概、故事内时间）。\n"
+            "【跨章连贯要求】①相邻章节的核心事件与信息揭示严禁重叠：某条信息（如身份、学校、计划）只能在一章中首次揭示，"
+            "后续章节只能引用或推进，不得让角色重新得知或再次询问；"
+            "②上一章结尾留下的悬念/承诺（如“明天再说”）必须在下一章开头得到回应，故事内时间须与之吻合；"
+            "③各章故事内时间与日期（如报到日）须前后一致；人物之间的已知程度（是否见过面、通过视频/语音还是仅文字）须保持一致。"
+        )
         if instruction:
             inst += f"\n作者附加要求：{instruction}"
 

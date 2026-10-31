@@ -54,11 +54,13 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
   const [autoSavedAt, setAutoSavedAt] = useState<string | null>(null);
   const [selectionRange, setSelectionRange] = useState({ start: 0, end: 0, text: "" });
   const [smellHits, setSmellHits] = useState<AiSmellHit[]>([]);
+  const [hasScannedSmell, setHasScannedSmell] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
   const [reviewResult, setReviewResult] = useState<ConsistencyReviewResponse | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
   const reviewMut = useRunConsistencyReview(novelUid, effectiveChapterId ?? 0);
   const isComposingRef = useRef(false);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const { data: contextPreview, isLoading: isCtxLoading } = useContextPreview(
     novelUid,
@@ -79,6 +81,8 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
   useEffect(() => {
     if (workspace) {
       setContent(workspace.latest_content);
+      setHasScannedSmell(false);
+      setSmellHits([]);
       if (!activeSceneId && workspace.scenes.length > 0) {
         setActiveSceneId(workspace.scenes[0].id);
       }
@@ -160,6 +164,18 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
     );
   };
 
+  const handleFocusSmellHit = (hit: AiSmellHit) => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.focus();
+    el.setSelectionRange(hit.start_index, hit.end_index);
+    setSelectionRange({
+      start: hit.start_index,
+      end: hit.end_index,
+      text: content.slice(hit.start_index, hit.end_index),
+    });
+  };
+
   if (allChapters.length === 0) {
     return (
       <div className="p-8">
@@ -191,6 +207,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
           scenes={workspace.scenes}
           activeSceneId={activeSceneId}
           isStreaming={isStreaming}
+          isScanningSmell={smellMut.isPending}
           onSelectChapter={setSelectedChapterId}
           onSelectScene={setActiveSceneId}
           onWriteWholeChapter={() => runStreamWrite("chapter", null)}
@@ -198,6 +215,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
           onScanSmell={async () => {
             const res = await smellMut.mutateAsync(content);
             setSmellHits(res.hits);
+            setHasScannedSmell(true);
           }}
           onRunConsistencyReview={async () => {
             if (!effectiveChapterId) return;
@@ -232,13 +250,20 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
             selectedText={selectionRange.text}
             characters={characters}
             aiSmellHits={smellHits}
+            hasScannedSmell={hasScannedSmell}
             isStreaming={isStreaming}
             onRewriteSelection={handleRewriteSelection}
             onRewriteSmellHit={handleRewriteSmellHit}
+            onFocusSmellHit={handleFocusSmellHit}
+            onDismissSmell={() => {
+              setHasScannedSmell(false);
+              setSmellHits([]);
+            }}
           />
         </div>
 
         <textarea
+          ref={textareaRef}
           value={content}
           onCompositionStart={() => { isComposingRef.current = true; }}
           onCompositionEnd={(e) => {

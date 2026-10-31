@@ -9,7 +9,12 @@ export type MemoryItemCategory =
 export type ForeshadowStatus = "planted" | "hinted" | "recovered" | "abandoned";
 export type SummaryLevel = "chapter" | "arc" | "volume" | "novel";
 
-export type ConsistencyCheckType = "constraint" | "fact" | "character";
+export type ConsistencyCheckType =
+  | "constraint"
+  | "fact"
+  | "character"
+  | "common_sense"
+  | "continuity";
 export type ConsistencyVerdict = "violation" | "suspicious";
 
 export interface ConsistencyIssue {

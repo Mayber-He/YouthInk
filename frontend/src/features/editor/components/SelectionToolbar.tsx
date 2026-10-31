@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { AlertTriangle, Sparkles, Wand2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Sparkles, Wand2, X } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import type { CharacterItem } from "@/types/api";
@@ -9,6 +9,7 @@ interface SelectionToolbarProps {
   selectedText: string;
   characters: CharacterItem[];
   aiSmellHits: AiSmellHit[];
+  hasScannedSmell?: boolean;
   isStreaming: boolean;
   onRewriteSelection: (
     actionType: RewriteActionType,
@@ -16,15 +17,20 @@ interface SelectionToolbarProps {
     instruction: string
   ) => void;
   onRewriteSmellHit: (hit: AiSmellHit) => void;
+  onFocusSmellHit?: (hit: AiSmellHit) => void;
+  onDismissSmell?: () => void;
 }
 
 export const SelectionToolbar: React.FC<SelectionToolbarProps> = ({
   selectedText,
   characters,
   aiSmellHits,
+  hasScannedSmell = false,
   isStreaming,
   onRewriteSelection,
   onRewriteSmellHit,
+  onFocusSmellHit,
+  onDismissSmell,
 }) => {
   const [targetCharId, setTargetCharId] = useState<number | null>(null);
   const [customNote, setCustomNote] = useState("");
@@ -92,14 +98,49 @@ export const SelectionToolbar: React.FC<SelectionToolbarProps> = ({
         </div>
       )}
 
+      {/* 本地 AI 味检测未发现套话时的正向反馈提示条 */}
+      {hasScannedSmell && aiSmellHits.length === 0 && (
+        <div className="flex items-center justify-between rounded-xl border border-emerald-200 bg-emerald-50/70 px-3.5 py-2.5 text-xs text-emerald-800 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-300">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" />
+            <span>
+              <strong>AI 味检测通过：</strong>
+              未在当前正文中检测到高频网文套话与风格禁用词。如需深度润色某段文字，可直接在下方正文中鼠标划选段落，点击「去AI味润色」。
+            </span>
+          </div>
+          {onDismissSmell && (
+            <button
+              type="button"
+              onClick={onDismissSmell}
+              className="ml-2 rounded p-1 text-emerald-600 hover:bg-emerald-100 cursor-pointer"
+              title="关闭提示"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
+      )}
+
       {/* 本地 AI 味检测波浪线提示条（设计文档 6.4 & 7.4） */}
       {aiSmellHits.length > 0 && (
         <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3 text-xs dark:border-amber-900/50 dark:bg-amber-950/30">
-          <div className="flex items-center gap-1.5 font-semibold text-amber-900 dark:text-amber-300">
-            <AlertTriangle className="h-4 w-4 text-amber-600" />
-            <span>
-              本地 AI 味检测发现 {aiSmellHits.length} 处高频套话（点击可一键改写该处）：
-            </span>
+          <div className="flex items-center justify-between font-semibold text-amber-900 dark:text-amber-300">
+            <div className="flex items-center gap-1.5">
+              <AlertTriangle className="h-4 w-4 text-amber-600" />
+              <span>
+                本地 AI 味检测发现 {aiSmellHits.length} 处高频套话（点击词条定位原文，点击「一键改句」由 AI 重写该句）：
+              </span>
+            </div>
+            {onDismissSmell && (
+              <button
+                type="button"
+                onClick={onDismissSmell}
+                className="rounded p-1 text-amber-700 hover:bg-amber-100 cursor-pointer"
+                title="收起检测结果"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
           </div>
           <div className="mt-2 flex flex-wrap gap-2">
             {aiSmellHits.map((hit, idx) => (
@@ -107,9 +148,14 @@ export const SelectionToolbar: React.FC<SelectionToolbarProps> = ({
                 key={`${hit.start_index}-${idx}`}
                 className="flex items-center gap-1.5 rounded-lg border border-amber-300/80 bg-white px-2.5 py-1 dark:border-amber-800 dark:bg-slate-900"
               >
-                <span className="underline decoration-amber-500 decoration-wavy font-medium text-slate-800 dark:text-slate-200">
+                <button
+                  type="button"
+                  onClick={() => onFocusSmellHit?.(hit)}
+                  className="underline decoration-amber-500 decoration-wavy font-medium text-slate-800 hover:text-indigo-600 cursor-pointer dark:text-slate-200"
+                  title="点击在编辑器中定位高亮该词"
+                >
                   「{hit.matched_text}」
-                </span>
+                </button>
                 <span className="text-[11px] text-slate-500">
                   ({hit.suggestion})
                 </span>

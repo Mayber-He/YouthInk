@@ -13,6 +13,7 @@ from app.core.exceptions import AppError
 from app.db.init_schema import init_global_db, init_novel_db
 
 _SAFE_UID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+_ENSURED_NOVEL_DB_PATHS: set[str] = set()
 
 
 def validate_novel_uid(novel_uid: str) -> str:
@@ -75,12 +76,14 @@ def get_novel_db(novel_uid: str, create_if_missing: bool = False) -> Iterator[sq
             status_code=404,
         )
     is_new = not db_path.exists()
+    db_key = str(db_path.resolve())
     conn = _open_sqlite(db_path)
     try:
-        if is_new:
+        if is_new or db_key not in _ENSURED_NOVEL_DB_PATHS:
             init_novel_db(conn)
             cfg.novel_vectors_dir(novel_uid).mkdir(parents=True, exist_ok=True)
             cfg.novel_backups_dir(novel_uid).mkdir(parents=True, exist_ok=True)
+            _ENSURED_NOVEL_DB_PATHS.add(db_key)
         yield conn
         conn.commit()
     except Exception:

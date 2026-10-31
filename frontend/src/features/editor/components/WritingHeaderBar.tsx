@@ -26,6 +26,7 @@ interface WritingHeaderBarProps {
   scenes: SceneItem[];
   activeSceneId: number | null;
   isStreaming: boolean;
+  isScanningSmell?: boolean;
   onSelectChapter: (chapterId: number) => void;
   onSelectScene: (sceneId: number) => void;
   onWriteWholeChapter: () => void;
@@ -46,6 +47,7 @@ export const WritingHeaderBar: React.FC<WritingHeaderBarProps> = ({
   scenes,
   activeSceneId,
   isStreaming,
+  isScanningSmell = false,
   onSelectChapter,
   onSelectScene,
   onWriteWholeChapter,
@@ -94,9 +96,14 @@ export const WritingHeaderBar: React.FC<WritingHeaderBarProps> = ({
             </Button>
           )}
 
-          <Button variant="outline" size="sm" onClick={onScanSmell}>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={isScanningSmell}
+            onClick={onScanSmell}
+          >
             <SearchCheck className="h-3.5 w-3.5" />
-            AI 味检测
+            {isScanningSmell ? "检测中..." : "AI 味检测"}
           </Button>
 
           <Button variant="outline" size="sm" onClick={onRunConsistencyReview}>
