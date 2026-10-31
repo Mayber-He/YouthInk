@@ -247,6 +247,27 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
     saveMut.mutate({ content: updated, source: "ai", create_new_version: true });
   };
 
+  const handleApplyReviewRewrite = (evidence: string, rewrite: string): boolean => {
+    if (!effectiveChapterId || !evidence.trim() || !rewrite.trim()) return false;
+    let updated: string | null = null;
+    if (content.includes(evidence)) {
+      updated = content.replace(evidence, rewrite);
+    } else {
+      const trimmed = evidence.trim();
+      const idx = content.indexOf(trimmed);
+      if (idx !== -1) {
+        updated = content.slice(0, idx) + rewrite + content.slice(idx + trimmed.length);
+      }
+    }
+
+    if (updated !== null) {
+      setContent(updated);
+      saveMut.mutate({ content: updated, source: "ai", create_new_version: true });
+      return true;
+    }
+    return false;
+  };
+
   const handleFocusSmellHit = (hit: AiSmellHit) => {
     const el = textareaRef.current;
     if (!el) return;
@@ -457,6 +478,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
         review={reviewResult}
         running={reviewMut.isPending}
         error={reviewError}
+        onApplyRewrite={handleApplyReviewRewrite}
       />
       <ConfirmModal
         open={confirmOverwriteOpen}

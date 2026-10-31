@@ -25,6 +25,7 @@ export interface ConsistencyIssue {
   evidence_quote: string;
   description: string;
   suggestion: string;
+  suggested_rewrite?: string;
 }
 
 export interface ConsistencyReviewResponse {

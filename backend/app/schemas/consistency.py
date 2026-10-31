@@ -20,6 +20,7 @@ class ConsistencyIssue(BaseModel):
     evidence_quote: str = ""
     description: str = ""
     suggestion: str = ""
+    suggested_rewrite: str = ""
 
     @field_validator("ref_id", mode="before")
     @classmethod

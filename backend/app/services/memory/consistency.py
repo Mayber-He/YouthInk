@@ -242,7 +242,7 @@ class ConsistencyReviewService:
             "\"ref_id\": 检查表编号, \"ref_label\": \"如 硬约束#1、常理#901 或 连贯#951\", "
             "\"verdict\": \"violation|suspicious\", "
             "\"evidence_quote\": \"正文原句证据\", "
-            "\"description\": \"违反说明（指出为何违背设定或常理）\", \"suggestion\": \"一句话修改建议\"}]}。\n"
+            "\"description\": \"违反说明（指出为何违背设定或常理）\", \"suggestion\": \"一句话修改思路\", \"suggested_rewrite\": \"修改后的正文片段（必须可无缝直接替换evidence_quote，保留叙事口吻并修正逻辑漏洞）\"}]}。\n"
             "判定标准：violation=明确违反检查表或违反情境常理（例如新生刚报到却对学校熟门熟路、初见未介绍却直呼姓名、上帝视角读心等）；suspicious=疑似但证据不足。"
             "不要输出任何解释文字。"
         )
