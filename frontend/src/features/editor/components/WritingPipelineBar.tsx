@@ -1,5 +1,5 @@
 import React from "react";
-import { Check, CheckCircle2, ChevronRight, Eye, Loader2, ShieldAlert, Sparkles, X } from "lucide-react";
+import { AlertCircle, Check, CheckCircle2, ChevronRight, Eye, Loader2, ShieldAlert, Sparkles, X } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 
 export type WritingPipelineStep =
@@ -17,7 +17,9 @@ interface WritingPipelineBarProps {
   issueCount?: number;
   violationCount?: number;
   reviewSummary?: string | null;
+  reviewError?: string | null;
   onOpenReviewDetail?: () => void;
+  onRetryReview?: () => void;
   onDismiss?: () => void;
 }
 
@@ -35,7 +37,9 @@ export const WritingPipelineBar: React.FC<WritingPipelineBarProps> = ({
   issueCount = 0,
   violationCount = 0,
   reviewSummary,
+  reviewError,
   onOpenReviewDetail,
+  onRetryReview,
   onDismiss,
 }) => {
   if (currentStep === "idle") return null;
@@ -156,7 +160,22 @@ export const WritingPipelineBar: React.FC<WritingPipelineBarProps> = ({
         {currentStep === "completed" && (
           <div className="flex w-full flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2">
-              {issueCount === 0 ? (
+              {reviewError ? (
+                <div className="flex items-center gap-2 text-rose-600 dark:text-rose-400">
+                  <AlertCircle className="h-4 w-4 shrink-0" />
+                  <span className="font-medium">自动质检异常：{reviewError}</span>
+                  {onRetryReview && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={onRetryReview}
+                      className="h-6 gap-1 border-rose-300 bg-rose-50 px-2 text-xs text-rose-700 hover:bg-rose-100 dark:border-rose-800 dark:bg-rose-950/40 dark:text-rose-300"
+                    >
+                      重试质检
+                    </Button>
+                  )}
+                </div>
+              ) : issueCount === 0 ? (
                 <>
                   <CheckCircle2 className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
                   <span className="font-semibold text-emerald-800 dark:text-emerald-300">

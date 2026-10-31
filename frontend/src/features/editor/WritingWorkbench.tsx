@@ -68,6 +68,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
   const [generatedWordsCount, setGeneratedWordsCount] = useState(0);
   const critiqueMut = useCritiqueSelection(novelUid, effectiveChapterId ?? 0);
   const reviewMut = useRunConsistencyReview(novelUid, effectiveChapterId ?? 0);
+  const prevChapterIdRef = useRef<number | null>(effectiveChapterId);
   const isComposingRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -92,7 +93,12 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
       setContent(workspace.latest_content);
       setHasScannedSmell(false);
       setSmellHits([]);
-      setPipelineStep("idle");
+      if (prevChapterIdRef.current !== workspace.chapter.id) {
+        setPipelineStep("idle");
+        setReviewResult(null);
+        setReviewError(null);
+        prevChapterIdRef.current = workspace.chapter.id;
+      }
       if (!activeSceneId && workspace.scenes.length > 0) {
         setActiveSceneId(workspace.scenes[0].id);
       }
@@ -111,6 +117,19 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
       { content: nextText, source: "manual", create_new_version: false },
       { onSuccess: () => setAutoSavedAt(new Date().toLocaleTimeString([], { hour12: false })) }
     );
+  };
+
+  const runAutoReview = async () => {
+    setPipelineStep("reviewing");
+    setReviewError(null);
+    try {
+      const res = await reviewMut.mutateAsync();
+      setReviewResult(res);
+      setPipelineStep("completed");
+    } catch (e) {
+      setReviewError(e instanceof Error ? e.message : "自动审查失败");
+      setPipelineStep("completed");
+    }
   };
 
   const executeStreamWrite = (mode: "scene" | "chapter", sceneId: number | null) => {
@@ -148,15 +167,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
         }
 
         // 正文生成完毕，自动进行常理与一致性检查
-        setPipelineStep("reviewing");
-        try {
-          const res = await reviewMut.mutateAsync();
-          setReviewResult(res);
-          setPipelineStep("completed");
-        } catch (e) {
-          setReviewError(e instanceof Error ? e.message : "自动审查失败");
-          setPipelineStep("completed");
-        }
+        await runAutoReview();
       },
       (meta) => {
         setStreamModelName(meta.model);
@@ -312,7 +323,9 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
           issueCount={reviewResult?.issue_count ?? 0}
           violationCount={reviewResult?.violation_count ?? 0}
           reviewSummary={reviewResult?.summary}
+          reviewError={reviewError}
           onOpenReviewDetail={() => setReviewOpen(true)}
+          onRetryReview={runAutoReview}
           onDismiss={() => setPipelineStep("idle")}
         />
 

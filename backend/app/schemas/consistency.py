@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 ConsistencyCheckType = Literal["constraint", "fact", "character", "common_sense", "continuity"]
 ConsistencyVerdict = Literal["violation", "suspicious"]
@@ -20,6 +20,19 @@ class ConsistencyIssue(BaseModel):
     evidence_quote: str = ""
     description: str = ""
     suggestion: str = ""
+
+    @field_validator("ref_id", mode="before")
+    @classmethod
+    def parse_ref_id(cls, v: Any) -> int | None:
+        if v is None:
+            return None
+        if isinstance(v, int):
+            return v
+        if isinstance(v, str):
+            cleaned = v.replace("#", "").strip()
+            if cleaned.isdigit():
+                return int(cleaned)
+        return None
 
 
 class LlmConsistencyOutput(BaseModel):

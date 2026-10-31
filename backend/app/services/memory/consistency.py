@@ -59,6 +59,7 @@ class ConsistencyReviewService:
             novel_uid=self._novel_uid,
             task_type="consistency_review",
             chapter_id=chapter_id,
+            timeout_sec=90.0,
         )
         parsed = await parse_and_validate_json(res.content, LlmConsistencyOutput)
         issues = [i for i in parsed.issues if i.verdict in ("violation", "suspicious")]
