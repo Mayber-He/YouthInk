@@ -239,9 +239,19 @@ class ContextAssembler:
         sum_lines = [
             f"• 《{r['title']}》摘要：{r['content']}" for r in reversed(sum_rows)
         ]
-        prev_tail = self._writing_repo.get_previous_chapter_text(ch.sort_order)
-        if prev_tail:
-            sum_lines.append(prev_tail)
+        prev_row = self._conn.execute(
+            "SELECT title, synopsis FROM chapters WHERE sort_order < ? ORDER BY sort_order DESC LIMIT 1",
+            (ch.sort_order,),
+        ).fetchone()
+        if prev_row and prev_row["synopsis"]:
+            sum_lines.append(
+                f"【上一章《{prev_row['title']}》梗概（事实与剧情连续性依据）】{prev_row['synopsis']}"
+            )
+        prev_content = self._writing_repo.get_previous_chapter_text(
+            ch.sort_order, tail_chars=None
+        )
+        if prev_content:
+            sum_lines.append(prev_content)
         next_row = self._conn.execute(
             "SELECT title, synopsis FROM chapters WHERE sort_order > ? ORDER BY sort_order ASC LIMIT 1",
             (ch.sort_order,),
@@ -250,11 +260,17 @@ class ContextAssembler:
             sum_lines.append(
                 f"【下一章《{next_row['title']}》梗概（仅作边界，本章严禁提前写入）】{next_row['synopsis']}"
             )
-        if prev_tail or next_row:
+        if prev_row or prev_content or next_row:
             sum_lines.append(
                 "⚠️ 跨章衔接边界：①上一章已交代的信息，角色均已知晓，本章严禁当作新信息重新揭示或让角色再次询问；"
+                "上一章梗概与结尾正文是连续性事实来源；角色首次得知某信息的时间，以其中明确写出的场景为准，"
+                "不得把人物卡里的背景设定当作角色过去已听过的内容，也不得补造上下文没有记载的旧聊天或旧告知；"
+                "回复涉及未来日期的提醒时，必须先核对当前章日期；时间尚未到，不得写成已经出发、到达或完成；"
+                "若‘到了’指回家，必须明确写出‘到家了’，并确保回复动机自然；"
                 "若本章梗概与上一章正文内容重复，以已写正文为准，跳过重复部分直接推进；"
-                "②开篇须先承接上一章结尾留下的悬念、承诺（如“明天再说”）与人物情绪，并交代时间跨度；"
+                "②开篇须先承接上一章结尾留下的悬念、承诺（如“明天再说”）与人物情绪；故事时间只用于保持连贯，"
+                "不要求每章开篇直接报日期或时间，可从动作、对话、物件或人物状态切入，再在需要时自然交代时间；"
+                "相邻章节开头应改变切入方式，避免反复使用日期加天气/时段的固定句式；"
                 "③不得写入下一章梗概中的事件；④避免与上一章使用相同的结构套路与收尾意象。"
             )
         blocks.append(

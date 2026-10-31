@@ -10,8 +10,11 @@ import httpx
 import pytest
 
 from app.core.config import reset_config_for_testing
-from app.db.manager import ensure_global_db_initialized, get_novel_db
+from app.db.manager import ensure_global_db_initialized, get_global_db, get_novel_db
+from app.db.repositories.settings_repo import SettingsRepository
 from app.main import create_app
+from app.schemas.writing import StreamWriteRequest
+from app.services.writing_service import WritingService
 
 
 @pytest.fixture()
@@ -198,6 +201,75 @@ def test_scenes_versions_context_and_export(
     assert "第一版草稿：调音台的红灯亮起。" in ch_md_resp.text
 
 
+def test_chapter_prompt_uses_outline_once_and_requires_clear_chinese(
+    client: TestClient, setup_chapter: tuple[str, int, int]
+) -> None:
+    uid, ch_id, _ = setup_chapter
+    synopsis = "林夏第一次在放学后独自值班试音，偶遇走错门的陆川。"
+    with get_novel_db(uid) as novel_conn, get_global_db() as global_conn:
+        service = WritingService(uid, novel_conn, SettingsRepository(global_conn))
+        _system_prompt, user_prompt = service.prepare_stream_write_prompts(
+            StreamWriteRequest(chapter_id=ch_id, mode="chapter")
+        )
+        _scene_system_prompt, scene_user_prompt = service.prepare_stream_write_prompts(
+            StreamWriteRequest(chapter_id=ch_id, mode="scene", scene_id=1)
+        )
+
+    assert user_prompt.count(synopsis) == 1
+    assert "这张纸，家里只有爸妈知道”对象错位" in user_prompt
+    assert "普通动作用清楚直白的中文写" in user_prompt
+    assert "聊天界面提示必须按当前视角区分发起者和接收者" in user_prompt
+    assert "自己收到对方撤回的消息时，应写“对方撤回了一条消息”" in user_prompt
+    assert "若本章梗概要求重写前文已发生的事件或复用前文标志性原句，以前文为准" in user_prompt
+    assert "前文已出现的完整台词不得原样再次安排" in user_prompt
+    assert "故事时间只用于保持连贯，不要求每章开篇直接报日期或时间" in user_prompt
+    assert "相邻章节开头应改变切入方式" in user_prompt
+    assert "相对日期必须按当前场景的具体故事日期换算" in user_prompt
+    assert "日常动作只保留能推动情节或改变人物状态的部分" in user_prompt
+    assert "不要把收拾、做饭、等待等过程拆成连续的微动作清单" in user_prompt
+    assert "目标字数是参考，不得用重复心理、同义解释或无结果动作补足篇幅" in user_prompt
+    assert "建议范围 2,000–2,800 字" in user_prompt
+    assert "字数范围仅供参考，叙事完整、表达紧凑优先" in user_prompt
+    assert "640–896 字" in scene_user_prompt
+    assert "不得为达到下限补写流水账" in scene_user_prompt
+    assert "不得虚构上下文中没有发生过的旧对话或旧事件" in user_prompt
+    assert "不要让人物确认所有人都知道的常识" in user_prompt
+
+
+def test_next_chapter_prompt_includes_previous_chapter_synopsis(
+    client: TestClient, setup_chapter: tuple[str, int, int]
+) -> None:
+    uid, _previous_chapter_id, _ = setup_chapter
+    previous_synopsis = "林夏第一次在放学后独自值班试音，偶遇走错门的陆川。"
+    outline = client.get(f"/api/v1/novels/{uid}/outline").json()
+    arc_id = outline["volumes"][0]["arcs"][0]["id"]
+    previous_opening = "【前章开头事实】"
+    previous_ending = "【前章最后一句】"
+    previous_content = previous_opening + "中间情节。" * 500 + previous_ending
+    client.put(
+        f"/api/v1/novels/{uid}/chapters/{previous_chapter_id}/content",
+        json={"content": previous_content, "source": "manual", "create_new_version": True},
+    )
+    next_chapter = client.post(
+        f"/api/v1/novels/{uid}/outline/chapters",
+        json={"arc_id": arc_id, "title": "碰上了也别认我", "synopsis": "承接上一章。"},
+    ).json()
+
+    with get_novel_db(uid) as novel_conn, get_global_db() as global_conn:
+        service = WritingService(uid, novel_conn, SettingsRepository(global_conn))
+        _system_prompt, user_prompt = service.prepare_stream_write_prompts(
+            StreamWriteRequest(chapter_id=next_chapter["id"], mode="chapter")
+        )
+
+    assert "上一章梗概" in user_prompt
+    assert previous_synopsis in user_prompt
+    assert previous_opening in user_prompt
+    assert previous_ending in user_prompt
+    assert "不得把人物卡里的背景设定当作角色过去已听过的内容" in user_prompt
+    assert "回复涉及未来日期的提醒时，必须先核对当前章日期" in user_prompt
+    assert "时间尚未到，不得写成已经出发、到达或完成" in user_prompt
+
+
 def test_ai_smell_scanner_and_sse_streaming(
     client: TestClient, setup_chapter: tuple[str, int, int], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -228,8 +300,11 @@ def test_ai_smell_scanner_and_sse_streaming(
         async def aread(self) -> bytes:
             return b""
 
+    stream_temperatures: list[float] = []
+
     @asynccontextmanager
     async def fake_stream(self, method: str, url: str, **kwargs):  # type: ignore[no-untyped-def]
+        stream_temperatures.append(kwargs["json"]["temperature"])
         yield FakeStreamResponse()
 
     monkeypatch.setattr(httpx.AsyncClient, "stream", fake_stream)
@@ -242,6 +317,7 @@ def test_ai_smell_scanner_and_sse_streaming(
     assert "event: meta" in write_sse.text
     assert "夕阳把走廊拉得很长，" in write_sse.text
     assert "event: done" in write_sse.text
+    assert stream_temperatures == [0.7]
 
     rewrite_sse = client.post(
         f"/api/stream/novels/{uid}/rewrite",
@@ -266,8 +342,11 @@ def test_critique_selection_detects_contradiction(
     client: TestClient, setup_chapter: tuple[str, int, int], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     uid, ch_id, _ = setup_chapter
+    captured_system_prompt = ""
 
     async def fake_post(self, url: str, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal captured_system_prompt
+        captured_system_prompt = kwargs["json"]["messages"][0]["content"]
         payload = json.dumps(
             {
                 "has_issue": True,
@@ -297,3 +376,6 @@ def test_critique_selection_detects_contradiction(
     assert data["issue_type"] == "time_conflict"
     assert "高考完" in data["description"]
     assert "开学前" in data["suggestion"]
+    assert "对话动机与话题连续性" in captured_system_prompt
+    assert "对话动机牵强" in captured_system_prompt
+    assert "她问过一次“你今年开学吗”" in captured_system_prompt

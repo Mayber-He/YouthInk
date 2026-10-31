@@ -43,6 +43,33 @@ export const OutlineSection: React.FC<OutlineSectionProps> = ({ novelUid }) => {
   const [aiInstruction, setAiInstruction] = useState("");
   const [errMsg, setErrMsg] = useState<string | null>(null);
 
+  const showMutationError = (err: unknown, fallback: string) => {
+    setErrMsg(err instanceof Error ? err.message : fallback);
+  };
+
+  const handleUpdateChapter = async (
+    chapterId: number,
+    input: Partial<{ title: string; synopsis: string; locked: boolean }>
+  ) => {
+    setErrMsg(null);
+    try {
+      await updateChMut.mutateAsync({ id: chapterId, input });
+    } catch (err) {
+      showMutationError(err, "更新章节失败");
+    }
+  };
+
+  const handleReorderChapter = (input: {
+    target_id: number;
+    prev_sort_order: number | null;
+    next_sort_order: number | null;
+  }) => {
+    setErrMsg(null);
+    void reorderChMut.mutateAsync(input).catch((err: unknown) => {
+      showMutationError(err, "调整章节顺序失败");
+    });
+  };
+
   const handleGenerateStructure = async () => {
     setErrMsg(null);
     try {
@@ -56,6 +83,15 @@ export const OutlineSection: React.FC<OutlineSectionProps> = ({ novelUid }) => {
     }
   };
 
+  const handleGenerateArcChapters = async (arcId: number) => {
+    setErrMsg(null);
+    try {
+      await genArcChMut.mutateAsync({ arcId, chapterCount: 5 });
+    } catch (err) {
+      showMutationError(err, "生成章节大纲失败");
+    }
+  };
+
   const handleMoveChapter = (
     chapters: ChapterItem[],
     index: number,
@@ -66,7 +102,7 @@ export const OutlineSection: React.FC<OutlineSectionProps> = ({ novelUid }) => {
     if (direction === "up" && index > 0) {
       const prevPrev = index >= 2 ? chapters[index - 2].sort_order : null;
       const prev = chapters[index - 1].sort_order;
-      reorderChMut.mutate({
+      handleReorderChapter({
         target_id: target.id,
         prev_sort_order: prevPrev,
         next_sort_order: prev,
@@ -75,7 +111,7 @@ export const OutlineSection: React.FC<OutlineSectionProps> = ({ novelUid }) => {
       const next = chapters[index + 1].sort_order;
       const nextNext =
         index + 2 < chapters.length ? chapters[index + 2].sort_order : null;
-      reorderChMut.mutate({
+      handleReorderChapter({
         target_id: target.id,
         prev_sort_order: next,
         next_sort_order: nextNext,
@@ -216,9 +252,7 @@ export const OutlineSection: React.FC<OutlineSectionProps> = ({ novelUid }) => {
                     key={arc.id}
                     arc={arc}
                     isGenerating={genArcChMut.isPending}
-                    onGenerateChapters={(arcId) =>
-                      genArcChMut.mutate({ arcId, chapterCount: 5 })
-                    }
+                    onGenerateChapters={(arcId) => void handleGenerateArcChapters(arcId)}
                     onCreateChapter={(arcId) =>
                       createChMut.mutate({
                         arc_id: arcId,
@@ -228,7 +262,7 @@ export const OutlineSection: React.FC<OutlineSectionProps> = ({ novelUid }) => {
                     }
                     onDeleteArc={(arcId) => deleteArcMut.mutate(arcId)}
                     onUpdateChapter={(chId, input) =>
-                      updateChMut.mutate({ id: chId, input })
+                      void handleUpdateChapter(chId, input)
                     }
                     onMoveChapter={handleMoveChapter}
                     onOpenWriting={(chId) => {

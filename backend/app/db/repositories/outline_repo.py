@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 
 from app.core.exceptions import AppError
@@ -34,6 +35,177 @@ def compute_float_sort_order(
     if next_sort is not None:
         return next_sort / 2.0 if next_sort > 0 else next_sort - 1.0
     return default_max + 1.0
+
+
+_DATE_PATTERN = re.compile(
+    r"(?:(?P<year>\d{4})年)?(?P<month>\d{1,2}|[一二三四五六七八九十]{1,3})月"
+    r"(?P<day>\d{1,2}|[一二三四五六七八九十]{1,3})[日号]"
+)
+
+
+def _chinese_number(value: str) -> int:
+    digits = {
+        "零": 0,
+        "〇": 0,
+        "一": 1,
+        "二": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+    }
+    if value == "十":
+        return 10
+    if "十" in value:
+        tens, _, ones = value.partition("十")
+        return (digits[tens] if tens else 1) * 10 + (digits[ones] if ones else 0)
+    if len(value) == 1:
+        return digits[value]
+    return int("".join(str(digits[char]) for char in value))
+
+
+def _explicit_chapter_date(
+    value: str, *, leading_only: bool = False
+) -> tuple[int | None, int, int] | None:
+    value = value.lstrip()
+    match = _DATE_PATTERN.match(value) if leading_only else _DATE_PATTERN.search(value)
+    if not match:
+        return None
+    month_text, day_text = match.group("month"), match.group("day")
+    month = int(month_text) if month_text.isdigit() else _chinese_number(month_text)
+    day = int(day_text) if day_text.isdigit() else _chinese_number(day_text)
+    if not 1 <= month <= 12 or not 1 <= day <= 31:
+        return None
+    year = int(match.group("year")) if match.group("year") else None
+    return year, month, day
+
+
+def _date_is_before(
+    current: tuple[tuple[int | None, int, int], int | None],
+    previous: tuple[tuple[int | None, int, int], int | None],
+) -> bool:
+    current_date, current_hour = current
+    previous_date, previous_hour = previous
+    current_year, current_month, current_day = current_date
+    previous_year, previous_month, previous_day = previous_date
+    if current_year is not None and previous_year is not None:
+        date_is_before = (current_year, current_month, current_day) < (
+            previous_year, previous_month, previous_day
+        )
+    else:
+        current_day_of_year = current_month * 32 + current_day
+        previous_day_of_year = previous_month * 32 + previous_day
+        delta = current_day_of_year - previous_day_of_year
+        # A large backwards jump is likely a year boundary (for example Dec 31 to Jan 1).
+        date_is_before = delta < 0 and delta > -186
+    if date_is_before:
+        return True
+    return (
+        current_date == previous_date
+        and current_hour is not None
+        and previous_hour is not None
+        and current_hour < previous_hour
+    )
+
+
+def _explicit_chapter_hour(value: str) -> int | None:
+    match = re.search(
+        r"(凌晨|清晨|早晨|上午|中午|下午|傍晚|晚上|夜里|深夜)?\s*"
+        r"([0-9]{1,2}|[一二三四五六七八九十]{1,3})点(?:半)?",
+        value,
+    )
+    if match:
+        period, hour_text = match.groups()
+        hour = int(hour_text) if hour_text.isdigit() else _chinese_number(hour_text)
+        if period in ("下午", "傍晚", "晚上", "夜里", "深夜") and hour < 12:
+            hour += 12
+        elif period in ("凌晨", "清晨", "早晨") and hour == 12:
+            hour = 0
+        return hour if 0 <= hour <= 23 else None
+
+    period_match = re.search(r"凌晨|清晨|早晨|上午|中午|下午|傍晚|晚上|夜里|深夜", value)
+    if not period_match:
+        return None
+    return {
+        "凌晨": 2,
+        "清晨": 6,
+        "早晨": 7,
+        "上午": 9,
+        "中午": 12,
+        "下午": 14,
+        "傍晚": 18,
+        "晚上": 20,
+        "夜里": 20,
+        "深夜": 23,
+    }[period_match.group()]
+
+
+def _chapter_date_from_fields(
+    story_time: str, synopsis: str
+) -> tuple[tuple[int | None, int, int], int | None] | None:
+    time_date = _explicit_chapter_date(story_time)
+    synopsis_date = _explicit_chapter_date(synopsis, leading_only=True)
+    if time_date and synopsis_date and time_date != synopsis_date:
+        raise AppError(
+            "CHAPTER_TIME_CONFLICT",
+            "章节故事时间与梗概开头的日期不一致，请同步调整其中一处。",
+            status_code=422,
+        )
+    chapter_date = time_date or synopsis_date
+    if chapter_date is None:
+        return None
+    hour = _explicit_chapter_hour(story_time)
+    if hour is None:
+        hour = _explicit_chapter_hour(synopsis)
+    return chapter_date, hour
+
+
+def _validate_chapter_timeline(entries: list[tuple[str, str, str]]) -> None:
+    previous: tuple[
+        str, tuple[tuple[int | None, int, int], int | None], str
+    ] | None = None
+    report_day_anchor: tuple[tuple[int | None, int, int], str] | None = None
+    for title, story_time, synopsis in entries:
+        if re.search(r"回忆|倒叙|插叙", story_time):
+            continue
+        current_date = _chapter_date_from_fields(story_time, synopsis)
+        report_date = _explicit_report_date(synopsis)
+        if report_date is None and re.search(r"报到日|报到当天|报到那天", title):
+            report_date = current_date[0] if current_date else None
+        if report_date:
+            if report_day_anchor and report_date != report_day_anchor[0]:
+                anchor_year, anchor_month, anchor_day = report_day_anchor[0]
+                year, month, day = report_date
+                anchor_label = f"{anchor_year or ''}年{anchor_month}月{anchor_day}日"
+                current_label = f"{year or ''}年{month}月{day}日"
+                raise AppError(
+                    "CHAPTER_EVENT_DATE_CONFLICT",
+                    f"固定事件“报到”的日期冲突：前文已明确为{anchor_label}，但《{title}》安排在{current_label}。",
+                    status_code=422,
+                )
+            report_day_anchor = (report_date, title)
+        if current_date is None:
+            continue
+        if previous and _date_is_before(current_date, previous[1]):
+            raise AppError(
+                "CHAPTER_TIME_REVERSED",
+                f"章节故事时间倒序：{previous[0]}（{previous[2]}）之后，"
+                f"不能安排为 {title}（{story_time or '梗概中标注的日期'}）。"
+                "请调整章节日期，或在故事时间中明确标注回忆/倒叙/插叙。",
+                status_code=422,
+            )
+        previous = (title, current_date, story_time or synopsis[:32])
+
+
+def _explicit_report_date(synopsis: str) -> tuple[int | None, int, int] | None:
+    for match in _DATE_PATTERN.finditer(synopsis):
+        remainder = synopsis[match.end():].split("，", 1)[0].split("。", 1)[0]
+        if "报到" in remainder[:12]:
+            return _explicit_chapter_date(match.group())
+    return None
 
 
 class OutlineRepository:
@@ -218,11 +390,71 @@ class OutlineRepository:
         )
         return self._row_to_chapter(row, display_index=max(1, rank))
 
+    def _validate_chapter_time_order(
+        self, chapter_id: int, sort_order: float, story_time: str, synopsis: str
+    ) -> None:
+        rows = self._conn.execute(
+            "SELECT id, sort_order, title, story_time, synopsis FROM chapters "
+            "WHERE id != ? ORDER BY sort_order, id",
+            (chapter_id,),
+        ).fetchall()
+        timeline = [
+            (
+                float(row["sort_order"]),
+                int(row["id"]),
+                str(row["title"]),
+                str(row["story_time"] or ""),
+                str(row["synopsis"] or ""),
+            )
+            for row in rows
+        ]
+        timeline.append(
+            (
+                sort_order,
+                chapter_id,
+                self.get_chapter(chapter_id).title,
+                story_time,
+                synopsis,
+            )
+        )
+        timeline.sort(key=lambda item: (item[0], item[1]))
+        _validate_chapter_timeline(
+            [
+                (title, item_time, item_synopsis)
+                for _, _, title, item_time, item_synopsis in timeline
+            ]
+        )
+
+    def _validate_generated_chapter_timeline(
+        self, arc_id: int, chapters_plan: list[LlmChapterPlanItem]
+    ) -> None:
+        retained = self._conn.execute(
+            "SELECT title, story_time, synopsis FROM chapters "
+            "WHERE arc_id = ? AND (locked = 1 OR status NOT IN ('pending', 'outline')) "
+            "ORDER BY sort_order, id",
+            (arc_id,),
+        ).fetchall()
+        entries = [
+            (str(row["title"]), str(row["story_time"] or ""), str(row["synopsis"] or ""))
+            for row in retained
+        ]
+        entries.extend(
+            (chapter.title, chapter.story_time, chapter.synopsis) for chapter in chapters_plan
+        )
+        _validate_chapter_timeline(entries)
+
     def update_chapter(self, chapter_id: int, payload: ChapterUpdate) -> ChapterResponse:
         current = self.get_chapter(chapter_id)
         updates = payload.model_dump(exclude_unset=True)
         if not updates:
             return current
+        if "story_time" in updates or "sort_order" in updates or "synopsis" in updates:
+            self._validate_chapter_time_order(
+                chapter_id,
+                float(updates.get("sort_order", current.sort_order)),
+                str(updates.get("story_time", current.story_time) or ""),
+                str(updates.get("synopsis", current.synopsis) or ""),
+            )
         if "locked" in updates:
             updates["locked"] = int(bool(updates["locked"]))
         set_clause = ", ".join(f"{k} = ?" for k in updates.keys())
@@ -265,6 +497,7 @@ class OutlineRepository:
     ) -> OutlineTreeResponse:
         """Delete unlocked pending/outline chapters in arc_id and insert newly generated chapters."""
         self.get_arc(arc_id)
+        self._validate_generated_chapter_timeline(arc_id, chapters_plan)
         self._conn.execute(
             "DELETE FROM chapters WHERE arc_id = ? AND locked = 0 AND status IN ('pending', 'outline')",
             (arc_id,),

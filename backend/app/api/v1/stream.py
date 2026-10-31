@@ -31,7 +31,7 @@ async def stream_write_prose(
         model=model,
         system_prompt=sys_prompt,
         user_prompt=user_prompt,
-        temperature=0.8,
+        temperature=0.7,
         novel_uid=novel_uid,
         task_type="write_scene" if payload.mode == "scene" else "write_chapter",
         chapter_id=payload.chapter_id,

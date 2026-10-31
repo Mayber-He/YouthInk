@@ -9,7 +9,9 @@ import httpx
 import pytest
 
 from app.core.config import reset_config_for_testing
+from app.core.exceptions import AppError
 from app.db.manager import ensure_global_db_initialized, get_novel_db
+from app.db.repositories.outline_repo import _validate_chapter_timeline
 from app.main import create_app
 
 
@@ -258,3 +260,142 @@ def test_float_sort_order_and_rolling_chapter_generation(
     assert "原第二章" in final_titles
     assert "插入的过渡章" not in final_titles
     assert "AI生成第三章" in final_titles
+
+
+def test_chapter_time_update_rejects_reversal_and_accepts_ordered_edits(
+    client: TestClient, novel_uid: str
+) -> None:
+    vol = client.post(
+        f"/api/v1/novels/{novel_uid}/outline/volumes",
+        json={"title": "第一卷：开学"},
+    ).json()
+    arc = client.post(
+        f"/api/v1/novels/{novel_uid}/outline/arcs",
+        json={"volume_id": vol["id"], "title": "第一弧：报到"},
+    ).json()
+    chapters = []
+    for title, story_time in (
+        ("第一章", "八月二十五日"),
+        ("第二章", "八月二十六日"),
+        ("第三章", "九月一日"),
+    ):
+        chapters.append(
+            client.post(
+                f"/api/v1/novels/{novel_uid}/outline/chapters",
+                json={"arc_id": arc["id"], "title": title, "story_time": story_time},
+            ).json()
+        )
+
+    reversed_update = client.put(
+        f"/api/v1/novels/{novel_uid}/outline/chapters/{chapters[1]['id']}",
+        json={"story_time": "九月二日"},
+    )
+    assert reversed_update.status_code == 422
+    assert reversed_update.json()["error"]["code"] == "CHAPTER_TIME_REVERSED"
+
+    later_update = client.put(
+        f"/api/v1/novels/{novel_uid}/outline/chapters/{chapters[2]['id']}",
+        json={"story_time": "九月二日"},
+    )
+    assert later_update.status_code == 200
+    earlier_update = client.put(
+        f"/api/v1/novels/{novel_uid}/outline/chapters/{chapters[1]['id']}",
+        json={"story_time": "九月一日"},
+    )
+    assert earlier_update.status_code == 200
+
+    conflicting_synopsis = client.put(
+        f"/api/v1/novels/{novel_uid}/outline/chapters/{chapters[1]['id']}",
+        json={"synopsis": "九月二日，主角来到学校报到。"},
+    )
+    assert conflicting_synopsis.status_code == 422
+    assert conflicting_synopsis.json()["error"]["code"] == "CHAPTER_TIME_CONFLICT"
+
+
+def test_chapter_timeline_rejects_fixed_event_date_conflict() -> None:
+    entries = [
+        (
+            "她说她要去迎新",
+            "八月二十六日傍晚",
+            "八月二十六日，她告诉江澈自己九月一日报到。",
+        ),
+        (
+            "报到日的地铁上",
+            "八月三十一日上午",
+            "八月三十一日，江澈拖着行李去学校报到。",
+        ),
+    ]
+
+    with pytest.raises(AppError) as exc_info:
+        _validate_chapter_timeline(entries)
+
+    assert exc_info.value.code == "CHAPTER_EVENT_DATE_CONFLICT"
+
+
+def test_rolling_generation_uses_retained_chapter_and_rejects_reversed_batch(
+    client: TestClient, novel_uid: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vol = client.post(
+        f"/api/v1/novels/{novel_uid}/outline/volumes",
+        json={"title": "第一卷：开学"},
+    ).json()
+    arc = client.post(
+        f"/api/v1/novels/{novel_uid}/outline/arcs",
+        json={"volume_id": vol["id"], "title": "第一弧：报到"},
+    ).json()
+    previous = client.post(
+        f"/api/v1/novels/{novel_uid}/outline/chapters",
+        json={
+            "arc_id": arc["id"],
+            "title": "已有草稿章",
+            "synopsis": "八月二十六日傍晚，江澈在超市和她聊起开学。",
+            "story_time": "八月二十六日傍晚",
+        },
+    ).json()
+    client.put(
+        f"/api/v1/novels/{novel_uid}/outline/chapters/{previous['id']}",
+        json={"status": "draft"},
+    )
+    captured_prompt = ""
+
+    async def fake_post(self, url: str, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal captured_prompt
+        captured_prompt = kwargs["json"]["messages"][-1]["content"]
+        payload = json.dumps(
+            {
+                "chapters": [
+                    {
+                        "title": "先到深夜",
+                        "synopsis": "九月一日深夜，迎新结束。",
+                        "story_time": "九月一日深夜",
+                    },
+                    {
+                        "title": "再回上午",
+                        "synopsis": "九月一日上午，江澈开始报到。",
+                        "story_time": "九月一日上午",
+                    },
+                ]
+            },
+            ensure_ascii=False,
+        )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": payload}}]},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    response = client.post(
+        f"/api/v1/novels/{novel_uid}/outline/arcs/{arc['id']}/generate-chapters",
+        json={"chapter_count": 2, "instruction": ""},
+    )
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "CHAPTER_TIME_REVERSED"
+    assert "已有草稿章" in captured_prompt
+    assert "八月二十六日傍晚" in captured_prompt
+    assert "首次明确的固定事件日期（如报到日、考试日、迎新日）是全书时间锚点" in captured_prompt
+    assert "不得把同一段对话、建议、情绪反应拆写到两章" in captured_prompt
+    assert "标志性台词、具体建议和已发生动作只能在首次发生的章节完整呈现" in captured_prompt
+    tree = client.get(f"/api/v1/novels/{novel_uid}/outline").json()
+    final_chapters = tree["volumes"][0]["arcs"][0]["chapters"]
+    assert [chapter["title"] for chapter in final_chapters] == ["已有草稿章"]

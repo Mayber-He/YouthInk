@@ -382,27 +382,36 @@ class SettingGeneratorService:
         vol = self._outline_repo.get_volume(arc.volume_id)
         main_plot = self._entity_repo.get_main_plot()
         tree = self._outline_repo.get_outline_tree()
-        existing_locked = [
+        retained_chapters = [
             ch
             for v in tree.volumes
             for a in v.arcs
             if a.id == arc_id
             for ch in a.chapters
-            if ch.locked
+            if ch.locked or ch.status not in ("pending", "outline")
         ]
 
         context = (
             f"所属分卷：{vol.title}（{vol.synopsis}）\n"
             f"当前情节弧：{arc.title} | 目标：{arc.goal} | 核心冲突：{arc.core_conflict}\n"
             f"全书主线冲突：{main_plot.core_conflict}\n"
-            f"本弧已锁定章节：{json.dumps([{'title': c.title, 'synopsis': c.synopsis} for c in existing_locked], ensure_ascii=False)}"
+            f"本弧最近且本次会保留的章节（最多三章，必须作为新章节的前文锚点，依次承接其剧情和日期）："
+            f"{json.dumps([{'title': c.title, 'story_time': c.story_time, 'synopsis': c.synopsis} for c in retained_chapters[-3:]], ensure_ascii=False)}"
         )
         inst = (
             f"请为情节弧「{arc.title}」滚动生成 {chapter_count} 章的章节目录（含章节标题、单章详细梗概、故事内时间）。\n"
-            "【跨章连贯要求】①相邻章节的核心事件与信息揭示严禁重叠：某条信息（如身份、学校、计划）只能在一章中首次揭示，"
+            "【跨章连贯要求】①每章必须有区别于相邻章节的新核心事件或关系推进，不得把同一段对话、建议、情绪反应拆写到两章；"
+            "标志性台词、具体建议和已发生动作只能在首次发生的章节完整呈现，后续章节不得换个说法再次演一遍。"
+            "生成前逐章核对前文已经完成的具体动作及其结果；物品已收拾、清洁、放置或处理后，后续章节只能沿用其当前状态，"
+            "不得因日期变化或新章节开头而再次安排同一动作，也不得把前章已经完成的准备过程重新当作本章开场。"
+            "相邻章节的核心事件与信息揭示严禁重叠：某条信息（如身份、学校、计划）只能在一章中首次揭示，"
             "后续章节只能引用或推进，不得让角色重新得知或再次询问；"
             "②上一章结尾留下的悬念/承诺（如“明天再说”）必须在下一章开头得到回应，故事内时间须与之吻合；"
-            "③各章故事内时间与日期（如报到日）须前后一致；人物之间的已知程度（是否见过面、通过视频/语音还是仅文字）须保持一致。"
+            "新生成章节必须接在上述保留章节之后，不得重写或重复其事件；"
+            "③首次明确的固定事件日期（如报到日、考试日、迎新日）是全书时间锚点，后续所有章节提及同一事件时必须沿用该日期，"
+            "不得为了按日推进章节而把事件提前或延后；‘明天/后天/下周’必须按当前章节日期换算，跨多日章节须给关键事件标明具体日期。"
+            "新生成章节的故事时间必须按章节顺序递进，不得从深夜倒回同日早晨；如确需倒叙，须在故事时间中明确标注‘回忆/倒叙/插叙’；"
+            "各章日期须与已保留章节一致，人物之间的已知程度（是否见过面、通过视频/语音还是仅文字）须保持一致。"
         )
         if instruction:
             inst += f"\n作者附加要求：{instruction}"

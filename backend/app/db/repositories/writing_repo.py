@@ -211,8 +211,10 @@ class WritingRepository:
             create_new_version=True,
         )
 
-    def get_previous_chapter_text(self, current_sort_order: float, tail_chars: int = 1500) -> str:
-        """Fetch the tail of the immediately preceding chapter's latest content."""
+    def get_previous_chapter_text(
+        self, current_sort_order: float, tail_chars: int | None = 1500
+    ) -> str:
+        """Fetch the latest content of the immediately preceding chapter, optionally as a tail."""
         prev_ch = self._conn.execute(
             "SELECT id, title FROM chapters WHERE sort_order < ? ORDER BY sort_order DESC LIMIT 1",
             (current_sort_order,),
@@ -226,9 +228,10 @@ class WritingRepository:
         if not ver or not ver["content"]:
             return ""
         text = str(ver["content"]).strip()
-        if len(text) > tail_chars:
+        if tail_chars is not None and len(text) > tail_chars:
             text = "……\n" + text[-tail_chars:]
-        return f"【上一章《{prev_ch['title']}》结尾片段】\n{text}"
+        label = "完整正文" if tail_chars is None else "结尾片段"
+        return f"【上一章《{prev_ch['title']}》{label}】\n{text}"
 
     # --- Export (TXT / Markdown) ---
 

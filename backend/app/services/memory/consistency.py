@@ -219,14 +219,18 @@ class ConsistencyReviewService:
         ]
         sections.append("【检查表D：本章情境与六大常理逻辑自洽】\n" + "\n".join(common_sense_lines))
 
-        prev_tail = self._writing_repo.get_previous_chapter_text(sort_order, tail_chars=1200)
-        if prev_tail:
+        prev_content = self._writing_repo.get_previous_chapter_text(
+            sort_order, tail_chars=None
+        )
+        if prev_content:
             sections.append(
                 "【检查表E：跨章连贯】\n"
-                f"{prev_tail}\n"
+                f"【完整上一章正文，用于核对已发生事件、动作与物品状态】\n{prev_content}\n"
                 "[#951]【重复揭示】上一章已交代的信息，本章不得当作新信息重新揭示，角色不得再次询问已知答案。\n"
                 "[#952]【悬念承接】上一章结尾留下的悬念、承诺或人物情绪，本章须有承接或交代，不能凭空断档。\n"
-                "[#953]【时间日期衔接】本章故事时间、日期与上一章及已交代的计划（如报到日、“下周”“明天”）须一致。"
+                "[#953]【时间日期衔接】本章故事时间、日期与上一章及已交代的计划（如报到日、“下周”“明天”）须一致。\n"
+                "[#954]【重复动作】上一章已完成的具体动作（如清洁、收拾、打包、放置物品）不得在本章再次描写一遍；"
+                "仅可承接动作后的物品状态。即使重复动作被安排在不同日期或作为新章开头，也属于跨章重复。"
             )
 
         return "\n\n".join(sections)
