@@ -14,6 +14,7 @@ import {
   useContextPreview,
   useRestoreChapterVersion,
   useSaveChapterContent,
+  useCritiqueSelection,
 } from "./api";
 import { useStreamGenerate } from "./hooks/useStreamGenerate";
 import { SceneBeatsPanel } from "./components/SceneBeatsPanel";
@@ -22,7 +23,7 @@ import { VersionHistoryModal } from "./components/VersionHistoryModal";
 import { SelectionToolbar } from "./components/SelectionToolbar";
 import { WritingHeaderBar } from "./components/WritingHeaderBar";
 import { ConfirmModal } from "@/components/ui/ConfirmModal";
-import type { AiSmellHit, RewriteActionType, SceneItem } from "./types";
+import type { AiSmellHit, RewriteActionType, SceneItem, SelectionCritiqueResult } from "./types";
 
 export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) => {
   const {
@@ -60,6 +61,8 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
   const [reviewResult, setReviewResult] = useState<ConsistencyReviewResponse | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [confirmOverwriteOpen, setConfirmOverwriteOpen] = useState(false);
+  const [critiqueResult, setCritiqueResult] = useState<SelectionCritiqueResult | null>(null);
+  const critiqueMut = useCritiqueSelection(novelUid, effectiveChapterId ?? 0);
   const reviewMut = useRunConsistencyReview(novelUid, effectiveChapterId ?? 0);
   const isComposingRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -175,6 +178,24 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
     );
   };
 
+  const handleCritiqueSelection = () => {
+    if (!effectiveChapterId || !selectionRange.text.trim()) return;
+    setCritiqueResult(null);
+    critiqueMut.mutate(selectionRange.text.trim(), {
+      onSuccess: (res) => setCritiqueResult(res),
+    });
+  };
+
+  const handleApplyCritiqueSuggestion = (suggestion: string) => {
+    if (!effectiveChapterId || !suggestion.trim()) return;
+    const { start, end } = selectionRange;
+    const updated = content.slice(0, start) + suggestion + content.slice(end);
+    setContent(updated);
+    setSelectionRange({ start: 0, end: 0, text: "" });
+    setCritiqueResult(null);
+    saveMut.mutate({ content: updated, source: "ai", create_new_version: true });
+  };
+
   const handleFocusSmellHit = (hit: AiSmellHit) => {
     const el = textareaRef.current;
     if (!el) return;
@@ -270,6 +291,11 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
               setHasScannedSmell(false);
               setSmellHits([]);
             }}
+            onCritiqueSelection={handleCritiqueSelection}
+            isCritiquing={critiqueMut.isPending}
+            critiqueResult={critiqueResult}
+            onApplyCritiqueSuggestion={handleApplyCritiqueSuggestion}
+            onDismissCritique={() => setCritiqueResult(null)}
           />
         </div>
 

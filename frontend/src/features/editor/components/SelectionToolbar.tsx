@@ -1,9 +1,9 @@
 import React, { useState } from "react";
-import { AlertTriangle, CheckCircle2, Sparkles, Wand2, X } from "lucide-react";
+import { AlertTriangle, Check, CheckCircle2, ShieldAlert, Sparkles, Wand2, X } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import type { CharacterItem } from "@/types/api";
-import type { AiSmellHit, RewriteActionType } from "../types";
+import type { AiSmellHit, RewriteActionType, SelectionCritiqueResult } from "../types";
 
 interface SelectionToolbarProps {
   selectedText: string;
@@ -19,6 +19,11 @@ interface SelectionToolbarProps {
   onRewriteSmellHit: (hit: AiSmellHit) => void;
   onFocusSmellHit?: (hit: AiSmellHit) => void;
   onDismissSmell?: () => void;
+  onCritiqueSelection?: () => void;
+  isCritiquing?: boolean;
+  critiqueResult?: SelectionCritiqueResult | null;
+  onApplyCritiqueSuggestion?: (suggestion: string) => void;
+  onDismissCritique?: () => void;
 }
 
 export const SelectionToolbar: React.FC<SelectionToolbarProps> = ({
@@ -31,6 +36,11 @@ export const SelectionToolbar: React.FC<SelectionToolbarProps> = ({
   onRewriteSmellHit,
   onFocusSmellHit,
   onDismissSmell,
+  onCritiqueSelection,
+  isCritiquing = false,
+  critiqueResult = null,
+  onApplyCritiqueSuggestion,
+  onDismissCritique,
 }) => {
   const [targetCharId, setTargetCharId] = useState<number | null>(null);
   const [customNote, setCustomNote] = useState("");
@@ -88,6 +98,19 @@ export const SelectionToolbar: React.FC<SelectionToolbarProps> = ({
             </Button>
           </div>
 
+          {onCritiqueSelection && (
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={isStreaming || isCritiquing}
+              onClick={onCritiqueSelection}
+              title="排查所选文字是否存在时间悖论、物理状态逆转、超知读心等常理逻辑漏洞"
+            >
+              <ShieldAlert className="h-3 w-3 text-amber-600 dark:text-amber-400" />
+              {isCritiquing ? "排查中..." : "逻辑挑刺"}
+            </Button>
+          )}
+
           <input
             type="text"
             placeholder="附加改写要求..."
@@ -95,6 +118,70 @@ export const SelectionToolbar: React.FC<SelectionToolbarProps> = ({
             onChange={(e) => setCustomNote(e.target.value)}
             className="min-w-36 flex-1 rounded border border-slate-300 bg-white px-2 py-1 text-xs dark:border-slate-700 dark:bg-slate-900"
           />
+        </div>
+      )}
+      {/* 选区逻辑挑刺结果卡片 */}
+      {critiqueResult && (
+        <div
+          className={`rounded-xl border p-3 text-xs ${
+            critiqueResult.has_issue
+              ? "border-amber-300 bg-amber-50/90 dark:border-amber-800 dark:bg-amber-950/70"
+              : "border-emerald-300 bg-emerald-50/90 dark:border-emerald-800 dark:bg-emerald-950/70"
+          }`}
+        >
+          <div className="flex items-start justify-between gap-2">
+            <div className="space-y-1.5 flex-1">
+              <div className="flex items-center gap-2">
+                {critiqueResult.has_issue ? (
+                  <>
+                    <ShieldAlert className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                    <span className="font-bold text-amber-900 dark:text-amber-200">
+                      发现逻辑/常理漏洞：{critiqueResult.issue_label || "常理矛盾"}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                    <span className="font-bold text-emerald-900 dark:text-emerald-200">
+                      逻辑检验通过
+                    </span>
+                  </>
+                )}
+              </div>
+              <p className="text-slate-700 dark:text-slate-300 leading-relaxed">
+                {critiqueResult.description}
+              </p>
+              {critiqueResult.has_issue && critiqueResult.suggestion && (
+                <div className="mt-2 rounded-lg border border-amber-200 bg-white/90 p-2.5 dark:border-slate-700 dark:bg-slate-900">
+                  <div className="font-semibold text-slate-800 dark:text-slate-200 mb-1">
+                    修改建议：
+                  </div>
+                  <div className="text-slate-700 dark:text-slate-300 mb-2 select-text whitespace-pre-wrap">
+                    {critiqueResult.suggestion}
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={isStreaming}
+                    onClick={() => onApplyCritiqueSuggestion?.(critiqueResult.suggestion)}
+                  >
+                    <Check className="h-3 w-3 mr-1" />
+                    采纳并替换原文
+                  </Button>
+                </div>
+              )}
+            </div>
+            {onDismissCritique && (
+              <button
+                type="button"
+                onClick={onDismissCritique}
+                className="rounded p-1 text-slate-400 hover:bg-slate-200 hover:text-slate-600 cursor-pointer dark:hover:bg-slate-800"
+                title="关闭挑刺结果"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
         </div>
       )}
 
@@ -118,6 +205,70 @@ export const SelectionToolbar: React.FC<SelectionToolbarProps> = ({
               <X className="h-3.5 w-3.5" />
             </button>
           )}
+        </div>
+      )}
+      {/* 选区逻辑挑刺结果卡片 */}
+      {critiqueResult && (
+        <div
+          className={`rounded-xl border p-3 text-xs ${
+            critiqueResult.has_issue
+              ? "border-amber-300 bg-amber-50/90 dark:border-amber-800 dark:bg-amber-950/70"
+              : "border-emerald-300 bg-emerald-50/90 dark:border-emerald-800 dark:bg-emerald-950/70"
+          }`}
+        >
+          <div className="flex items-start justify-between gap-2">
+            <div className="space-y-1.5 flex-1">
+              <div className="flex items-center gap-2">
+                {critiqueResult.has_issue ? (
+                  <>
+                    <ShieldAlert className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                    <span className="font-bold text-amber-900 dark:text-amber-200">
+                      发现逻辑/常理漏洞：{critiqueResult.issue_label || "常理矛盾"}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                    <span className="font-bold text-emerald-900 dark:text-emerald-200">
+                      逻辑检验通过
+                    </span>
+                  </>
+                )}
+              </div>
+              <p className="text-slate-700 dark:text-slate-300 leading-relaxed">
+                {critiqueResult.description}
+              </p>
+              {critiqueResult.has_issue && critiqueResult.suggestion && (
+                <div className="mt-2 rounded-lg border border-amber-200 bg-white/90 p-2.5 dark:border-slate-700 dark:bg-slate-900">
+                  <div className="font-semibold text-slate-800 dark:text-slate-200 mb-1">
+                    修改建议：
+                  </div>
+                  <div className="text-slate-700 dark:text-slate-300 mb-2 select-text whitespace-pre-wrap">
+                    {critiqueResult.suggestion}
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={isStreaming}
+                    onClick={() => onApplyCritiqueSuggestion?.(critiqueResult.suggestion)}
+                  >
+                    <Check className="h-3 w-3 mr-1" />
+                    采纳并替换原文
+                  </Button>
+                </div>
+              )}
+            </div>
+            {onDismissCritique && (
+              <button
+                type="button"
+                onClick={onDismissCritique}
+                className="rounded p-1 text-slate-400 hover:bg-slate-200 hover:text-slate-600 cursor-pointer dark:hover:bg-slate-800"
+                title="关闭挑刺结果"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
         </div>
       )}
 
@@ -170,6 +321,70 @@ export const SelectionToolbar: React.FC<SelectionToolbarProps> = ({
                 </button>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+      {/* 选区逻辑挑刺结果卡片 */}
+      {critiqueResult && (
+        <div
+          className={`rounded-xl border p-3 text-xs ${
+            critiqueResult.has_issue
+              ? "border-amber-300 bg-amber-50/90 dark:border-amber-800 dark:bg-amber-950/70"
+              : "border-emerald-300 bg-emerald-50/90 dark:border-emerald-800 dark:bg-emerald-950/70"
+          }`}
+        >
+          <div className="flex items-start justify-between gap-2">
+            <div className="space-y-1.5 flex-1">
+              <div className="flex items-center gap-2">
+                {critiqueResult.has_issue ? (
+                  <>
+                    <ShieldAlert className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                    <span className="font-bold text-amber-900 dark:text-amber-200">
+                      发现逻辑/常理漏洞：{critiqueResult.issue_label || "常理矛盾"}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                    <span className="font-bold text-emerald-900 dark:text-emerald-200">
+                      逻辑检验通过
+                    </span>
+                  </>
+                )}
+              </div>
+              <p className="text-slate-700 dark:text-slate-300 leading-relaxed">
+                {critiqueResult.description}
+              </p>
+              {critiqueResult.has_issue && critiqueResult.suggestion && (
+                <div className="mt-2 rounded-lg border border-amber-200 bg-white/90 p-2.5 dark:border-slate-700 dark:bg-slate-900">
+                  <div className="font-semibold text-slate-800 dark:text-slate-200 mb-1">
+                    修改建议：
+                  </div>
+                  <div className="text-slate-700 dark:text-slate-300 mb-2 select-text whitespace-pre-wrap">
+                    {critiqueResult.suggestion}
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={isStreaming}
+                    onClick={() => onApplyCritiqueSuggestion?.(critiqueResult.suggestion)}
+                  >
+                    <Check className="h-3 w-3 mr-1" />
+                    采纳并替换原文
+                  </Button>
+                </div>
+              )}
+            </div>
+            {onDismissCritique && (
+              <button
+                type="button"
+                onClick={onDismissCritique}
+                className="rounded p-1 text-slate-400 hover:bg-slate-200 hover:text-slate-600 cursor-pointer dark:hover:bg-slate-800"
+                title="关闭挑刺结果"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
           </div>
         </div>
       )}

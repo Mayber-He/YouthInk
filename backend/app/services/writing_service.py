@@ -16,6 +16,7 @@ from app.schemas.writing import (
     SceneResponse,
     StreamRewriteRequest,
     StreamWriteRequest,
+    SelectionCritiqueResponse,
 )
 from app.services.context.assembler import ContextAssembler
 from app.services.llm.client import complete_chat
@@ -245,3 +246,37 @@ class WritingService:
             layer5_task_instruction=inst,
             layer6_output_format="只输出修改后的正文片段本身，不要包含引号或任何前后说明。",
         )
+
+    async def critique_selection(self, chapter_id: int, selected_text: str) -> SelectionCritiqueResponse:
+        """Analyze selected text for logic, common-sense, timeline, or physical contradictions."""
+        ch = self._outline_repo.get_chapter(chapter_id)
+        _pid, base_url, model, api_key = self._settings_repo.get_credentials_for_task("extract")
+
+        sys_prompt = (
+            "你是严谨的小说常理与逻辑质检员。请对作者选中的小说片段进行严格的常理与逻辑挑刺。\n"
+            "检查重点：\n"
+            "1. 【时间与常识矛盾】：如高考完（6月）买的物品却系着年三十（春节）的红绳；季节与气温/穿着矛盾等。\n"
+            "2. 【物理动作与状态矛盾】：如食物吃完了又继续吃；物品扔了又拿在手里；同一事物名称前后漂移（如前文挂面后文变泡面）等。\n"
+            "3. 【限知视角与超知/读心】：角色未经告知直接猜出他人秘密或内心独白；未到场人物插话等。\n"
+            "4. 【初见与人际常理】：未自我介绍便直呼姓名或知晓底细；新生报到对环境熟门熟路等。\n"
+            "如果发现明显逻辑/常理矛盾或表述失真：\n"
+            '输出严格 JSON: {"has_issue": true, "issue_type": "time_conflict|action_paradox|omniscience|item_drift|other", "issue_label": "时间常识冲突|物理动作逆转|超知读心|道具漂移|其他常理矛盾", "description": "一两句话明确指出问题所在", "suggestion": "给出修改后的合理完整片段（直接替换原片段）"}\n'
+            "如果片段逻辑完全通顺自洽，无明显常理问题：\n"
+            '输出严格 JSON: {"has_issue": false, "issue_type": null, "issue_label": null, "description": "行文逻辑通顺，未发现明显常识与情境矛盾。", "suggestion": ""}\n'
+            "只输出严格 JSON，不要包含任何额外说明。"
+        )
+        user_prompt = f"待检查小说片段（所属章节《{ch.title}》）：\n{selected_text}"
+
+        res = await complete_chat(
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            system_prompt=sys_prompt,
+            user_prompt=user_prompt,
+            temperature=0.2,
+            novel_uid=self._novel_uid,
+            task_type="consistency_review",
+            chapter_id=chapter_id,
+        )
+        return await parse_and_validate_json(res.content, SelectionCritiqueResponse)
+

@@ -71,3 +71,12 @@ export type RewriteActionType =
   | "shorten"
   | "polish"
   | "tone_shift";
+
+
+export interface SelectionCritiqueResult {
+  has_issue: boolean;
+  issue_type: string | null;
+  issue_label: string | null;
+  description: string;
+  suggestion: string;
+}

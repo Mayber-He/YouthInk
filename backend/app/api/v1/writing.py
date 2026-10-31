@@ -27,6 +27,8 @@ from app.schemas.writing import (
     SceneCreate,
     SceneResponse,
     SceneUpdate,
+    SelectionCritiqueRequest,
+    SelectionCritiqueResponse,
 )
 from app.services.ai_smell import scan_ai_smell
 from app.services.context.assembler import ContextAssembler
@@ -153,6 +155,16 @@ def check_ai_smell(
     extra = matched.forbidden_exprs if matched else []
     return scan_ai_smell(payload.text, extra_forbidden=extra)
 
+
+
+
+@router.post("/chapters/{chapter_id}/critique-selection", response_model=SelectionCritiqueResponse)
+async def critique_selection(
+    chapter_id: int,
+    payload: SelectionCritiqueRequest,
+    svc: WritingService = Depends(get_writing_service),
+) -> SelectionCritiqueResponse:
+    return await svc.critique_selection(chapter_id, payload.selected_text)
 
 # --- Export (TXT / Markdown) ---
 

@@ -9,6 +9,7 @@ import type {
   ChapterWorkspace,
   ContextPreview,
   SceneItem,
+  SelectionCritiqueResult,
 } from "./types";
 
 export const editorKeys = {
@@ -174,3 +175,17 @@ export function useAiSmellScan(novelUid: string) {
       }),
   });
 }
+
+export function useCritiqueSelection(novelUid: string, chapterId: number) {
+  return useMutation({
+    mutationFn: (selectedText: string) =>
+      apiRequest<SelectionCritiqueResult>(
+        `/api/v1/novels/${novelUid}/chapters/${chapterId}/critique-selection`,
+        {
+          method: "POST",
+          body: JSON.stringify({ selected_text: selectedText }),
+        }
+      ),
+  });
+}
+

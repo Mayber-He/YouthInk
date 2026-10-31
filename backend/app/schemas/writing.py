@@ -145,3 +145,17 @@ class AiSmellHit(BaseModel):
 class AiSmellScanResponse(BaseModel):
     total_hits: int
     hits: list[AiSmellHit]
+
+
+# --- Selection Logic Critique ---
+
+class SelectionCritiqueRequest(BaseModel):
+    selected_text: str = Field(..., min_length=2)
+
+
+class SelectionCritiqueResponse(BaseModel):
+    has_issue: bool
+    issue_type: str | None = None
+    issue_label: str | None = None
+    description: str = ""
+    suggestion: str = ""

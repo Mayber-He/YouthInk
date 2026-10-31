@@ -259,3 +259,41 @@ def test_ai_smell_scanner_and_sse_streaming(
     with get_novel_db(uid) as conn:
         cnt = conn.execute("SELECT COUNT(*) FROM generation_logs").fetchone()[0]
         assert cnt >= 2
+
+
+
+def test_critique_selection_detects_contradiction(
+    client: TestClient, setup_chapter: tuple[str, int, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    uid, ch_id, _ = setup_chapter
+
+    async def fake_post(self, url: str, **kwargs):  # type: ignore[no-untyped-def]
+        payload = json.dumps(
+            {
+                "has_issue": True,
+                "issue_type": "time_conflict",
+                "issue_label": "时间常识冲突",
+                "description": "箱子是6月高考完新买的，无法在年三十绑红绳",
+                "suggestion": "箱子是高考完买的打折款，拉链上系着开学前求来的红绳",
+            }
+        )
+        body = {
+            "choices": [{"message": {"content": payload}}],
+            "usage": {"prompt_tokens": 120, "completion_tokens": 60},
+        }
+        return httpx.Response(200, json=body, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    resp = client.post(
+        f"/api/v1/novels/{uid}/chapters/{ch_id}/critique-selection",
+        json={
+            "selected_text": "箱子是高考完他妈在超市买的打折款，拉链头上还系着年三十晚上绑上去的红绳"
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["has_issue"] is True
+    assert data["issue_type"] == "time_conflict"
+    assert "高考完" in data["description"]
+    assert "开学前" in data["suggestion"]
