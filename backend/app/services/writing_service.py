@@ -251,21 +251,30 @@ class WritingService:
         """Analyze selected text for logic, common-sense, timeline, or physical contradictions."""
         ch = self._outline_repo.get_chapter(chapter_id)
         _pid, base_url, model, api_key = self._settings_repo.get_credentials_for_task("extract")
+        time_info = ch.story_time or "未明确指定"
+        synopsis_info = ch.synopsis or "无"
 
         sys_prompt = (
-            "你是严谨的小说常理与逻辑质检员。请对作者选中的小说片段进行严格的常理与逻辑挑刺。\n"
+            "你是严谨的小说常理与逻辑质检员。请对作者选中的小说片段进行严格的常理与逻辑挑刺，并提供高质量的无漏洞修改建议。\n"
             "检查重点：\n"
-            "1. 【时间与常识矛盾】：如高考完（6月）买的物品却系着年三十（春节）的红绳；季节与气温/穿着矛盾等。\n"
-            "2. 【物理动作与状态矛盾】：如食物吃完了又继续吃；物品扔了又拿在手里；同一事物名称前后漂移（如前文挂面后文变泡面）等。\n"
+            "1. 【时间与时态矛盾】：季节/气温/日期逻辑冲突；高考（6月）到开学（8月底）之间的时间顺序；严禁未来时态倒错（如开学前夕却回忆‘后来过年’）。\n"
+            "2. 【物理动作与状态矛盾】：食物吃完了又继续吃；物品扔了又拿在手里；同一事物名称前后漂移（如前文挂面后文变泡面）等。\n"
             "3. 【限知视角与超知/读心】：角色未经告知直接猜出他人秘密或内心独白；未到场人物插话等。\n"
-            "4. 【初见与人际常理】：未自我介绍便直呼姓名或知晓底细；新生报到对环境熟门熟路等。\n"
-            "如果发现明显逻辑/常理矛盾或表述失真：\n"
-            '输出严格 JSON: {"has_issue": true, "issue_type": "time_conflict|action_paradox|omniscience|item_drift|other", "issue_label": "时间常识冲突|物理动作逆转|超知读心|道具漂移|其他常理矛盾", "description": "一两句话明确指出问题所在", "suggestion": "给出修改后的合理完整片段（直接替换原片段）"}\n'
-            "如果片段逻辑完全通顺自洽，无明显常理问题：\n"
-            '输出严格 JSON: {"has_issue": false, "issue_type": null, "issue_label": null, "description": "行文逻辑通顺，未发现明显常识与情境矛盾。", "suggestion": ""}\n'
+            "4. 【初见与人际常理】：未自我介绍便直呼姓名或知晓底细；初来乍到对环境熟门熟路等。\n\n"
+            "【建议片段(suggestion)的核心要求】：\n"
+            "- 修改建议必须彻底根除逻辑漏洞，绝不能为了打补丁而创造新的时态或常识错误（严禁把时间矛盾打上‘后来过年’这种违背当前时间线的荒谬补丁！若高考完买箱子与年三十红绳矛盾，应改为‘开学前他妈去庙里求来的红绳’或把箱子改为‘前几年春节买的旧箱子’）！\n"
+            "- 必须严格符合【当前章节故事时间】与情境，保持青春小说的细腻文学质感，直接输出可无缝替换原文的完整片段。\n\n"
+            "输出严格 JSON：\n"
+            '若存在问题：{"has_issue": true, "issue_type": "time_conflict|action_paradox|omniscience|item_drift|other", "issue_label": "时间常识冲突|物理动作逆转|超知读心|道具漂移|其他常理矛盾", "description": "一两句话一针见血指出问题所在", "suggestion": "修改后的合理自然完整片段（严禁带有任何新的时态或常理硬伤）"}\n'
+            '若无问题：{"has_issue": false, "issue_type": null, "issue_label": null, "description": "行文逻辑通顺自洽，未发现明显常识与情境矛盾。", "suggestion": ""}\n'
             "只输出严格 JSON，不要包含任何额外说明。"
         )
-        user_prompt = f"待检查小说片段（所属章节《{ch.title}》）：\n{selected_text}"
+        user_prompt = (
+            f"【所属章节】《{ch.title}》\n"
+            f"【本章故事时间】{time_info}\n"
+            f"【本章梗概背景】{synopsis_info}\n\n"
+            f"【待挑刺片段】\n{selected_text}"
+        )
 
         res = await complete_chat(
             base_url=base_url,
