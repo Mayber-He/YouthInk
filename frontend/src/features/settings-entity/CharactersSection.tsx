@@ -1,19 +1,23 @@
 import React, { useState } from "react";
-import { Clock, Loader2, Plus, Sparkles, Trash2, Wand2 } from "lucide-react";
+import { Clock, Loader2, Plus, ShieldAlert, Sparkles, Trash2, Wand2 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { LockToggle } from "@/components/common/LockToggle";
 import { EmptyState } from "@/components/common/EmptyState";
 import { useOutlineTree } from "@/features/outline/api";
 import { useUiStore } from "@/stores/uiStore";
-import type { CharacterItem, CharacterRole } from "@/types/api";
+import type { CharacterItem, CharacterRole, ConstraintItem } from "@/types/api";
 import {
   useCharacters,
   useCreateCharacter,
+  useCreateConstraint,
   useDeleteCharacter,
+  useDeleteConstraint,
+  useConstraints,
   useGenerateCharacters,
   useRewriteCharacter,
   useUpdateCharacter,
+  useUpdateConstraint,
 } from "./api";
 import { CharacterTimelineModal } from "./CharacterTimelineModal";
 
@@ -28,6 +32,165 @@ const ROLE_LABELS: Record<CharacterRole, string> = {
 interface CharactersSectionProps {
   novelUid: string;
 }
+
+/** Per-character hard/soft constraint manager (Explicit Constraint System). */
+const CharacterConstraints: React.FC<{
+  novelUid: string;
+  characterId: number;
+}> = ({ novelUid, characterId }) => {
+  const { data: constraints = [], isLoading } = useConstraints(
+    novelUid,
+    "character",
+    characterId,
+  );
+  const createMut = useCreateConstraint(novelUid);
+  const updateMut = useUpdateConstraint(novelUid);
+  const deleteMut = useDeleteConstraint(novelUid);
+
+  const [expanded, setExpanded] = useState(false);
+  const [newContent, setNewContent] = useState("");
+  const [newSeverity, setNewSeverity] = useState<"hard" | "soft">("hard");
+
+  const active = constraints.filter((c) => c.status === "active");
+  const resolved = constraints.filter((c) => c.status !== "active");
+
+  const handleAdd = async () => {
+    const content = newContent.trim();
+    if (!content || createMut.isPending) return;
+    await createMut.mutateAsync({
+      target_type: "character",
+      target_id: characterId,
+      content,
+      severity: newSeverity,
+    });
+    setNewContent("");
+  };
+
+  const renderRow = (c: ConstraintItem) => {
+    const isActive = c.status === "active";
+    return (
+      <div
+        key={c.id}
+        className={`flex items-start gap-2 rounded-lg border px-2.5 py-2 ${
+          isActive
+            ? "border-rose-200/70 bg-rose-50/50 dark:border-rose-900/40 dark:bg-rose-950/20"
+            : "border-slate-200 bg-slate-50 opacity-60 dark:border-slate-800 dark:bg-slate-900"
+        }`}
+      >
+        <Badge tone={c.severity === "hard" ? "rose" : "amber"}>
+          {c.severity === "hard" ? "硬" : "软"}
+        </Badge>
+        <p
+          className={`flex-1 text-xs leading-relaxed text-slate-700 dark:text-slate-300 ${
+            isActive ? "" : "line-through"
+          }`}
+        >
+          {c.content}
+        </p>
+        {isActive ? (
+          <button
+            type="button"
+            title="标记为已解除（剧情推进使该约束失效）"
+            onClick={() => updateMut.mutate({ id: c.id, input: { status: "resolved" } })}
+            className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-slate-400 hover:bg-slate-200 hover:text-slate-700 dark:hover:bg-slate-800 cursor-pointer"
+          >
+            解除
+          </button>
+        ) : (
+          <button
+            type="button"
+            title="重新激活该约束"
+            onClick={() => updateMut.mutate({ id: c.id, input: { status: "active" } })}
+            className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-slate-400 hover:bg-slate-200 hover:text-slate-700 dark:hover:bg-slate-800 cursor-pointer"
+          >
+            激活
+          </button>
+        )}
+        <button
+          type="button"
+          title="删除该约束"
+          onClick={() => deleteMut.mutate(c.id)}
+          className="shrink-0 rounded-md p-1 text-slate-400 hover:bg-rose-50 hover:text-rose-600 cursor-pointer"
+        >
+          <Trash2 className="h-3 w-3" />
+        </button>
+      </div>
+    );
+  };
+
+  return (
+    <div className="rounded-xl border border-slate-200 dark:border-slate-800">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left cursor-pointer"
+      >
+        <ShieldAlert className="h-3.5 w-3.5 text-rose-500" />
+        <span className="text-xs font-semibold text-slate-700 dark:text-slate-200">
+          硬约束（防事实幻觉）
+        </span>
+        <Badge tone={active.length > 0 ? "rose" : "default"}>{active.length}</Badge>
+        <span className="ml-auto text-[11px] text-slate-400">
+          {expanded ? "收起" : "展开管理"}
+        </span>
+      </button>
+      {expanded && (
+        <div className="space-y-2 border-t border-slate-100 px-3 py-2.5 dark:border-slate-800">
+          <p className="text-[11px] leading-relaxed text-slate-500">
+            写作时会自动注入的"绝不能写"清单。AI 生成人物卡时会自动推导，你也可以手动补充。
+          </p>
+          {isLoading ? (
+            <p className="text-[11px] text-slate-400">加载中...</p>
+          ) : (
+            <>
+              {active.map(renderRow)}
+              {resolved.map(renderRow)}
+              {constraints.length === 0 && (
+                <p className="text-[11px] text-slate-400">暂无约束，添加第一条吧。</p>
+              )}
+            </>
+          )}
+          <div className="flex items-start gap-2 pt-1">
+            <div className="flex shrink-0 overflow-hidden rounded-lg border border-slate-300 dark:border-slate-700">
+              {(["hard", "soft"] as const).map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => setNewSeverity(s)}
+                  className={`px-2 py-1 text-[11px] cursor-pointer ${
+                    newSeverity === s
+                      ? s === "hard"
+                        ? "bg-rose-500 text-white"
+                        : "bg-amber-500 text-white"
+                      : "bg-white text-slate-500 dark:bg-slate-950"
+                  }`}
+                >
+                  {s === "hard" ? "硬" : "软"}
+                </button>
+              ))}
+            </div>
+            <textarea
+              rows={2}
+              value={newContent}
+              onChange={(e) => setNewContent(e.target.value)}
+              placeholder="例如：大一新生，对校园不熟悉；绝不能写他对学校了如指掌…"
+              className="flex-1 rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-950"
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={createMut.isPending || !newContent.trim()}
+              onClick={handleAdd}
+            >
+              <Plus className="h-3.5 w-3.5" />
+              添加
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
 
 export const CharactersSection: React.FC<CharactersSectionProps> = ({
   novelUid,
@@ -253,9 +416,10 @@ export const CharactersSection: React.FC<CharactersSectionProps> = ({
                 ))}
               </div>
 
+              <CharacterConstraints novelUid={novelUid} characterId={c.id} />
+
               {rewriteId === c.id && (
-                <div className="flex items-center gap-2 pt-1">
-                  <input
+                <div className="flex items-center gap-2 pt-1">                  <input
                     type="text"
                     placeholder="输入修改意见，让 AI 重写该人物卡..."
                     value={rewritePrompt}

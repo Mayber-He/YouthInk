@@ -149,7 +149,7 @@ class MemoryRepository:
             (fid,),
         ).fetchone()
         if row is None:
-            raise AppError("FORESHADOW_NOT_FOUND", f"未找到伏笔 #{fid}", 404)
+            raise AppError("FORESHADOW_NOT_FOUND", f"未找到伏笔 #{fid}", status_code=404)
         return self._row_to_foreshadow(row)
 
     def update_foreshadowing(self, fid: int, data: ForeshadowUpdate) -> ForeshadowResponse:

@@ -33,12 +33,17 @@ BUILTIN_PROMPT_TEMPLATES: dict[str, dict[str, Any]] = {
         ),
     },
     "generate_characters": {
-        "version": "1.0",
-        "description": "生成人物卡设定（JSON）",
+        "version": "1.1",
+        "description": "生成人物卡设定（JSON，含硬约束推导）",
         "content": (
             "请根据作品《{{title}}》的立项与世界观，设计核心与重要人物卡。\n"
             "角色定位（role）取值：female_lead / male_lead / major / minor / extra。\n"
-            "要求每位角色具备鲜明反差感、具体的说话风格与清晰的人物成长弧光。"
+            "要求每位角色具备鲜明反差感、具体的说话风格与清晰的人物成长弧光。\n"
+            "额外要求：为每位角色从 background / initial_age / 身份中反向推导 2~4 条【硬约束】"
+            "（constraints，字符串数组）——即该角色【绝不能】被写出的内容，重点捕捉身份隐含的"
+            "「无知领域」与「能力边界」。例如：大一新生 → "
+            "「对大学校园不熟悉，问路、走错教学楼是合理的；绝不能写他对学校了如指掌、轻车熟路」。"
+            "硬约束必须是具体、可判定的行为禁令，而不是性格描述的复述。"
         ),
     },
     "generate_locations": {

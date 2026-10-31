@@ -6,6 +6,7 @@ from typing import Iterator
 from fastapi import Path
 
 from app.db.manager import get_global_db, get_novel_db
+from app.db.repositories.constraint_repo import ConstraintRepository
 from app.db.repositories.entity_repo import EntityRepository
 from app.db.repositories.memory_repo import MemoryRepository
 from app.db.repositories.novel_repo import NovelRepository
@@ -65,6 +66,14 @@ def get_memory_repo(
         yield MemoryRepository(conn)
 
 
+def get_constraint_repo(
+    novel_uid: str = Path(..., description="Unique novel directory identifier"),
+) -> Iterator[ConstraintRepository]:
+    """Yield a ConstraintRepository backed by <novel_uid>/novel.db."""
+    with get_novel_db(novel_uid) as conn:
+        yield ConstraintRepository(conn)
+
+
 def get_setting_generator(
     novel_uid: str = Path(..., description="Unique novel directory identifier"),
 ) -> Iterator[SettingGeneratorService]:
@@ -76,6 +85,7 @@ def get_setting_generator(
             entity_repo=EntityRepository(novel_conn),
             outline_repo=OutlineRepository(novel_conn),
             settings_repo=SettingsRepository(global_conn),
+            constraint_repo=ConstraintRepository(novel_conn),
         )
 
 

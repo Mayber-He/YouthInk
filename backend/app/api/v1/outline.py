@@ -50,7 +50,9 @@ def update_volume(
     return repo.update_volume(vol_id, payload)
 
 
-@router.delete("/volumes/{vol_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/volumes/{vol_id}", status_code=status.HTTP_204_NO_CONTENT,
+    response_model=None,  # 显式禁用：避免新版 FastAPI 从 `-> None` 注解推断 response_model 导致 204 断言失败
+)
 def delete_volume(
     vol_id: int,
     repo: OutlineRepository = Depends(get_outline_repo),
@@ -77,7 +79,9 @@ def update_arc(
     return repo.update_arc(arc_id, payload)
 
 
-@router.delete("/arcs/{arc_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/arcs/{arc_id}", status_code=status.HTTP_204_NO_CONTENT,
+    response_model=None,  # 显式禁用：避免新版 FastAPI 从 `-> None` 注解推断 response_model 导致 204 断言失败
+)
 def delete_arc(
     arc_id: int,
     repo: OutlineRepository = Depends(get_outline_repo),
@@ -114,7 +118,9 @@ def reorder_chapter(
     )
 
 
-@router.delete("/chapters/{chapter_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/chapters/{chapter_id}", status_code=status.HTTP_204_NO_CONTENT,
+    response_model=None,  # 显式禁用：避免新版 FastAPI 从 `-> None` 注解推断 response_model 导致 204 断言失败
+)
 def delete_chapter(
     chapter_id: int,
     repo: OutlineRepository = Depends(get_outline_repo),

@@ -6,6 +6,8 @@ import type {
   CharacterItem,
   CharacterRole,
   CharacterTimelineSnapshot,
+  ConstraintCreateInput,
+  ConstraintItem,
   LocationItem,
   MainPlot,
   TurningPointItem,
@@ -321,5 +323,82 @@ export function useGenerateMainPlot(novelUid: string) {
         body: JSON.stringify(input),
       }),
     onSuccess: () => qc.invalidateQueries({ queryKey: entityKeys.mainPlot(novelUid) }),
+  });
+}
+
+// --- Constraints (Explicit Constraint System) ---
+
+export const constraintKeys = {
+  all: (uid: string) => ["novels", uid, "constraints"] as const,
+  byTarget: (uid: string, targetType: string, targetId: number | null) =>
+    ["novels", uid, "constraints", targetType, targetId] as const,
+};
+
+export function useConstraints(
+  novelUid: string,
+  targetType?: string,
+  targetId?: number | null,
+  status?: string,
+) {
+  const params = new URLSearchParams();
+  if (targetType) params.set("target_type", targetType);
+  if (targetId != null) params.set("target_id", String(targetId));
+  if (status) params.set("status", status);
+  const qs = params.toString();
+  return useQuery({
+    queryKey: [...constraintKeys.byTarget(novelUid, targetType ?? "all", targetId ?? null), status ?? "all"],
+    queryFn: () =>
+      apiRequest<ConstraintItem[]>(
+        `/api/v1/novels/${novelUid}/constraints${qs ? `?${qs}` : ""}`,
+      ),
+  });
+}
+
+export function useCreateConstraint(novelUid: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: ConstraintCreateInput) =>
+      apiRequest<ConstraintItem>(
+        `/api/v1/novels/${novelUid}/constraints`,
+        { method: "POST", body: JSON.stringify(input) },
+      ),
+    onSuccess: () =>
+      qc.invalidateQueries({ queryKey: constraintKeys.all(novelUid) }),
+  });
+}
+
+export function useUpdateConstraint(novelUid: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id,
+      input,
+    }: {
+      id: number;
+      input: Partial<
+        Pick<
+          ConstraintItem,
+          "content" | "severity" | "status" | "locked" | "source_quote"
+        >
+      >;
+    }) =>
+      apiRequest<ConstraintItem>(
+        `/api/v1/novels/${novelUid}/constraints/${id}`,
+        { method: "PUT", body: JSON.stringify(input) },
+      ),
+    onSuccess: () =>
+      qc.invalidateQueries({ queryKey: constraintKeys.all(novelUid) }),
+  });
+}
+
+export function useDeleteConstraint(novelUid: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) =>
+      apiRequest<void>(`/api/v1/novels/${novelUid}/constraints/${id}`, {
+        method: "DELETE",
+      }),
+    onSuccess: () =>
+      qc.invalidateQueries({ queryKey: constraintKeys.all(novelUid) }),
   });
 }

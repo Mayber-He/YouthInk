@@ -45,7 +45,9 @@ def update_novel(
     return repo.update_novel(payload)
 
 
-@router.delete("/{novel_uid}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{novel_uid}", status_code=status.HTTP_204_NO_CONTENT,
+    response_model=None,  # 显式禁用：避免新版 FastAPI 从 `-> None` 注解推断 response_model 导致 204 断言失败
+)
 def delete_novel(novel_uid: str) -> None:
     delete_novel_project(novel_uid)
 

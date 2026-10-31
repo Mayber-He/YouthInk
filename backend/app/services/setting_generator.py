@@ -7,9 +7,11 @@ from typing import TypeVar
 from pydantic import BaseModel
 
 from app.db.repositories.entity_repo import EntityRepository
+from app.db.repositories.constraint_repo import ConstraintRepository
 from app.db.repositories.novel_repo import NovelRepository
 from app.db.repositories.outline_repo import OutlineRepository
 from app.db.repositories.settings_repo import SettingsRepository
+from app.schemas.constraints import ConstraintCreate
 from app.schemas.entities import (
     CharacterResponse,
     CharacterUpdate,
@@ -48,12 +50,14 @@ class SettingGeneratorService:
         entity_repo: EntityRepository,
         outline_repo: OutlineRepository,
         settings_repo: SettingsRepository,
+        constraint_repo: ConstraintRepository,
     ) -> None:
         self._novel_uid = novel_uid
         self._novel_repo = novel_repo
         self._entity_repo = entity_repo
         self._outline_repo = outline_repo
         self._settings_repo = settings_repo
+        self._constraint_repo = constraint_repo
 
     def _build_base_layers(self) -> tuple[str, str, str]:
         """Return (layer1_system_role, layer2_style_template, layer3_core_setting)."""
@@ -194,7 +198,8 @@ class SettingGeneratorService:
             '请输出纯 JSON 对象，格式示例：\n'
             '{"characters": [{"name": "林夏", "aliases": ["夏夏"], "role": "female_lead|male_lead|major|minor|extra", '
             '"gender": "女", "initial_age": "高一(16岁)", "appearance": "...", "personality": "...", '
-            '"speech_style": "...", "background": "...", "arc_design": "..."}]}'
+            '"speech_style": "...", "background": "...", "arc_design": "...", '
+            '"constraints": ["对大学校园不熟悉，问路、走错教学楼是合理的；绝不能写他对学校了如指掌", "..."]}]}'
         )
         parsed = await self._call_and_parse_json(
             task_type="generate_characters",
@@ -203,7 +208,42 @@ class SettingGeneratorService:
             layer6_format=fmt,
             schema_cls=LlmCharacterBatchOutput,
         )
-        return self._entity_repo.replace_unlocked_characters(parsed.characters)
+        unlocked_ids = [
+            c.id for c in self._entity_repo.list_characters() if not c.locked
+        ]
+        created = self._entity_repo.replace_unlocked_characters(parsed.characters)
+        for cid in unlocked_ids:
+            self._constraint_repo.delete_for_target("character", cid)
+        self._persist_derived_character_constraints(parsed.characters, created)
+        return created
+
+    def _persist_derived_character_constraints(
+        self,
+        items: list[LlmCharacterItem],
+        created: list[CharacterResponse],
+    ) -> None:
+        """Persist LLM-derived hard constraints for newly generated characters.
+
+        Only creates constraints for characters that were actually (re)created in
+        this batch, matched by name. User-locked characters are untouched.
+        """
+        created_by_name = {c.name: c for c in created}
+        for item in items:
+            char = created_by_name.get(item.name)
+            if char is None:
+                continue
+            for text in item.constraints or []:
+                text = text.strip()
+                if not text:
+                    continue
+                self._constraint_repo.create_constraint(
+                    ConstraintCreate(
+                        target_type="character",
+                        target_id=char.id,
+                        content=text,
+                        severity="hard",
+                    )
+                )
 
     async def rewrite_character(self, char_id: int, instruction: str) -> CharacterResponse:
         char = self._entity_repo.get_character(char_id)

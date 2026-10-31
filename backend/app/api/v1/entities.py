@@ -51,7 +51,9 @@ def update_worldview(
     return repo.update_worldview(entry_id, payload)
 
 
-@router.delete("/worldview/{entry_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/worldview/{entry_id}", status_code=status.HTTP_204_NO_CONTENT,
+    response_model=None,  # 显式禁用：避免新版 FastAPI 从 `-> None` 注解推断 response_model 导致 204 断言失败
+)
 def delete_worldview(
     entry_id: int,
     repo: EntityRepository = Depends(get_entity_repo),
@@ -100,7 +102,9 @@ def update_character(
     return repo.update_character(char_id, payload)
 
 
-@router.delete("/characters/{char_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/characters/{char_id}", status_code=status.HTTP_204_NO_CONTENT,
+    response_model=None,  # 显式禁用：避免新版 FastAPI 从 `-> None` 注解推断 response_model 导致 204 断言失败
+)
 def delete_character(
     char_id: int,
     repo: EntityRepository = Depends(get_entity_repo),
@@ -158,7 +162,9 @@ def update_location(
     return repo.update_location(loc_id, payload)
 
 
-@router.delete("/locations/{loc_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/locations/{loc_id}", status_code=status.HTTP_204_NO_CONTENT,
+    response_model=None,  # 显式禁用：避免新版 FastAPI 从 `-> None` 注解推断 response_model 导致 204 断言失败
+)
 def delete_location(
     loc_id: int,
     repo: EntityRepository = Depends(get_entity_repo),

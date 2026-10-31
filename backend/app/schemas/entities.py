@@ -162,6 +162,10 @@ class LlmCharacterItem(BaseModel):
     speech_style: str = ""
     background: str = ""
     arc_design: str = ""
+    constraints: list[str] = Field(
+        default_factory=list,
+        description="从背景/身份反向推导的硬约束（绝不能写的内容），如身份隐含的无知领域",
+    )
 
 
 class LlmCharacterBatchOutput(BaseModel):

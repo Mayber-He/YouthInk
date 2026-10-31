@@ -283,6 +283,24 @@ CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
     tokenize='unicode61'
 );
 
+CREATE TABLE IF NOT EXISTS constraints (
+    id                      INTEGER PRIMARY KEY,
+    target_type             TEXT    NOT NULL
+                                CHECK(target_type IN ('character','location','worldview','chapter','novel')),
+    target_id               INTEGER,
+    content                 TEXT    NOT NULL,
+    severity                TEXT    NOT NULL DEFAULT 'hard'
+                                CHECK(severity IN ('hard','soft')),
+    status                  TEXT    NOT NULL DEFAULT 'active'
+                                CHECK(status IN ('active','resolved','violated')),
+    valid_from_chapter_id   INTEGER REFERENCES chapters(id) ON DELETE SET NULL,
+    valid_until_chapter_id  INTEGER REFERENCES chapters(id) ON DELETE SET NULL,
+    source_quote            TEXT,
+    locked                  INTEGER NOT NULL DEFAULT 0,
+    created_at              TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at              TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS summaries (
     id          INTEGER PRIMARY KEY,
     level       TEXT    NOT NULL CHECK(level IN ('chapter','arc','volume','novel')),
@@ -317,6 +335,8 @@ CREATE TABLE IF NOT EXISTS generation_logs (
     created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE INDEX IF NOT EXISTS idx_constraints_target ON constraints(target_type, target_id);
+CREATE INDEX IF NOT EXISTS idx_constraints_status ON constraints(status);
 CREATE INDEX IF NOT EXISTS idx_facts_status   ON facts(status);
 CREATE INDEX IF NOT EXISTS idx_facts_entities ON facts(entity_ids);
 CREATE INDEX IF NOT EXISTS idx_summaries_ref  ON summaries(level, ref_id);
@@ -329,6 +349,8 @@ CREATE TRIGGER IF NOT EXISTS trg_chapters_upd AFTER UPDATE ON chapters
     BEGIN UPDATE chapters SET updated_at = datetime('now') WHERE id = NEW.id; END;
 CREATE TRIGGER IF NOT EXISTS trg_scenes_upd AFTER UPDATE ON scenes
     BEGIN UPDATE scenes SET updated_at = datetime('now') WHERE id = NEW.id; END;
+CREATE TRIGGER IF NOT EXISTS trg_constraints_upd AFTER UPDATE ON constraints
+    BEGIN UPDATE constraints SET updated_at = datetime('now') WHERE id = NEW.id; END;
 """
 
 

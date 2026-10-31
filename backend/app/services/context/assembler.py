@@ -6,6 +6,7 @@ import re
 import sqlite3
 
 from app.db.repositories.entity_repo import EntityRepository
+from app.db.repositories.constraint_repo import ConstraintRepository
 from app.db.repositories.novel_repo import NovelRepository
 from app.db.repositories.outline_repo import OutlineRepository
 from app.db.repositories.settings_repo import SettingsRepository
@@ -31,6 +32,7 @@ class ContextAssembler:
         self._novel_uid = novel_uid
         self._novel_repo = NovelRepository(novel_conn, novel_uid)
         self._entity_repo = EntityRepository(novel_conn)
+        self._constraint_repo = ConstraintRepository(novel_conn)
         self._outline_repo = OutlineRepository(novel_conn)
         self._writing_repo = WritingRepository(novel_conn)
         self._settings_repo = settings_repo
@@ -140,6 +142,39 @@ class ContextAssembler:
                 "cognitive_constraints",
                 "出场人物认知边界（防超知幻觉）",
                 "\n".join(known_secrets_lines) or "无特殊认知约束",
+                disabled,
+            )
+        )
+
+        # 3.5 硬约束清单（防事实幻觉）：当前章节生效中的显式禁令
+        constraint_lines: list[str] = []
+        active_constraints = self._constraint_repo.list_active_for_chapter(
+            chapter_id,
+            ch.sort_order,
+            sorted(active_char_ids),
+            sorted(active_loc_ids),
+        )
+        for con in active_constraints:
+            sev = "硬约束" if con.severity == "hard" else "软约束"
+            scope = {
+                "character": "人物",
+                "location": "地点",
+                "worldview": "世界观",
+                "chapter": "章节",
+                "novel": "全书",
+            }.get(con.target_type, con.target_type)
+            name_part = f"「{con.target_name}」" if con.target_name else ""
+            constraint_lines.append(f"• 【{sev}·{scope}{name_part}】{con.content}")
+        if constraint_lines:
+            constraint_lines.append(
+                "⚠️ 动笔前请先复述以上硬约束，写作全程不得违反；"
+                "如剧情推进需要打破某条约束，请先到约束管理中将其标记为已解除，不要擅自违反。"
+            )
+        blocks.append(
+            self._make_block(
+                "hard_constraints",
+                "硬约束清单（防事实幻觉）",
+                "\n".join(constraint_lines) or "暂无生效中的硬约束",
                 disabled,
             )
         )

@@ -91,3 +91,41 @@ export interface MainPlot {
   locked: boolean;
   updated_at: string;
 }
+
+export type ConstraintTargetType =
+  | "character"
+  | "location"
+  | "worldview"
+  | "chapter"
+  | "novel";
+
+export type ConstraintSeverity = "hard" | "soft";
+
+export type ConstraintStatus = "active" | "resolved" | "violated";
+
+export interface ConstraintItem {
+  id: number;
+  target_type: ConstraintTargetType;
+  target_id: number | null;
+  content: string;
+  severity: ConstraintSeverity;
+  status: ConstraintStatus;
+  valid_from_chapter_id: number | null;
+  valid_until_chapter_id: number | null;
+  source_quote: string;
+  locked: boolean;
+  target_name: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConstraintCreateInput {
+  target_type: ConstraintTargetType;
+  target_id?: number | null;
+  content: string;
+  severity?: ConstraintSeverity;
+  valid_from_chapter_id?: number | null;
+  valid_until_chapter_id?: number | null;
+  source_quote?: string;
+  locked?: boolean;
+}

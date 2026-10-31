@@ -103,7 +103,9 @@ def update_scene(
     return repo.update_scene(scene_id, payload)
 
 
-@router.delete("/scenes/{scene_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/scenes/{scene_id}", status_code=status.HTTP_204_NO_CONTENT,
+    response_model=None,  # 显式禁用：避免新版 FastAPI 从 `-> None` 注解推断 response_model 导致 204 断言失败
+)
 def delete_scene(
     scene_id: int,
     repo: WritingRepository = Depends(get_writing_repo),

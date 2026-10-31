@@ -786,6 +786,18 @@ CREATE TRIGGER trg_scenes_upd AFTER UPDATE ON scenes
 
 修改已定稿章节后，相关摘要标记为"过期"，提示用户重新生成。（v0.2：自动重算后续状态）
 
+### 5.7 显式约束系统（防事实幻觉）
+
+记忆系统记录"发生了什么"，但回答不了"什么不能发生"。显式约束系统把否定性事实（硬约束/软约束）变成一等公民数据：
+
+- **数据模型**：`constraints` 表（novel.db），字段：`target_type`（character/location/worldview/chapter/novel）、`target_id`、`content`、`severity`（hard/soft）、`status`（active/resolved/violated）、`valid_from_chapter_id` / `valid_until_chapter_id`（生效区间，约束有生命周期）、`source_quote`、`locked`。
+- **约束推导**：人物卡生成时，AI 从背景/身份反向推导 2~4 条硬约束（如"大一新生"→"对校园不熟悉；绝不能写他对学校了如指掌"），随人物卡一起落库；用户可在人物卡页手动增删改。
+- **写作注入**：上下文组装器新增 `hard_constraints` 区块（required 优先级），按章节时序筛选生效中的约束（全书通用 + 本章 + 出场人物/地点），硬约束置顶，并附"动笔前复述"自检指令。前端上下文预览可开关。
+- **生命周期**：约束可标记为已解除（剧情推进使其失效）或重新激活；人物卡重新生成时，旧人物绑定的约束一并清理。
+- **API**：`GET/POST /constraints`、`PUT/DELETE /constraints/{id}`、`GET /chapters/{id}/active-constraints`。
+
+（后续：抽取器增加"约束违反/解除"检测进待确认队列；v0.2 一致性审查以约束清单为检查表。）
+
 ---
 
 ## 6. 界面设计
