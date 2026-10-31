@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.schemas.outline import ChapterResponse
 
@@ -125,6 +125,23 @@ class StreamRewriteRequest(BaseModel):
     action_type: Literal["rewrite", "expand", "shorten", "polish", "tone_shift"] = "polish"
     target_character_id: int | None = None
     instruction: str = ""
+
+
+class StreamSupplementRequest(BaseModel):
+    chapter_id: int
+    content: str = Field(..., max_length=100000)
+    insertion_index: int = Field(..., ge=0)
+    instruction: str = Field(..., min_length=1, max_length=2000)
+    disabled_context_keys: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def insertion_index_within_content(self) -> "StreamSupplementRequest":
+        content_length = len(self.content.encode("utf-16-le")) // 2
+        if self.insertion_index > content_length:
+            raise ValueError("insertion_index must not exceed content length")
+        if not self.instruction.strip():
+            raise ValueError("instruction must not be blank")
+        return self
 
 
 # --- Local AI Smell Detection ---

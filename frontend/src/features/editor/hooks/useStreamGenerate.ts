@@ -149,6 +149,74 @@ export function useStreamGenerate(novelUid: string) {
     [novelUid, stopStream]
   );
 
+  const startSupplementStream = useCallback(
+    async (
+      params: {
+        chapter_id: number;
+        content: string;
+        insertion_index: number;
+        instruction: string;
+        disabled_context_keys: string[];
+      },
+      onChunk: (delta: string) => void,
+      onComplete: (candidate: string) => void
+    ) => {
+      stopStream();
+      const controller = new AbortController();
+      abortRef.current = controller;
+      setIsStreaming(true);
+      setStreamError(null);
+      let accumulated = "";
+      let hadError = false;
+
+      try {
+        await consumeSseStream(
+          `/api/stream/novels/${novelUid}/supplement`,
+          params,
+          controller.signal,
+          {
+            onMeta: (meta) => {
+              setMetrics({
+                model: meta.model,
+                contextTokens: meta.context_tokens,
+                outputTokens: 0,
+                elapsedMs: 0,
+              });
+            },
+            onDelta: (delta) => {
+              accumulated += delta;
+              onChunk(delta);
+            },
+            onDone: (done) => {
+              setMetrics((prev) => ({
+                model: prev?.model ?? "",
+                contextTokens: done.input_tokens,
+                outputTokens: done.output_tokens,
+                elapsedMs: done.elapsed_ms,
+              }));
+            },
+            onError: (err) => {
+              hadError = true;
+              setStreamError(err.message);
+            },
+          }
+        );
+      } catch (err) {
+        if ((err as Error)?.name !== "AbortError") {
+          hadError = true;
+          setStreamError(err instanceof Error ? err.message : "补充内容生成中断");
+        }
+      } finally {
+        setIsStreaming(false);
+        abortRef.current = null;
+        if (!hadError && !controller.signal.aborted && accumulated.trim()) {
+          onComplete(accumulated.trim());
+        }
+      }
+    },
+    [novelUid, stopStream]
+  );
+
   return {
     isStreaming,
     streamError,
@@ -156,5 +224,6 @@ export function useStreamGenerate(novelUid: string) {
     stopStream,
     startWriteStream,
     startRewriteStream,
+    startSupplementStream,
   };
 }

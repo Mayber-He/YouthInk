@@ -15,6 +15,7 @@ from app.schemas.writing import (
     SceneCreate,
     SceneResponse,
     StreamRewriteRequest,
+    StreamSupplementRequest,
     StreamWriteRequest,
     SelectionCritiqueResponse,
 )
@@ -279,6 +280,47 @@ class WritingService:
             layer4_dynamic_context="\n".join(context_lines),
             layer5_task_instruction=inst,
             layer6_output_format="只输出修改后的正文片段本身，不要包含引号或任何前后说明。",
+        )
+
+    def prepare_stream_supplement_prompts(
+        self, req: StreamSupplementRequest
+    ) -> tuple[str, str]:
+        """Build prompts for an additive passage at a precise point in a chapter."""
+        layer1, layer2, layer3 = self._build_base_layers()
+        chapter = self._outline_repo.get_chapter(req.chapter_id)
+        preview = self._assembler.build_context_preview(
+            req.chapter_id, disabled_keys=req.disabled_context_keys
+        )
+        context_parts = [
+            f"### {block.label}\n{block.content}"
+            for block in preview.blocks
+            if block.enabled
+        ]
+        utf16_prefix = req.content.encode("utf-16-le")[: req.insertion_index * 2]
+        prefix = utf16_prefix.decode("utf-16-le", errors="ignore")
+        char_index = len(prefix)
+        marked_content = (
+            req.content[:char_index]
+            + "\n\n【作者指定的补充插入位置】\n\n"
+            + req.content[char_index:]
+        )
+        context_parts.append(
+            f"### 第{chapter.display_index}章《{chapter.title}》现有正文（含精确插入标记）\n{marked_content}"
+        )
+        instruction = (
+            f"请为第{chapter.display_index}章《{chapter.title}》在标记位置补写内容。\n"
+            f"作者要求：{req.instruction.strip()}\n"
+            "只生成新增段落，不得改写、复述或输出标记两侧已有正文；开头和结尾要能直接接入标记两侧。"
+            "严格遵守章节梗概、时间线、人物已知信息与已发生事件；补充内容不得与已有正文冲突或重复。"
+            "篇幅以完整交代作者要求为准，避免流水账和无关铺陈。"
+        )
+        return assemble_six_layer_prompt(
+            layer1_system_role=layer1,
+            layer2_style_template=layer2,
+            layer3_core_setting=layer3,
+            layer4_dynamic_context="\n\n".join(context_parts),
+            layer5_task_instruction=instruction,
+            layer6_output_format="只输出可以直接插入正文的新增小说段落，不要输出标题、说明、引用标记或写作分析。",
         )
 
     async def critique_selection(self, chapter_id: int, selected_text: str) -> SelectionCritiqueResponse:

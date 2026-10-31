@@ -11,6 +11,7 @@ interface SelectionToolbarProps {
   aiSmellHits: AiSmellHit[];
   hasScannedSmell?: boolean;
   isStreaming: boolean;
+  onOpenSupplement: () => void;
   onRewriteSelection: (
     actionType: RewriteActionType,
     targetCharId: number | null,
@@ -32,6 +33,7 @@ export const SelectionToolbar: React.FC<SelectionToolbarProps> = ({
   aiSmellHits,
   hasScannedSmell = false,
   isStreaming,
+  onOpenSupplement,
   onRewriteSelection,
   onRewriteSmellHit,
   onFocusSmellHit,
@@ -120,6 +122,19 @@ export const SelectionToolbar: React.FC<SelectionToolbarProps> = ({
           />
         </div>
       )}
+
+      <div className="flex">
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={isStreaming}
+          onClick={onOpenSupplement}
+          title="在正文光标位置补充一段内容，先预览再插入"
+        >
+          <Sparkles className="h-3.5 w-3.5 text-indigo-600" />
+          补充内容
+        </Button>
+      </div>
 
       {/* 选区逻辑挑刺结果卡片（仅渲染一次） */}
       {critiqueResult && (

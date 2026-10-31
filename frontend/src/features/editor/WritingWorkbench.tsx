@@ -62,6 +62,13 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
   const [reviewResult, setReviewResult] = useState<ConsistencyReviewResponse | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [confirmOverwriteOpen, setConfirmOverwriteOpen] = useState(false);
+  const [supplementOpen, setSupplementOpen] = useState(false);
+  const [supplementInstruction, setSupplementInstruction] = useState("");
+  const [supplementCandidate, setSupplementCandidate] = useState("");
+  const [supplementBaseContent, setSupplementBaseContent] = useState<string | null>(null);
+  const [supplementInsertAt, setSupplementInsertAt] = useState<number | null>(null);
+  const [supplementReady, setSupplementReady] = useState(false);
+  const [supplementSaveError, setSupplementSaveError] = useState<string | null>(null);
   const [critiqueResult, setCritiqueResult] = useState<SelectionCritiqueResult | null>(null);
   const [pipelineStep, setPipelineStep] = useState<WritingPipelineStep>("idle");
   const [streamModelName, setStreamModelName] = useState("");
@@ -86,6 +93,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
     stopStream,
     startWriteStream,
     startRewriteStream,
+    startSupplementStream,
   } = useStreamGenerate(novelUid);
 
   useEffect(() => {
@@ -97,6 +105,10 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
         setPipelineStep("idle");
         setReviewResult(null);
         setReviewError(null);
+        setSelectionRange({ start: 0, end: 0, text: "" });
+        setSupplementOpen(false);
+        setSupplementCandidate("");
+        setSupplementReady(false);
         prevChapterIdRef.current = workspace.chapter.id;
       }
       if (!activeSceneId && workspace.scenes.length > 0) {
@@ -227,6 +239,90 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
         saveMut.mutate({ content: updated, source: "ai", create_new_version: true });
       }
     );
+  };
+
+  const handleOpenSupplement = () => {
+    const insertAt = selectionRange.text
+      ? selectionRange.end
+      : selectionRange.start;
+    setSupplementInsertAt(insertAt);
+    setSupplementBaseContent(content);
+    setSupplementInstruction("");
+    setSupplementCandidate("");
+    setSupplementReady(false);
+    setSupplementSaveError(null);
+    setSupplementOpen(true);
+  };
+
+  const handleGenerateSupplement = () => {
+    if (!effectiveChapterId || !supplementInstruction.trim()) return;
+    const baseContent = content;
+    const insertAt = supplementBaseContent === content
+      ? Math.min(supplementInsertAt ?? content.length, content.length)
+      : Math.min(
+          selectionRange.text ? selectionRange.end : selectionRange.start,
+          content.length
+        );
+    setSupplementBaseContent(baseContent);
+    setSupplementInsertAt(insertAt);
+    setSupplementCandidate("");
+    setSupplementReady(false);
+    setSupplementSaveError(null);
+    startSupplementStream(
+      {
+        chapter_id: effectiveChapterId,
+        content: baseContent,
+        insertion_index: insertAt,
+        instruction: supplementInstruction.trim(),
+        disabled_context_keys: disabledContextKeys,
+      },
+      (delta) => setSupplementCandidate((current) => current + delta),
+      (candidate) => {
+        setSupplementCandidate(candidate);
+        setSupplementReady(Boolean(candidate.trim()));
+      }
+    );
+  };
+
+  const handleInsertSupplement = async () => {
+    if (
+      !effectiveChapterId ||
+      !supplementCandidate.trim() ||
+      supplementBaseContent !== content ||
+      supplementInsertAt === null
+    ) return;
+
+    const before = content.slice(0, supplementInsertAt);
+    const after = content.slice(supplementInsertAt);
+    const prefixGap = !before || before.endsWith("\n\n")
+      ? ""
+      : before.endsWith("\n") ? "\n" : "\n\n";
+    const suffixGap = !after || after.startsWith("\n\n")
+      ? ""
+      : after.startsWith("\n") ? "\n" : "\n\n";
+    const passage = supplementCandidate.trim();
+    const updated = before + prefixGap + passage + suffixGap + after;
+    const caretAt = before.length + prefixGap.length + passage.length;
+
+    setSupplementSaveError(null);
+    try {
+      await saveMut.mutateAsync({
+        content: updated,
+        source: "ai",
+        create_new_version: true,
+      });
+      setContent(updated);
+      setSupplementOpen(false);
+      setSupplementCandidate("");
+      setSupplementReady(false);
+      requestAnimationFrame(() => {
+        const editor = textareaRef.current;
+        editor?.focus();
+        editor?.setSelectionRange(caretAt, caretAt);
+      });
+    } catch (error) {
+      setSupplementSaveError(error instanceof Error ? error.message : "保存补充内容失败");
+    }
   };
 
   const handleCritiqueSelection = () => {
@@ -369,6 +465,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
             aiSmellHits={smellHits}
             hasScannedSmell={hasScannedSmell}
             isStreaming={isStreaming}
+            onOpenSupplement={handleOpenSupplement}
             onRewriteSelection={handleRewriteSelection}
             onRewriteSmellHit={handleRewriteSmellHit}
             onFocusSmellHit={handleFocusSmellHit}
@@ -383,6 +480,71 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
             onDismissCritique={() => setCritiqueResult(null)}
           />
         </div>
+
+        {supplementOpen && (
+          <section className="mt-3 space-y-3 rounded-xl border border-indigo-200 bg-indigo-50/60 p-4 dark:border-indigo-900 dark:bg-indigo-950/30">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100">补充正文内容</h3>
+              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                候选内容会插入到当前光标位置；生成和预览期间不会改动正文。
+              </p>
+            </div>
+            <textarea
+              value={supplementInstruction}
+              onChange={(event) => setSupplementInstruction(event.target.value)}
+              disabled={isStreaming}
+              maxLength={2000}
+              rows={2}
+              placeholder="例如：补充他们最初是怎么加上好友的，要符合前文时间和人物关系"
+              className="w-full resize-y rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 focus:border-indigo-400 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+            />
+            {supplementBaseContent !== null && supplementBaseContent !== content && (
+              <p className="text-xs text-amber-700 dark:text-amber-300">
+                正文在生成后发生了变化。请把光标放到新的插入位置，再重新生成。
+              </p>
+            )}
+            {supplementCandidate && (
+              <div className="max-h-64 overflow-y-auto whitespace-pre-wrap rounded-lg border border-slate-200 bg-white p-3 text-sm leading-7 text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100">
+                {supplementCandidate}
+                {isStreaming && <span className="animate-pulse">▍</span>}
+              </div>
+            )}
+            {supplementSaveError && (
+              <p className="text-xs text-rose-600">{supplementSaveError}</p>
+            )}
+            <div className="flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                disabled={isStreaming || !supplementInstruction.trim()}
+                onClick={handleGenerateSupplement}
+              >
+                {isStreaming ? "生成中..." : supplementCandidate ? "重新生成" : "生成预览"}
+              </Button>
+              {supplementCandidate && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={isStreaming || !supplementReady || supplementBaseContent !== content}
+                  onClick={() => void handleInsertSupplement()}
+                >
+                  插入正文并保存版本
+                </Button>
+              )}
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  if (isStreaming) stopStream();
+                  setSupplementOpen(false);
+                  setSupplementCandidate("");
+                  setSupplementReady(false);
+                }}
+              >
+                取消
+              </Button>
+            </div>
+          </section>
+        )}
 
         <textarea
           ref={textareaRef}

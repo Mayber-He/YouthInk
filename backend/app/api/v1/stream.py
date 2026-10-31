@@ -7,7 +7,7 @@ from fastapi.responses import StreamingResponse
 
 from app.db.manager import get_global_db, get_novel_db
 from app.db.repositories.settings_repo import SettingsRepository
-from app.schemas.writing import StreamRewriteRequest, StreamWriteRequest
+from app.schemas.writing import StreamRewriteRequest, StreamSupplementRequest, StreamWriteRequest
 from app.services.llm.client import stream_chat_sse
 from app.services.writing_service import WritingService
 
@@ -68,6 +68,39 @@ async def stream_rewrite_selection(
         temperature=0.75,
         novel_uid=novel_uid,
         task_type=f"rewrite_{payload.action_type}",
+        chapter_id=payload.chapter_id,
+    )
+    return StreamingResponse(
+        event_gen,
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/supplement")
+async def stream_supplement_content(
+    novel_uid: str,
+    payload: StreamSupplementRequest,
+) -> StreamingResponse:
+    with get_novel_db(novel_uid) as novel_conn, get_global_db() as global_conn:
+        settings_repo = SettingsRepository(global_conn)
+        _, base_url, model, api_key = settings_repo.get_credentials_for_task("writing")
+        svc = WritingService(novel_uid, novel_conn, settings_repo)
+        sys_prompt, user_prompt = svc.prepare_stream_supplement_prompts(payload)
+
+    event_gen = stream_chat_sse(
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+        system_prompt=sys_prompt,
+        user_prompt=user_prompt,
+        temperature=0.75,
+        novel_uid=novel_uid,
+        task_type="supplement_content",
         chapter_id=payload.chapter_id,
     )
     return StreamingResponse(
