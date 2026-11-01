@@ -19,6 +19,8 @@ from app.services.llm.client import estimate_tokens
 from app.services.story_time import time_anchor
 
 _MENTION_RE = re.compile(r"@([^\s，,。；;！!？?\n]+)")
+_FORBIDDEN_LINE_RE = re.compile(r"^\s*本场禁止出现\s*[:：]")
+_PRESENT_LINE_RE = re.compile(r"^\s*在场人物\s*[:：](.*)$", re.MULTILINE)
 
 
 class ContextAssembler:
@@ -59,27 +61,58 @@ class ContextAssembler:
         beat_texts = [ch.synopsis] + [s.beat for s in scenes]
         combined_beats = "\n".join(beat_texts)
 
-        for s in scenes:
-            if scene_id is None or s.id == scene_id:
+        selected_scenes = [s for s in scenes if scene_id is None or s.id == scene_id]
+        forbidden_char_ids: set[int] = set()
+        has_explicit_roster = False
+        character_texts = [ch.synopsis] if not selected_scenes else []
+        for s in selected_scenes:
+            if s.location_id:
+                active_loc_ids.add(s.location_id)
+            forbidden_lines = []
+            inference_lines = []
+            for line in s.beat.splitlines():
+                if _FORBIDDEN_LINE_RE.match(line):
+                    forbidden_lines.append(line)
+                else:
+                    inference_lines.append(line)
+            forbidden_text = "\n".join(forbidden_lines)
+            for c in all_chars:
+                if any(name in forbidden_text for name in (c.name, *c.aliases) if name):
+                    forbidden_char_ids.add(c.id)
+
+            roster = _PRESENT_LINE_RE.search("\n".join(inference_lines))
+            if s.character_ids or roster:
+                has_explicit_roster = True
+                if s.character_ids:
+                    active_char_ids.update(s.character_ids)
+                elif roster:
+                    present_names = {
+                        name.lstrip("@")
+                        for name in re.split(r"[\s、，,；;]+", roster.group(1).strip())
+                    }
+                    active_char_ids.update(
+                        c.id for c in all_chars if {c.name, *c.aliases} & present_names
+                    )
+            else:
                 if s.pov_character:
                     active_char_ids.add(s.pov_character)
-                if s.location_id:
-                    active_loc_ids.add(s.location_id)
-                active_char_ids.update(s.character_ids)
+                character_texts.extend([ch.synopsis, "\n".join(inference_lines)])
 
-        mentions = set(_MENTION_RE.findall(combined_beats))
+        character_text = "\n".join(character_texts)
         for c in all_chars:
             names = {c.name, *c.aliases}
-            if names & mentions or any(n in combined_beats for n in names if n):
+            if any(n in character_text for n in names if n):
                 active_char_ids.add(c.id)
+        mentions = set(_MENTION_RE.findall(combined_beats))
         for loc in all_locs:
             names = {loc.name, *loc.aliases}
             if names & mentions or any(n in combined_beats for n in names if n):
                 active_loc_ids.add(loc.id)
 
-        if not active_char_ids:
+        if not active_char_ids and not has_explicit_roster:
             active_char_ids.update(
                 c.id for c in all_chars if c.role in ("female_lead", "male_lead", "major")
+                and c.id not in forbidden_char_ids
             )
 
         blocks: list[ContextBlockItem] = []
