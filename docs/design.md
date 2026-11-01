@@ -967,3 +967,14 @@ CREATE TRIGGER trg_scenes_upd AFTER UPDATE ON scenes
 
 | 2026-10-30 | v0.1 | 架构从 Tauri 桌面应用改为 Web（React + TypeScript + Python FastAPI），本地部署，浏览器访问 |
 | 2026-10-30 | v0.1 | 修正 `global.db` 的 `llm_profiles` 表补充 `api_key_encrypted` 字段，新增 `app_settings` 全局配置表 |
+
+
+## 正文质量与修稿闭环（2026-11-01）
+
+- 正文、场景规划、改写和审查使用作品的基调、视角及详细写作要求；填写详细要求时不再注入可能冲突的预设节奏与示例。空认知/关系记录表示未记录，不能推导为不知情或初见。
+- `/api/stream/novels/{novel_uid}/write` 在有前章正文或本章已写内容时，增加一次 planning 模型调用（日志任务 `writing_boundary`）。核对相关既有状态、重复事件及本次新增推进；引用不在原文中的证据会使请求失败，不开始正文流。开篇无前文时跳过。该检查不修改目录或正文。
+- 审查读取完整正文并遵循作品视角。`check_type=prose` 表示表达/删冗建议，统一为 `suspicious`，不作为确定的连续性错误；建议不自动应用。
+- `POST /api/v1/novels/{novel_uid}/consistency-reviews/{review_id}/apply` 接收 `issue_index`（从0开始）和 `expected_content`（编辑器当前正文），返回 `ChapterWorkspaceResponse`。在写事务中检查报告是否过期、编辑器内容是否与存储一致、引用是否唯一精确匹配；冲突返回409。成功只替换选中片段，并保存新版本。
+- 界面采纳成功后自动重新审查。审查期间前文变化会使该报告过期；复核失败明确显示错误，不撤销已保存的新版本、不伪装为通过。
+- 生成失败、取消或未收到完成事件时恢复生成前正文，防止半截稿进入普通自动保存；完整生成保存失败时也恢复原文。原有历史版本不删除。
+- 本地验证：后端 `python -m pytest tests/test_writing_quality.py`；前端 `node --test tests/useStreamGenerate.test.mjs`、`npm run build`。均不需要真实模型凭据。自动化验证仅覆盖流程正确性，实际文笔需另做原稿与新稿对读。

@@ -6,12 +6,23 @@ from fastapi import APIRouter, Depends, status
 
 from app.api.deps import get_consistency_service
 from app.schemas.consistency import (
+    ApplyReviewRequest,
     ConsistencyReviewResponse,
     ConsistencyReviewSummary,
 )
+from app.schemas.writing import ChapterWorkspaceResponse
 from app.services.memory.consistency import ConsistencyReviewService
 
 router = APIRouter(prefix="/novels/{novel_uid}", tags=["consistency"])
+
+
+@router.post("/consistency-reviews/{review_id}/apply", response_model=ChapterWorkspaceResponse)
+def apply_consistency_revision(
+    review_id: int,
+    payload: ApplyReviewRequest,
+    svc: ConsistencyReviewService = Depends(get_consistency_service),
+) -> ChapterWorkspaceResponse:
+    return svc.apply_revision(review_id, payload)
 
 
 @router.post(

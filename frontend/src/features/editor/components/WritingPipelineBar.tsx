@@ -24,7 +24,7 @@ interface WritingPipelineBarProps {
 }
 
 const STEPS = [
-  { key: "assembling", label: "组装提示词", desc: "加载人设/时序/常理铁律" },
+  { key: "assembling", label: "核对写作计划", desc: "核对前文事实与已发生事件；有前文时增加一次规划调用" },
   { key: "connecting", label: "调用模型", desc: "建立大模型长文本通道" },
   { key: "generating", label: "正文生成", desc: "流式输出小说正文" },
   { key: "reviewing", label: "逻辑与一致性检查", desc: "常理/跨章/事实自动质检" },

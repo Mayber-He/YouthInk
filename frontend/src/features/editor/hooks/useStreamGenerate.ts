@@ -20,7 +20,6 @@ export function useStreamGenerate(novelUid: string) {
   const stopStream = useCallback(() => {
     if (abortRef.current) {
       abortRef.current.abort();
-      abortRef.current = null;
     }
     setIsStreaming(false);
   }, []);
@@ -46,7 +45,8 @@ export function useStreamGenerate(novelUid: string) {
       },
       onChunk: (delta: string) => void,
       onComplete?: (fullGenerated: string) => void,
-      onMeta?: (meta: { model: string; context_tokens: number }) => void
+      onMeta?: (meta: { model: string; context_tokens: number }) => void,
+      onInterrupted?: () => void
     ) => {
       stopStream();
       const controller = new AbortController();
@@ -54,6 +54,8 @@ export function useStreamGenerate(novelUid: string) {
       setIsStreaming(true);
       setStreamError(null);
       let accumulated = "";
+      let completed = false;
+      let hadError = false;
 
       try {
         await consumeSseStream(
@@ -71,10 +73,12 @@ export function useStreamGenerate(novelUid: string) {
               onMeta?.(meta);
             },
             onDelta: (delta) => {
+              if (controller.signal.aborted) return;
               accumulated += delta;
               onChunk(delta);
             },
             onDone: (done) => {
+              completed = true;
               setMetrics((prev) => ({
                 model: prev?.model ?? "",
                 contextTokens: done.input_tokens,
@@ -83,19 +87,28 @@ export function useStreamGenerate(novelUid: string) {
               }));
             },
             onError: (err) => {
+              hadError = true;
               setStreamError(err.message);
             },
           }
         );
       } catch (err) {
+        hadError = true;
         if ((err as Error)?.name !== "AbortError") {
           setStreamError(err instanceof Error ? err.message : "流式生成中断");
         }
       } finally {
-        setIsStreaming(false);
-        abortRef.current = null;
-        if (accumulated) {
-          onComplete?.(accumulated);
+        if (abortRef.current === controller) {
+          if (accumulated && completed && !hadError && !controller.signal.aborted) {
+            await onComplete?.(accumulated);
+          } else {
+            onInterrupted?.();
+            if (!hadError && !controller.signal.aborted) setStreamError("生成未完整结束，已保留原稿，请重试。");
+          }
+          if (abortRef.current === controller) {
+            setIsStreaming(false);
+            abortRef.current = null;
+          }
         }
       }
     },

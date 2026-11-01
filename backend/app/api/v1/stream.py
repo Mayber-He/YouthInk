@@ -23,7 +23,8 @@ async def stream_write_prose(
         settings_repo = SettingsRepository(global_conn)
         _, base_url, model, api_key = settings_repo.get_credentials_for_task("writing")
         svc = WritingService(novel_uid, novel_conn, settings_repo)
-        sys_prompt, user_prompt = svc.prepare_stream_write_prompts(payload)
+        boundary = await svc.check_write_boundary(payload)
+        sys_prompt, user_prompt = svc.prepare_stream_write_prompts(payload, boundary)
 
     event_gen = stream_chat_sse(
         base_url=base_url,

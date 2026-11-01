@@ -14,7 +14,7 @@ interface Props {
   review: ConsistencyReviewResponse | null;
   running: boolean;
   error: string | null;
-  onApplyRewrite?: (evidence: string, rewrite: string) => boolean | void;
+  onApplyRewrite?: (issueIndex: number) => Promise<boolean>;
 }
 
 const TYPE_LABEL: Record<ConsistencyIssue["check_type"], string> = {
@@ -23,24 +23,31 @@ const TYPE_LABEL: Record<ConsistencyIssue["check_type"], string> = {
   character: "人物",
   common_sense: "常理逻辑",
   continuity: "跨章连贯",
+  prose: "表达与删冗",
 };
 
 const IssueCard: React.FC<{
   issue: ConsistencyIssue;
-  onApplyRewrite?: (evidence: string, rewrite: string) => boolean | void;
-}> = ({ issue, onApplyRewrite }) => {
+  issueIndex: number;
+  onApplyRewrite?: (issueIndex: number) => Promise<boolean>;
+}> = ({ issue, issueIndex, onApplyRewrite }) => {
   const isViolation = issue.verdict === "violation";
   const [applied, setApplied] = useState(false);
-  const [applyError, setApplyError] = useState(false);
+  const [applyError, setApplyError] = useState("");
+  const [applying, setApplying] = useState(false);
 
-  const handleApply = () => {
+  const handleApply = async () => {
     if (!issue.evidence_quote || !issue.suggested_rewrite || !onApplyRewrite) return;
-    const ok = onApplyRewrite(issue.evidence_quote, issue.suggested_rewrite);
-    if (ok === false) {
-      setApplyError(true);
-    } else {
+    setApplying(true);
+    try {
+      const ok = await onApplyRewrite(issueIndex);
+      if (!ok) throw new Error("当前正文已变化或正在生成，请保存后重新审查。");
       setApplied(true);
-      setApplyError(false);
+      setApplyError("");
+    } catch (error) {
+      setApplyError(error instanceof Error ? error.message : "保存失败，请重试。");
+    } finally {
+      setApplying(false);
     }
   };
 
@@ -99,7 +106,7 @@ const IssueCard: React.FC<{
               <Button
                 size="sm"
                 variant={applied ? "outline" : "primary"}
-                disabled={applied}
+                disabled={applied || applying}
                 onClick={handleApply}
                 className="h-6 gap-1 px-2.5 text-xs cursor-pointer"
               >
@@ -111,7 +118,7 @@ const IssueCard: React.FC<{
                 ) : (
                   <>
                     <Sparkles className="h-3 w-3" />
-                    采纳并替换正文
+                    {applying ? "保存并复核中…" : "采纳并保存、复核"}
                   </>
                 )}
               </Button>
@@ -122,7 +129,7 @@ const IssueCard: React.FC<{
           </div>
           {applyError && (
             <p className="mt-1 text-[11px] text-rose-500">
-              未能自动在当前正文中精确匹配原句（可能局部文字已被编辑），请手动定位修改。
+              {applyError}
             </p>
           )}
         </div>
@@ -185,11 +192,11 @@ export const ConsistencyReviewModal: React.FC<Props> = ({
         ) : (
           <div className="space-y-3">
             {review.issues.map((issue, idx) => (
-              <IssueCard key={idx} issue={issue} onApplyRewrite={onApplyRewrite} />
+              <IssueCard key={`${review.id}-${idx}`} issue={issue} issueIndex={idx} onApplyRewrite={review.is_stale ? undefined : onApplyRewrite} />
             ))}
             <p className="flex items-start gap-1.5 text-[11px] text-slate-400">
               <HelpCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-              点击「采纳并替换正文」可将推荐修改片段一键写入正文并保存新版本，您亦可随时在编辑器中做进一步润色。
+              采纳前请对照原文和建议。采纳后保留旧版本、保存新版本并重新审查；可疑项和表达建议由您判断，不会自动套用。
             </p>
           </div>
         )}

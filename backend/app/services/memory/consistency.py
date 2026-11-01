@@ -10,18 +10,22 @@ from app.core.text_hash import text_sha256
 from app.db.repositories.constraint_repo import ConstraintRepository
 from app.db.repositories.entity_repo import EntityRepository
 from app.db.repositories.memory_repo import MemoryRepository
+from app.db.repositories.novel_repo import NovelRepository
 from app.db.repositories.outline_repo import OutlineRepository
 from app.db.repositories.settings_repo import SettingsRepository
 from app.db.repositories.writing_repo import WritingRepository
 from app.db.vector_store import NovelVectorStore, VectorChunkRecord
 from app.schemas.consistency import (
+    ApplyReviewRequest,
     ConsistencyIssue,
     ConsistencyReviewResponse,
     ConsistencyReviewSummary,
     LlmConsistencyOutput,
 )
 from app.services.llm.client import complete_chat
+from app.schemas.writing import ChapterWorkspaceResponse
 from app.services.llm.json_parser import parse_and_validate_json
+from app.services.prompt.author_style import author_style_prompt
 from app.services.embedding.encoder import encode_text_sync
 from app.services.memory.finalizer import split_text_chunks
 
@@ -58,6 +62,11 @@ class ConsistencyReviewService:
         if not content:
             raise AppError("EMPTY_CHAPTER_CONTENT", "章节正文为空，无法执行一致性审查。", 400)
 
+        upstream_rows = self._conn.execute(
+            "SELECT id, content_hash, continuity_review_required FROM chapters WHERE sort_order < ? ORDER BY sort_order, id",
+            (ch.sort_order,),
+        ).fetchall()
+        upstream_hash = text_sha256("|".join(f"{r['id']}:{r['content_hash'] or ''}:{r['continuity_review_required']}" for r in upstream_rows))
         checklist = self._build_checklist(chapter_id, ch.sort_order)
         history_context = self._retrieve_historical_context(chapter_id, content)
         if history_context:
@@ -78,12 +87,10 @@ class ConsistencyReviewService:
         )
         parsed = await parse_and_validate_json(res.content, LlmConsistencyOutput)
         content_hash = text_sha256(raw_content)
-        upstream_rows = self._conn.execute(
-            "SELECT id, content_hash, continuity_review_required FROM chapters WHERE sort_order < ? ORDER BY sort_order, id",
-            (ch.sort_order,),
-        ).fetchall()
-        upstream_hash = text_sha256("|".join(f"{r['id']}:{r['content_hash'] or ''}:{r['continuity_review_required']}" for r in upstream_rows))
         issues = [i for i in parsed.issues if i.verdict in ("violation", "suspicious")]
+        for issue in issues:
+            if issue.check_type == "prose":
+                issue.verdict = "suspicious"
         violation_count = sum(1 for i in issues if i.verdict == "violation")
         suspicious_count = len(issues) - violation_count
         if not issues:
@@ -114,7 +121,7 @@ class ConsistencyReviewService:
                 model,
             ),
         )
-        if not issues:
+        if not any(i.check_type != "prose" for i in issues) and not self.get_review(int(cur.lastrowid)).is_stale:
             prior_dirty = self._conn.execute(
                 "SELECT 1 FROM chapters WHERE sort_order < ? AND continuity_review_required = 1 LIMIT 1",
                 (ch.sort_order,),
@@ -174,6 +181,12 @@ class ConsistencyReviewService:
             created_at=str(row["created_at"]),
             is_stale=self._review_is_stale(row),
         )
+
+    def apply_revision(self, review_id: int, payload: ApplyReviewRequest) -> ChapterWorkspaceResponse:
+        from app.services.review_revision import apply_review_revision
+        # Acquire the write lock before checking freshness and modifying a version.
+        self._conn.execute("BEGIN IMMEDIATE")
+        return apply_review_revision(self.get_review(review_id), payload, self._writing_repo)
 
     def list_reviews(self, chapter_id: int) -> list[ConsistencyReviewSummary]:
         rows = self._conn.execute(
@@ -318,7 +331,8 @@ class ConsistencyReviewService:
                 if c.role in ("female_lead", "male_lead", "major")
             ]
 
-        sections: list[str] = []
+        novel = NovelRepository(self._conn, self._novel_uid).get_novel_detail()
+        sections: list[str] = [author_style_prompt(novel)]
 
         constraints = self._constraint_repo.list_active_for_chapter(
             chapter_id, sort_order, char_ids, loc_ids
@@ -360,7 +374,7 @@ class ConsistencyReviewService:
                     f"{r['char_a_name']}↔{r['char_b_name']}({r['rel_type']})"
                     for r in snap.relationships
                 )
-                or "尚未熟稔/初见"
+                or "未记录已确认关系，不代表初见；以人物背景和前文实际交往为准"
             )
             char_lines.append(
                 f"[人物#{c.id}「{c.name}」] {c.role}；身份背景：{c.background or '未填'}"
@@ -383,9 +397,10 @@ class ConsistencyReviewService:
             *scene_summary_lines,
             "[#901]【环境与空间熟悉度常理】若角色属于初次到访（如新生刚报到、刚转学、首次踏足某场所），绝不能表现得对校园/建筑/路线熟门熟路、轻车熟路；空间移动需有合理过渡，不能瞬移。",
             "[#902]【人际关系与初见边界】初次见面或尚未熟稔的角色之间，绝不能无铺垫自来熟、绝不能未经自我介绍或他人提及便直呼对方姓名/绰号/知晓对方过往隐私。",
-            "[#903]【限知视角与超知边界】POV 视角人物绝不能开启上帝视角直接读取他人内心独白，也绝不能知晓其不在场时发生的事件或尚未揭晓的秘密；聊天互动中，未经明确告知的事实，角色不得凭空未卜先知。",
+            "[#903]【限知视角与超知边界】按作品指定视角审查：限知叙述不得直接读取他人内心，全知叙述可以描写不同人物内心与场外事件；两者都不能让角色凭空获知未曾得知的秘密。不得把全知叙述误判为角色超知。",
             "[#904]【时间、季节与物理状态连续性】食物、道具称谓严禁前后自相矛盾或中途漂移（如前文挂面后文变泡面）；已完成的物理动作与状态（如食物吃完、物品放下）严禁在后文凭空逆转或重复进行（如吃完了又继续吃）；昼夜时间流速、季节气候与衣着不得违背常识。",
             "[#905]【在场状态与身份常识】未到场或已离场的角色绝不能凭空插话或参与互动；人物言行、消费与技能不得违背其年龄、学生身份或时代背景常识。",
+            "[#906]【交流媒介与感官信息】文字消息只能证明其中的文字、措辞、标点和表情，不能作为声线、音色、语调或尾音的听觉依据；只有前文明确出现的语音、电话、视频或线下发声，才可作为声音记忆。若正文把文字消息直接写成角色曾听过的声音，或据此做音色/语调对照，判为明确逻辑问题；若虽有独立的线下声音来源，但写法把它与文字消息混在一起、容易让读者误以为收到过语音，判为可疑并建议明确来源。",
         ]
         sections.append("【检查表D：本章情境与六大常理逻辑自洽】\n" + "\n".join(common_sense_lines))
 
@@ -396,11 +411,11 @@ class ConsistencyReviewService:
             sections.append(
                 "【检查表E：跨章连贯】\n"
                 f"【完整上一章正文，用于核对已发生事件、动作与物品状态】\n{prev_content}\n"
-                "[#951]【重复揭示】上一章已交代的信息，本章不得当作新信息重新揭示，角色不得再次询问已知答案。\n"
+                "[#951]【重复揭示】已实际获知信息的角色，不得再次把它当作新发现；叙述者或其他角色已知，不代表所有角色已知。带来新后果或新视角的回顾不算重复。\n"
                 "[#952]【悬念承接】上一章结尾留下的悬念、承诺或人物情绪，本章须有承接或交代，不能凭空断档。\n"
                 "[#953]【时间日期衔接】本章故事时间、日期与上一章及已交代的计划（如报到日、“下周”“明天”）须一致。\n"
                 "[#954]【重复动作】上一章已完成的具体动作（如清洁、收拾、打包、放置物品）不得在本章再次描写一遍；"
-                "仅可承接动作后的物品状态。即使重复动作被安排在不同日期或作为新章开头，也属于跨章重复。"
+                "应承接动作后的物品状态；不同日期合理再次发生的日常动作不属于事实矛盾，无叙事作用的重复可列为可疑的删冗建议。"
             )
 
         return "\n\n".join(sections)
@@ -411,7 +426,7 @@ class ConsistencyReviewService:
             "你是小说一致性与常理逻辑审查员。请逐项检查【待审正文】是否违反以下检查表（含A硬软约束、B已确认事实、C人物属性、D情境常理逻辑、E跨章连贯及F向量检索参考片段），"
             "只输出存在问题的项（遵守的项不要输出）。\n\n"
             f"{checklist}\n\n"
-            f"待审正文（第 {ch.display_index} 章《{ch.title}》）：\n{content[:6000]}\n\n"
+            f"待审正文（第 {ch.display_index} 章《{ch.title}》）：\n{content}\n\n"
             "输出严格 JSON：{\"issues\": [{\"check_type\": \"constraint|fact|character|common_sense|continuity\", "
             "\"ref_id\": 检查表编号或 null, \"ref_label\": \"如 硬约束#1、常理#901、连贯#951 或 历史片段1·第X章\", "
             "\"verdict\": \"violation|suspicious\", "
@@ -419,5 +434,9 @@ class ConsistencyReviewService:
             "\"description\": \"违反说明（指出为何违背设定或常理）\", \"suggestion\": \"一句话修改思路\", \"suggested_rewrite\": \"修改后的正文片段（必须可无缝直接替换evidence_quote，保留叙事口吻并修正逻辑漏洞）\"}]}。\n"
             "判定标准：violation=明确违反检查表或违反情境常理（例如新生刚报到却对学校熟门熟路、初见未介绍却直呼姓名、上帝视角读心等）；suspicious=疑似但证据不足。"
             "若依据F报告冲突或剧情重复，check_type使用continuity，ref_id填null，ref_label必须写清历史片段编号和章节，historical_evidence必须引用检索结果中的原句，evidence_quote仍引用待审正文原句；检索内容不足以支撑明确结论时标为suspicious或不报告。"
+            "另外检查正文内部楼层、称谓、物品位置和动作状态是否自相矛盾。"
+            "可以最多提出3项有具体原句的删冗或语句不顺建议，check_type用prose、verdict只能为suspicious；"
+            "只局部压缩无推进的微动作、重复心理或重复解释，不新增事件，不统一改成华丽文风，不把个人文学偏好判为事实错误。"
+            "evidence_quote必须是待审正文中连续、完整的原文片段，不能拼接句子或使用省略号；suggested_rewrite必须只替换这个片段。"
             "不要输出任何解释文字。"
         )

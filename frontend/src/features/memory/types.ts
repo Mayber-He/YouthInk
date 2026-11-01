@@ -14,7 +14,8 @@ export type ConsistencyCheckType =
   | "fact"
   | "character"
   | "common_sense"
-  | "continuity";
+  | "continuity"
+  | "prose";
 export type ConsistencyVerdict = "violation" | "suspicious";
 
 export interface ConsistencyIssue {

@@ -128,7 +128,7 @@ class ContextAssembler:
                     f"{r['char_a_name']}↔{r['char_b_name']}({r['rel_type']})"
                     for r in snap.relationships
                 )
-                or "尚未建立熟稔关系（初见或普通不熟状态）"
+                or "未记录结构化关系状态；请依据人物卡中的既有经历与前文判断，不得据此推断为初见或不熟"
             )
             age_part = f"{c.initial_age}岁" if c.initial_age else "未填"
             bg_part = c.background or "未填"
@@ -142,12 +142,12 @@ class ContextAssembler:
                 known_secrets_lines.append(f"• 【{c.name}】已知秘密：{sec_list}")
             else:
                 known_secrets_lines.append(
-                    f"• 【{c.name}】目前尚不知晓任何隐藏秘密（严禁在言行中提前剧透）"
+                    f"• 【{c.name}】未记录已确认的认知信息，不代表角色一无所知；以正文中实际获知的事件为准，不得据此抹去已知信息。"
                 )
 
         if char_lines:
             char_lines.append(
-                "⚠️ 视角与人际常理边界：以上人物背景仅供作者把控人设。视角人物（POV）绝不能凭空知晓其他初见/不熟角色的背景履历、家庭隐私或内心独白；称呼与亲疏分寸必须严格匹配「关系」栏状态，严禁初见自来熟或未自我介绍便直呼姓名。"
+                "⚠️ 人物连续性与认知边界：人物卡中的既有经历和关系历史是故事事实，正文不得与之冲突；但人物卡不代表 POV 自动知晓其他角色的私密背景或内心。关系栏仅记录结构化确认的关系变化，若标为未记录，不等于初见或不熟，须结合人物卡和前文判断；关系栏有明确状态时，按该状态及更晚的前文事件推进。"
             )
 
         blocks.append(
@@ -191,7 +191,7 @@ class ContextAssembler:
             constraint_lines.append(f"• 【{sev}{violated_mark}·{scope}{name_part}】{con.content}")
         if constraint_lines:
             constraint_lines.append(
-                "⚠️ 动笔前请先复述以上硬约束，写作全程不得违反；"
+                "⚠️ 动笔前请核对以上硬约束，正文中不要复述检查过程；"
                 "如剧情推进需要打破某条约束，请先到约束管理中将其标记为已解除，不要擅自违反。"
             )
         blocks.append(
@@ -279,7 +279,7 @@ class ContextAssembler:
             )
         if prev_row or prev_content or next_row:
             sum_lines.append(
-                "⚠️ 跨章衔接边界：①上一章已交代的信息，角色均已知晓，本章严禁当作新信息重新揭示或让角色再次询问；"
+                "⚠️ 跨章衔接边界：①上一章已交代的信息，仅实际在场、收到消息或被告知的角色知晓；不得将叙述者知识分配给所有角色，也不得让已知情者再次把它当成新消息；"
                 "上一章梗概与结尾正文是连续性事实来源；角色首次得知某信息的时间，以其中明确写出的场景为准，"
                 "不得把人物卡里的背景设定当作角色过去已听过的内容，也不得补造上下文没有记载的旧聊天或旧告知；"
                 "回复涉及未来日期的提醒时，必须先核对当前章日期；时间尚未到，不得写成已经出发、到达或完成；"

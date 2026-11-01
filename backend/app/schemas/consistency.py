@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-ConsistencyCheckType = Literal["constraint", "fact", "character", "common_sense", "continuity"]
+ConsistencyCheckType = Literal["constraint", "fact", "character", "common_sense", "continuity", "prose"]
 ConsistencyVerdict = Literal["violation", "suspicious"]
 
 
@@ -39,6 +39,11 @@ class ConsistencyIssue(BaseModel):
 
 class LlmConsistencyOutput(BaseModel):
     issues: list[ConsistencyIssue] = Field(default_factory=list)
+
+
+class ApplyReviewRequest(BaseModel):
+    issue_index: int = Field(ge=0)
+    expected_content: str
 
 
 class ConsistencyReviewResponse(BaseModel):

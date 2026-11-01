@@ -201,7 +201,8 @@ def test_context_preview_includes_hard_constraints(
     block = blocks["hard_constraints"]
     assert block["enabled"] is True
     assert "大一新生" in block["content"]
-    assert "动笔前请先复述" in block["content"]
+    assert "动笔前请核对" in block["content"]
+    assert "正文中不要复述检查过程" in block["content"]
 
 
 # --- Phase 2: violation / resolution detection through finalize ---

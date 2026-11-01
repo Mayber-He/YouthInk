@@ -5,7 +5,7 @@ import { useOutlineTree } from "@/features/outline/api";
 import { useCharacters, useLocations } from "@/features/settings-entity/api";
 import { MemoryChapterPanel } from "@/features/memory/MemoryChapterPanel";
 import { ConsistencyReviewModal } from "@/features/memory/ConsistencyReviewModal";
-import { useRunConsistencyReview } from "@/features/memory/api";
+import { useApplyReviewRevision, useRunConsistencyReview } from "@/features/memory/api";
 import type { ConsistencyReviewResponse } from "@/features/memory/types";
 import { useUiStore } from "@/stores/uiStore";
 import {
@@ -42,6 +42,8 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
   const allChapters =
     outline?.volumes.flatMap((v) => v.arcs.flatMap((a) => a.chapters)) ?? [];
   const effectiveChapterId = selectedChapterId ?? allChapters[0]?.id ?? null;
+  const currentChapterRef = useRef(effectiveChapterId);
+  currentChapterRef.current = effectiveChapterId;
 
   const { data: workspace, isLoading } = useChapterWorkspace(novelUid, effectiveChapterId);
   const saveMut = useSaveChapterContent(novelUid, effectiveChapterId ?? 0);
@@ -84,6 +86,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
   const [generatedWordsCount, setGeneratedWordsCount] = useState(0);
   const critiqueMut = useCritiqueSelection(novelUid, effectiveChapterId ?? 0);
   const reviewMut = useRunConsistencyReview(novelUid, effectiveChapterId ?? 0);
+  const revisionMut = useApplyReviewRevision(novelUid, effectiveChapterId ?? 0);
   const prevChapterIdRef = useRef<number | null>(effectiveChapterId);
   const isComposingRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -104,6 +107,8 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
     startRewriteStream,
     startSupplementStream,
   } = useStreamGenerate(novelUid);
+
+  useEffect(() => { stopStream(); }, [effectiveChapterId, stopStream]);
 
   useEffect(() => {
     if (workspace) {
@@ -145,9 +150,11 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
     setReviewError(null);
     try {
       const res = await reviewMut.mutateAsync();
+      if (currentChapterRef.current !== effectiveChapterId) return;
       setReviewResult(res);
       setPipelineStep("completed");
     } catch (e) {
+      if (currentChapterRef.current !== effectiveChapterId) return;
       setReviewError(e instanceof Error ? e.message : "自动审查失败");
       setPipelineStep("completed");
     }
@@ -158,7 +165,8 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
     if (sceneId) setActiveSceneId(sceneId);
     const isChapterRewrite = mode === "chapter";
     const prefix = !isChapterRewrite && content.trim() ? `${content.trim()}\n\n` : "";
-    setContent(prefix);
+    const originalContent = content;
+    let generated = "";
     setGeneratedWordsCount(0);
     setReviewResult(null);
     setReviewError(null);
@@ -175,24 +183,38 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
         instruction: "",
       },
       (delta) => {
+        if (currentChapterRef.current !== effectiveChapterId) return;
         setPipelineStep((prev) => (prev === "generating" ? prev : "generating"));
         setGeneratedWordsCount((c) => c + delta.replace(/\s+/g, "").length);
-        setContent((prev) => prev + delta);
+        generated += delta;
+        setContent(prefix + generated);
       },
       async (fullGenerated) => {
+        if (currentChapterRef.current !== effectiveChapterId) return;
         const fullContent = `${prefix}${fullGenerated}`;
         try {
           await saveMut.mutateAsync({ content: fullContent, source: "ai", create_new_version: true });
-        } catch {
-          // ignore save error
+        } catch (error) {
+          if (currentChapterRef.current !== effectiveChapterId) return;
+          setContent(originalContent);
+          setReviewError(error instanceof Error ? error.message : "正文保存失败，尚未审查，请先保存正文。");
+          setPipelineStep("completed");
+          return;
         }
 
         // 正文生成完毕，自动进行常理与一致性检查
+        if (currentChapterRef.current !== effectiveChapterId) return;
         await runAutoReview();
       },
       (meta) => {
+        if (currentChapterRef.current !== effectiveChapterId) return;
         setStreamModelName(meta.model);
         setPipelineStep("connecting");
+      },
+      () => {
+        if (currentChapterRef.current !== effectiveChapterId) return;
+        setContent(originalContent);
+        setPipelineStep("idle");
       }
     );
   };
@@ -361,25 +383,16 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
     saveMut.mutate({ content: updated, source: "ai", create_new_version: true });
   };
 
-  const handleApplyReviewRewrite = (evidence: string, rewrite: string): boolean => {
-    if (!effectiveChapterId || !evidence.trim() || !rewrite.trim()) return false;
-    let updated: string | null = null;
-    if (content.includes(evidence)) {
-      updated = content.replace(evidence, rewrite);
-    } else {
-      const trimmed = evidence.trim();
-      const idx = content.indexOf(trimmed);
-      if (idx !== -1) {
-        updated = content.slice(0, idx) + rewrite + content.slice(idx + trimmed.length);
-      }
-    }
-
-    if (updated !== null) {
-      setContent(updated);
-      saveMut.mutate({ content: updated, source: "ai", create_new_version: true });
-      return true;
-    }
-    return false;
+  const handleApplyReviewRewrite = async (issueIndex: number): Promise<boolean> => {
+    if (!effectiveChapterId || !reviewResult || isStreaming || saveMut.isPending || revisionMut.isPending) return false;
+    const result = await revisionMut.mutateAsync({
+      reviewId: reviewResult.id, issueIndex, expectedContent: content,
+    });
+    if (currentChapterRef.current !== effectiveChapterId) return true;
+    setContent(result.latest_content);
+    setReviewResult({ ...reviewResult, is_stale: true });
+    await runAutoReview();
+    return true;
   };
 
   const handleFocusSmellHit = (hit: AiSmellHit) => {
@@ -666,7 +679,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
         open={reviewOpen}
         onClose={() => setReviewOpen(false)}
         review={reviewResult}
-        running={reviewMut.isPending}
+        running={reviewMut.isPending || revisionMut.isPending}
         error={reviewError}
         onApplyRewrite={handleApplyReviewRewrite}
       />

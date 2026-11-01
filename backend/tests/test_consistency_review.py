@@ -180,7 +180,8 @@ def test_consistency_review_detects_common_sense_without_explicit_constraint(
     preview = client.get(f"/api/v1/novels/{novel_uid}/chapters/{ch}/context-preview").json()
     blocks_by_key = {b["key"]: b["content"] for b in preview["blocks"]}
     assert "大一新生" in blocks_by_key["character_states"]
-    assert "视角与人际常理边界" in blocks_by_key["character_states"]
+    assert "人物连续性与认知边界" in blocks_by_key["character_states"]
+    assert "不等于初见或不熟" in blocks_by_key["character_states"]
     assert "视角(POV)：林夏" in blocks_by_key["chapter_beats"]
 
     captured_prompts: list[str] = []
@@ -307,7 +308,8 @@ def test_cross_chapter_continuity_guards(
     prev2 = client.get(f"{base}/chapters/{ch2}/context-preview").json()
     block2 = {b["key"]: b["content"] for b in prev2["blocks"]}["summaries_and_prev"]
     assert "学校的事明天再说" in block2
-    assert "严禁当作新信息重新揭示" in block2
+    assert "不得将叙述者知识分配给所有角色" in block2
+    assert "不得让已知情者再次把它当成新消息" in block2
 
     captured: list[str] = []
 

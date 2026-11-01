@@ -230,6 +230,22 @@ export function useRunConsistencyReview(novelUid: string, chapterId: number) {
   });
 }
 
+export function useApplyReviewRevision(novelUid: string, chapterId: number) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { reviewId: number; issueIndex: number; expectedContent: string }) =>
+      apiRequest<import("@/features/editor/types").ChapterWorkspace>(
+        `/api/v1/novels/${novelUid}/consistency-reviews/${input.reviewId}/apply`,
+        { method: "POST", body: JSON.stringify({ issue_index: input.issueIndex, expected_content: input.expectedContent }) }
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["novels", novelUid] });
+      qc.invalidateQueries({ queryKey: ["consistency-reviews", novelUid, chapterId] });
+      qc.invalidateQueries({ queryKey: ["context-preview", novelUid] });
+    },
+  });
+}
+
 export function useConsistencyReviews(novelUid: string | null, chapterId: number | null) {
   return useQuery({
     queryKey: ["consistency-reviews", novelUid, chapterId],

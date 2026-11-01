@@ -57,7 +57,7 @@ class WritingService:
         style = next((s for s in styles if s.id == novel.style_template_id), None)
 
         layer2 = ""
-        if style:
+        if style and not (novel.style_note or '').strip():
             examples = "\n".join(f"示例：{ex}" for ex in style.example_paras[:2])
             layer2 = (
                 f"风格模板：{style.name}\n"
@@ -67,6 +67,9 @@ class WritingService:
                 f"禁用套话表达：{', '.join(style.forbidden_exprs)}\n"
                 f"{examples}"
             )
+
+        from app.services.prompt.author_style import author_style_prompt
+        layer2 += "\n" + author_style_prompt(novel)
 
         layer3 = (
             f"书名：《{novel.title}》\n"
@@ -90,7 +93,8 @@ class WritingService:
         context = (
             f"当前章节：第 {ch.display_index} 章《{ch.title}》\n"
             f"章节梗概：{ch.synopsis}\n"
-            f"可用人物列表：{json.dumps([c.name for c in chars], ensure_ascii=False)}\n"
+            "人物卡中的既有经历与人物弧线（章节事实约束）："
+            f"{json.dumps([{'name': c.name, 'role': c.role, 'background': c.background, 'arc_design': c.arc_design} for c in chars], ensure_ascii=False)}\n"
             f"可用地点列表：{json.dumps([l.name for l in locs], ensure_ascii=False)}"
         )
 
@@ -106,6 +110,10 @@ class WritingService:
             },
         )
         inst += f"\n请拆解为 {scene_count} 个场景节拍。节拍描述中可用 @人物名 和 @地点名 标注关联实体。"
+        inst += (
+            "人物卡中的既有经历和关系是必须遵守的故事事实；不得把已经认识或持续联系的人物安排成初次相识、首次加好友。"
+            "人物卡不代表 POV 自动知晓他人的私密信息，但不能因此改写人物既有经历。若章节梗概与人物卡冲突，调整场景节拍以遵守人物卡与前文事实。"
+        )
         if instruction:
             inst += f"\n作者附加要求：{instruction}"
 
@@ -159,7 +167,7 @@ class WritingService:
             )
         return self._writing_repo.replace_chapter_scenes(chapter_id, scenes_to_create)
 
-    def prepare_stream_write_prompts(self, req: StreamWriteRequest) -> tuple[str, str]:
+    def prepare_stream_write_prompts(self, req: StreamWriteRequest, boundary: str = "") -> tuple[str, str]:
         """Build (system_prompt, user_prompt) for scene-by-scene or full-chapter SSE generation."""
         layer1, layer2, layer3 = self._build_base_layers()
         preview = self._assembler.build_context_preview(
@@ -168,6 +176,8 @@ class WritingService:
         enabled_parts = [
             f"### {b.label}\n{b.content}" for b in preview.blocks if b.enabled
         ]
+        if boundary:
+            enabled_parts.append(boundary)
         if req.custom_context.strip():
             enabled_parts.append(f"### 作者手动补充参考\n{req.custom_context.strip()}")
         if req.existing_content.strip():
@@ -210,7 +220,9 @@ class WritingService:
             inst += f"\n作者额外写作要求：{req.instruction.strip()}"
 
         inst += (
-            "\n【写作执行与成稿校对】按上方本章梗概和已启用上下文的顺序推进，不重复输入的梗概；"
+            "\n【写作执行与成稿校对】按本章梗概推进剧情，但人物卡中明确的既有经历、关系历史、关系快照与前文已发生事实属于连续性约束；"
+            "梗概与这些事实冲突时必须调整冲突情节，不能把已认识或持续联系的人物重写成初次见面、首次加好友或首次得知。"
+            "人物背景不代表 POV 自动知晓他人私密信息，只限制角色认知，不得据此忽略或改写人物卡里的故事事实。不要重复输入的梗概；"
             "目标字数是参考，不得用重复心理、同义解释或无结果动作补足篇幅；"
             "按剧情重要性分配细节：冲突变化、关键选择、关系转折和决定后果要写清来龙去脉；"
             "普通过场和重复日常动作快速带过，不要把同一目的的动作拆成多个段落或反复解释。"
@@ -220,6 +232,9 @@ class WritingService:
             "人物当下已知信息、对话归属和动作时间顺序；聊天界面提示必须按当前视角区分发起者和接收者，"
             "自己收到对方撤回的消息时，应写“对方撤回了一条消息”，不可误写成“你撤回了一条消息”；"
             "只有当前视角人物自己撤回消息时，才写“你撤回了一条消息”。不得虚构上下文中没有发生过的旧对话或旧事件，"
+            "严格区分交流媒介：文字消息只能提供文字、措辞、标点和表情信息，不能据此写出对方的声线、音色、语调或尾音，也不能把文字消息称为听过的声音；"
+            "只有前文明确出现过的语音、电话、视频或线下发声，才能作为听觉记忆依据。若要对照线上文字与线下说话，只能比较明确写出的措辞/口头禅与实际听到的表达；"
+            "避免把“想起一条文字消息”紧接着写成“同一个声音/声调/尾音”，造成文字消息提供了声音的误读；确需对照时，明确指出声音来自哪次已发生的语音或线下交谈。"
             "相对日期必须按当前场景的具体故事日期换算，不得把“明天”跨越未写出的日期直接当成既定事件日；"
             "跨日章节须先标明关键事件实际发生日期。"
             "若本章梗概要求重写前文已发生的事件或复用前文标志性原句，以前文为准，跳过重复内容并从事件之后继续推进；"
@@ -239,6 +254,28 @@ class WritingService:
             layer4_dynamic_context=layer4,
             layer5_task_instruction=inst,
             layer6_output_format=fmt,
+        )
+
+    async def check_write_boundary(self, req: StreamWriteRequest) -> str:
+        from app.services.writing_boundary import check_writing_boundary
+        from app.services.prompt.author_style import author_style_prompt
+
+        ch = self._outline_repo.get_chapter(req.chapter_id)
+        history = self._writing_repo.get_previous_chapter_text(ch.sort_order, tail_chars=None)
+        if req.existing_content.strip():
+            history += "\n【本章已写正文】\n" + req.existing_content
+        scenes = self._writing_repo.list_scenes(req.chapter_id)
+        beats = "\n".join(
+            s.beat for s in scenes if req.scene_id is None or s.id == req.scene_id
+        )
+        plan = (
+            f"章节：{ch.title}；时间：{ch.story_time}\n梗概：{ch.synopsis}\n本次场景：{beats}\n"
+            f"作者补充：{req.instruction}\n{req.custom_context}\n"
+            + author_style_prompt(self._novel_repo.get_novel_detail())
+        )
+        return await check_writing_boundary(
+            novel_uid=self._novel_uid, chapter_id=req.chapter_id, settings=self._settings_repo,
+            history=history, plan=plan,
         )
 
     def prepare_stream_rewrite_prompts(self, req: StreamRewriteRequest) -> tuple[str, str]:
