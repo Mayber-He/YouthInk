@@ -193,8 +193,13 @@ async def stream_chat_sse(
     start_ns = time.perf_counter_ns()
     collected: list[str] = []
 
+    # 流式场景下 read 超时按“两次数据块之间的间隔”计，不是整段生成的总时长。
+    # 用单值会把 read 也卡死在 timeout_sec——模型开头思考久一点或网络抖动就断流，
+    # 且 ReadTimeout 抛出时 error 帧未必发得出去，前端只看到流无声结束、误报“未完整结束”。
+    # connect 放短、read 放长更贴合实际。
+    stream_timeout = httpx.Timeout(timeout_sec, connect=15.0)
     try:
-        async with httpx.AsyncClient(timeout=timeout_sec) as client:
+        async with httpx.AsyncClient(timeout=stream_timeout) as client:
             async with client.stream("POST", url, headers=headers, json=payload) as resp:
                 if resp.status_code >= 400:
                     err_body = (await resp.aread()).decode("utf-8", errors="replace")[:300]

@@ -50,6 +50,37 @@ export async function consumeSseStream(
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
 
+  const dispatchBlock = (block: string) => {
+    const lines = block.split("\n");
+    let eventName = "message";
+    let dataStr = "";
+
+    for (const line of lines) {
+      if (line.startsWith("event:")) {
+        eventName = line.slice(6).trim();
+      } else if (line.startsWith("data:")) {
+        dataStr += line.slice(5).trim();
+      }
+    }
+
+    if (!dataStr) return;
+    try {
+      const parsed: unknown = JSON.parse(dataStr);
+      if (eventName === "meta") {
+        handlers.onMeta?.(parsed as SseMetaEvent);
+      } else if (eventName === "delta") {
+        const content = (parsed as { content?: string }).content ?? "";
+        if (content) handlers.onDelta(content);
+      } else if (eventName === "done") {
+        handlers.onDone?.(parsed as SseDoneEvent);
+      } else if (eventName === "error") {
+        handlers.onError?.(parsed as SseErrorEvent);
+      }
+    } catch {
+      // Ignore malformed frame
+    }
+  };
+
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -57,36 +88,11 @@ export async function consumeSseStream(
 
     const blocks = buffer.split("\n\n");
     buffer = blocks.pop() ?? "";
-
-    for (const block of blocks) {
-      const lines = block.split("\n");
-      let eventName = "message";
-      let dataStr = "";
-
-      for (const line of lines) {
-        if (line.startsWith("event:")) {
-          eventName = line.slice(6).trim();
-        } else if (line.startsWith("data:")) {
-          dataStr += line.slice(5).trim();
-        }
-      }
-
-      if (!dataStr) continue;
-      try {
-        const parsed: unknown = JSON.parse(dataStr);
-        if (eventName === "meta") {
-          handlers.onMeta?.(parsed as SseMetaEvent);
-        } else if (eventName === "delta") {
-          const content = (parsed as { content?: string }).content ?? "";
-          if (content) handlers.onDelta(content);
-        } else if (eventName === "done") {
-          handlers.onDone?.(parsed as SseDoneEvent);
-        } else if (eventName === "error") {
-          handlers.onError?.(parsed as SseErrorEvent);
-        }
-      } catch {
-        // Ignore malformed frame
-      }
-    }
+    for (const block of blocks) dispatchBlock(block);
   }
+
+  // 流关闭后 buffer 里可能残留最后一帧（done/error 恰好是收尾帧时常见）。
+  // 不 flush 的话 done 帧会被丢弃，前端永远收不到完成信号，误报“未完整结束”。
+  buffer += decoder.decode();
+  if (buffer.trim()) dispatchBlock(buffer);
 }
