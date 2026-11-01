@@ -52,10 +52,11 @@ export interface ContextPreview {
 }
 
 export interface AiSmellHit {
-  pattern: string;
   matched_text: string;
   category: string;
+  reason: string;
   suggestion: string;
+  suggested_rewrite: string;
   start_index: number;
   end_index: number;
 }

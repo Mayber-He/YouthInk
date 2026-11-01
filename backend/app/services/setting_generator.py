@@ -6,6 +6,7 @@ import json
 from typing import TypeVar
 from pydantic import BaseModel
 
+from app.core.exceptions import AppError
 from app.db.repositories.entity_repo import EntityRepository
 from app.db.repositories.constraint_repo import ConstraintRepository
 from app.db.repositories.novel_repo import NovelRepository
@@ -33,6 +34,7 @@ from app.schemas.outline import (
     LlmStructureOutput,
     OutlineTreeResponse,
 )
+from app.db.vector_store import NovelVectorStore
 from app.services.llm.client import complete_chat
 from app.services.llm.json_parser import parse_and_validate_json
 from app.services.prompt.renderer import assemble_six_layer_prompt, render_template
@@ -373,33 +375,66 @@ class SettingGeneratorService:
             layer6_format=fmt,
             schema_cls=LlmStructureOutput,
         )
-        return self._outline_repo.apply_generated_structure(parsed.volumes)
+        if (
+            len(parsed.volumes) != volume_count
+            or any(len(volume.arcs) != arcs_per_volume for volume in parsed.volumes)
+        ):
+            raise AppError(
+                "OUTLINE_STRUCTURE_INVALID",
+                f"分卷规划应包含 {volume_count} 卷、每卷 {arcs_per_volume} 条情节弧；本次结果不符合要求，原目录未更改。",
+                status_code=502,
+            )
+        tree = self._outline_repo.replace_generated_structure(parsed.volumes)
+        # The full outline reset removes every chapter, so no chapter vector remains valid.
+        NovelVectorStore(self._novel_uid).clear_all_vectors()
+        return tree
 
     async def generate_arc_chapters(
-        self, arc_id: int, chapter_count: int = 5, instruction: str = ""
+        self, arc_id: int, chapter_count: int | None = None, instruction: str = ""
     ) -> OutlineTreeResponse:
         arc = self._outline_repo.get_arc(arc_id)
         vol = self._outline_repo.get_volume(arc.volume_id)
         main_plot = self._entity_repo.get_main_plot()
         tree = self._outline_repo.get_outline_tree()
-        retained_chapters = [
-            ch
-            for v in tree.volumes
-            for a in v.arcs
-            if a.id == arc_id
-            for ch in a.chapters
-            if ch.locked or ch.status not in ("pending", "outline")
-        ]
+        earlier_chapters = []
+        found_arc = False
+        for volume in tree.volumes:
+            for candidate_arc in volume.arcs:
+                if candidate_arc.id == arc_id:
+                    found_arc = True
+                    break
+                earlier_chapters.extend(candidate_arc.chapters)
+            if found_arc:
+                break
+        prior_valid_chapters = sorted(
+            (
+                ch
+                for ch in earlier_chapters
+                if ch.status == "final" and not ch.continuity_review_required
+            ),
+            key=lambda chapter: (chapter.sort_order, chapter.id),
+        )
+        anchor_chapters = prior_valid_chapters[-3:]
 
         context = (
             f"所属分卷：{vol.title}（{vol.synopsis}）\n"
             f"当前情节弧：{arc.title} | 目标：{arc.goal} | 核心冲突：{arc.core_conflict}\n"
             f"全书主线冲突：{main_plot.core_conflict}\n"
-            f"本弧最近且本次会保留的章节（最多三章，必须作为新章节的前文锚点，依次承接其剧情和日期）："
-            f"{json.dumps([{'title': c.title, 'story_time': c.story_time, 'synopsis': c.synopsis} for c in retained_chapters[-3:]], ensure_ascii=False)}"
+            "本弧之前最近且当前有效的已定稿章节（最多三章，仅作为新大纲的前文锚点）："
+            f"{json.dumps([{'title': c.title, 'story_time': c.story_time, 'synopsis': c.synopsis} for c in anchor_chapters], ensure_ascii=False)}"
+        )
+        count_instruction = (
+            f"请生成恰好 {chapter_count} 章。"
+            if chapter_count is not None
+            else "请根据本弧的独立事件、重要转折和因果结果自然决定章节数量，最多 20 章；不要为了凑固定章数拆分过场。"
         )
         inst = (
-            f"请为情节弧「{arc.title}」滚动生成 {chapter_count} 章的章节目录（含章节标题、单章详细梗概、故事内时间）。\n"
+            f"请为情节弧「{arc.title}」生成章节目录（含章节标题、单章梗概、故事内时间）。{count_instruction}\n"
+            "【章节拆分与节奏】每章围绕一个有实质结果的核心事件，说明角色选择/状态变化及其后果；冲突升级、关键决定、关系转折应留出充分展开空间。"
+            "准备、等待、重复确认等没有独立事件结果的过场应合并进相邻章节，不单独拆章。相邻章节必须各自带来新信息、选择、冲突或状态变化，"
+            "不能只把同一件事拆成连续步骤。梗概只交代推动正文所需的因果，不堆叠动作清单。"
+            "【人物状态时序优先级】人物卡和全书梗概中的人物背景描述属于故事初始设定；以上前文锚点中明确发生的事件、对话和人物认知代表当前剧情状态。两者冲突时必须以后者为准，不能让人物认知倒退。"
+            "例如，若前文已写明江澈得知对方就读临江大学，人物卡里“从没问过学校”只代表更早阶段，后续不得再安排他询问学校或校区，除非剧情明确出现需要确认的新校区。\n"
             "【跨章连贯要求】①每章必须有区别于相邻章节的新核心事件或关系推进，不得把同一段对话、建议、情绪反应拆写到两章；"
             "标志性台词、具体建议和已发生动作只能在首次发生的章节完整呈现，后续章节不得换个说法再次演一遍。"
             "生成前逐章核对前文已经完成的具体动作及其结果；物品已收拾、清洁、放置或处理后，后续章节只能沿用其当前状态，"
@@ -407,11 +442,11 @@ class SettingGeneratorService:
             "相邻章节的核心事件与信息揭示严禁重叠：某条信息（如身份、学校、计划）只能在一章中首次揭示，"
             "后续章节只能引用或推进，不得让角色重新得知或再次询问；"
             "②上一章结尾留下的悬念/承诺（如“明天再说”）必须在下一章开头得到回应，故事内时间须与之吻合；"
-            "新生成章节必须接在上述保留章节之后，不得重写或重复其事件；"
+            "新生成章节必须接在上述前文锚点之后，不得重写或重复其事件；"
             "③首次明确的固定事件日期（如报到日、考试日、迎新日）是全书时间锚点，后续所有章节提及同一事件时必须沿用该日期，"
             "不得为了按日推进章节而把事件提前或延后；‘明天/后天/下周’必须按当前章节日期换算，跨多日章节须给关键事件标明具体日期。"
             "新生成章节的故事时间必须按章节顺序递进，不得从深夜倒回同日早晨；如确需倒叙，须在故事时间中明确标注‘回忆/倒叙/插叙’；"
-            "各章日期须与已保留章节一致，人物之间的已知程度（是否见过面、通过视频/语音还是仅文字）须保持一致。"
+            "各章日期须与前文锚点一致，人物之间的已知程度（是否见过面、通过视频/语音还是仅文字）须保持一致。"
         )
         if instruction:
             inst += f"\n作者附加要求：{instruction}"
@@ -427,4 +462,56 @@ class SettingGeneratorService:
             layer6_format=fmt,
             schema_cls=LlmChapterBatchOutput,
         )
-        return self._outline_repo.replace_unlocked_arc_chapters(arc_id, parsed.chapters)
+        if not parsed.chapters or len(parsed.chapters) > 20:
+            raise AppError(
+                "OUTLINE_CHAPTER_COUNT_INVALID",
+                "章节规划必须生成 1 至 20 章，请重试。",
+                status_code=502,
+            )
+        if chapter_count is not None and len(parsed.chapters) != chapter_count:
+            raise AppError(
+                "OUTLINE_CHAPTER_COUNT_INVALID",
+                f"章节规划应返回 {chapter_count} 章，实际返回 {len(parsed.chapters)} 章，请重试。",
+                status_code=502,
+            )
+        audit = await self._call_and_parse_json(
+            task_type="review_outline_chapters",
+            layer4_context=(
+                f"{context}\n\n【待核对的新生成章节】\n"
+                f"{json.dumps([chapter.model_dump() for chapter in parsed.chapters], ensure_ascii=False)}"
+            ),
+            layer5_instruction=(
+                "在保存前核对待生成章节与给出的前文锚点、以及待生成章节彼此之间的剧情连续性和拆章节奏。"
+                "重点检查人物已经知道的信息是否被重新询问或重新揭示、同一事件/动作是否重复、日期和相对时间是否冲突。"
+                "人物卡与全书梗概中的初始状态不得覆盖前文锚点确立的后续状态。检查是否把纯过场拆成独立章节；"
+                "若是自适应章数规划，可合并没有独立推进的相邻章节；若用户指定了章数，必须保持章节数量不变。"
+                "若发现问题，只修改有问题章节的必要部分；保持顺序和无问题章节原文。"
+                "若没有问题，原样返回全部章节。"
+            ),
+            layer6_format=(
+                '只输出纯 JSON：{"chapters": [{"title": "章节标题", '
+                '"synopsis": "章节梗概", "story_time": "故事内时间"}]}。'
+                + (
+                    f"必须返回恰好 {chapter_count} 章并保持原顺序。"
+                    if chapter_count is not None
+                    else "可合并无独立剧情推进的相邻章节，但保持故事事件顺序；最终返回 1 至 20 章。"
+                )
+            ),
+            schema_cls=LlmChapterBatchOutput,
+        )
+        if (
+            not audit.chapters
+            or len(audit.chapters) > 20
+            or (chapter_count is not None and len(audit.chapters) != chapter_count)
+        ):
+            raise AppError(
+                "OUTLINE_REVIEW_INVALID",
+                "大纲连贯性复核返回的章节数量不符合要求，请重试生成。",
+                status_code=502,
+            )
+        tree, deleted_chapter_ids = self._outline_repo.replace_arc_chapters(
+            arc_id, audit.chapters, prior_valid_chapters
+        )
+        if deleted_chapter_ids:
+            NovelVectorStore(self._novel_uid).remove_chapter_chunks(deleted_chapter_ids)
+        return tree

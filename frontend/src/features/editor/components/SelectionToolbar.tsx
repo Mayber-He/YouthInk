@@ -10,6 +10,7 @@ interface SelectionToolbarProps {
   characters: CharacterItem[];
   aiSmellHits: AiSmellHit[];
   hasScannedSmell?: boolean;
+  smellError?: string | null;
   isStreaming: boolean;
   onOpenSupplement: () => void;
   onRewriteSelection: (
@@ -18,6 +19,7 @@ interface SelectionToolbarProps {
     instruction: string
   ) => void;
   onRewriteSmellHit: (hit: AiSmellHit) => void;
+  onApplySmellRewrite: (hit: AiSmellHit) => void;
   onFocusSmellHit?: (hit: AiSmellHit) => void;
   onDismissSmell?: () => void;
   onCritiqueSelection?: () => void;
@@ -32,10 +34,12 @@ export const SelectionToolbar: React.FC<SelectionToolbarProps> = ({
   characters,
   aiSmellHits,
   hasScannedSmell = false,
+  smellError,
   isStreaming,
   onOpenSupplement,
   onRewriteSelection,
   onRewriteSmellHit,
+  onApplySmellRewrite,
   onFocusSmellHit,
   onDismissSmell,
   onCritiqueSelection,
@@ -201,14 +205,20 @@ export const SelectionToolbar: React.FC<SelectionToolbarProps> = ({
         </div>
       )}
 
-      {/* 本地 AI 味检测未发现套话时的正向反馈提示条 */}
+      {/* 模型 AI 味分析反馈 */}
+      {smellError && (
+        <div className="flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs text-rose-800 dark:border-rose-900/50 dark:bg-rose-950/30 dark:text-rose-300">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-600" />
+          <span>模型检测失败：{smellError}</span>
+        </div>
+      )}
       {hasScannedSmell && aiSmellHits.length === 0 && (
         <div className="flex items-center justify-between rounded-xl border border-emerald-200 bg-emerald-50/70 px-3.5 py-2.5 text-xs text-emerald-800 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-300">
           <div className="flex items-center gap-2">
             <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" />
             <span>
-              <strong>AI 味检测通过：</strong>
-              未在当前正文中检测到高频网文套话与风格禁用词。如需深度润色某段文字，可直接在下方正文中鼠标划选段落，点击「去AI味润色」。
+              <strong>模型分析完成：</strong>
+              未发现明显的模板化或机械化表达（模型判断仅供参考）。如需修改某段文字，可在下方划选后点击「去AI味润色」。
             </span>
           </div>
           {onDismissSmell && (
@@ -224,14 +234,14 @@ export const SelectionToolbar: React.FC<SelectionToolbarProps> = ({
         </div>
       )}
 
-      {/* 本地 AI 味检测波浪线提示条（设计文档 6.4 & 7.4） */}
+      {/* 模型 AI 味分析结果 */}
       {aiSmellHits.length > 0 && (
         <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3 text-xs dark:border-amber-900/50 dark:bg-amber-950/30">
           <div className="flex items-center justify-between font-semibold text-amber-900 dark:text-amber-300">
             <div className="flex items-center gap-1.5">
               <AlertTriangle className="h-4 w-4 text-amber-600" />
               <span>
-                本地 AI 味检测发现 {aiSmellHits.length} 处高频套话（点击词条定位原文，点击「一键改句」由 AI 重写该句）：
+                模型发现 {aiSmellHits.length} 处值得检查的表达（点击定位原文；改写需手动触发）：
               </span>
             </div>
             {onDismissSmell && (
@@ -249,27 +259,48 @@ export const SelectionToolbar: React.FC<SelectionToolbarProps> = ({
             {aiSmellHits.map((hit, idx) => (
               <div
                 key={`${hit.start_index}-${idx}`}
-                className="flex items-center gap-1.5 rounded-lg border border-amber-300/80 bg-white px-2.5 py-1 dark:border-amber-800 dark:bg-slate-900"
+                className="w-full rounded-lg border border-amber-300/80 bg-white p-2.5 dark:border-amber-800 dark:bg-slate-900"
               >
-                <button
-                  type="button"
-                  onClick={() => onFocusSmellHit?.(hit)}
-                  className="underline decoration-amber-500 decoration-wavy font-medium text-slate-800 hover:text-indigo-600 cursor-pointer dark:text-slate-200"
-                  title="点击在编辑器中定位高亮该词"
-                >
-                  「{hit.matched_text}」
-                </button>
-                <span className="text-[11px] text-slate-500">
-                  ({hit.suggestion})
-                </span>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <Badge tone="amber">{hit.category}</Badge>
+                  <button
+                    type="button"
+                    onClick={() => onFocusSmellHit?.(hit)}
+                    className="underline decoration-amber-500 decoration-wavy font-medium text-slate-800 hover:text-indigo-600 cursor-pointer dark:text-slate-200"
+                    title="点击在编辑器中定位高亮原文"
+                  >
+                    「{hit.matched_text}」
+                  </button>
+                </div>
+                <p className="mt-1 text-[11px] leading-relaxed text-slate-600 dark:text-slate-400">
+                  {hit.reason}{hit.suggestion ? ` 修改方向：${hit.suggestion}` : ""}
+                </p>
+                {hit.suggested_rewrite && (
+                  <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50/70 p-2 dark:border-amber-900/60 dark:bg-amber-950/20">
+                    <div className="mb-1 font-semibold text-slate-800 dark:text-slate-200">建议修改后的片段：</div>
+                    <p className="whitespace-pre-wrap leading-relaxed text-slate-700 dark:text-slate-300">
+                      {hit.suggested_rewrite}
+                    </p>
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      disabled={isStreaming}
+                      className="mt-2"
+                      onClick={() => onApplySmellRewrite(hit)}
+                    >
+                      <Check className="mr-1 h-3 w-3" />
+                      采纳并替换原文
+                    </Button>
+                  </div>
+                )}
                 <button
                   type="button"
                   disabled={isStreaming}
                   onClick={() => onRewriteSmellHit(hit)}
-                  className="inline-flex items-center gap-0.5 rounded bg-indigo-50 px-1.5 py-0.5 text-[11px] font-medium text-indigo-700 hover:bg-indigo-100 cursor-pointer"
+                  className="mt-2 inline-flex items-center gap-0.5 rounded bg-indigo-50 px-1.5 py-0.5 text-[11px] font-medium text-indigo-700 hover:bg-indigo-100 cursor-pointer"
                 >
                   <Sparkles className="h-3 w-3" />
-                  一键改句
+                  重新生成改写
                 </button>
               </div>
             ))}

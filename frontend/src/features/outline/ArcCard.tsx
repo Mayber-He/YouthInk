@@ -81,7 +81,7 @@ export const ArcCard: React.FC<ArcCardProps> = ({
             ) : (
               <Sparkles className="h-3.5 w-3.5" />
             )}
-            AI 滚动生成本弧章节
+            {arc.chapters.length ? "重新生成本弧章节" : "AI 按剧情规划章节"}
           </Button>
           <Button
             variant="outline"
@@ -141,7 +141,7 @@ export const ArcCard: React.FC<ArcCardProps> = ({
                 {STATUS_BADGE[ch.status].label}
               </Badge>
               {ch.continuity_review_required && (
-                <Badge tone="amber">连续性待复核</Badge>
+                <Badge tone="amber">上下文待更新</Badge>
               )}
               <LockToggle
                 locked={ch.locked}

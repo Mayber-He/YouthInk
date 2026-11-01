@@ -88,7 +88,10 @@ class ChapterFinalizerService:
 
         summary_text = await self._generate_chapter_summary(chapter_id, ch.title, content)
         self.memory_repo.upsert_summary("chapter", chapter_id, summary_text, is_stale=False, source_hash=source_hash)
-        self.conn.execute("UPDATE chapters SET status = 'final', content_hash = ?, continuity_review_required = 1 WHERE id = ?", (source_hash, chapter_id))
+        self.conn.execute(
+            "UPDATE chapters SET status = 'final', content_hash = ?, continuity_review_required = 0, continuity_dirty_from_chapter_id = NULL WHERE id = ?",
+            (source_hash, chapter_id),
+        )
         self.conn.commit()
 
         extraction = await self._extract_chapter_memories(chapter_id, ch.title, content)

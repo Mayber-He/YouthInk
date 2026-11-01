@@ -2,8 +2,9 @@ import React, { useState } from "react";
 import { Loader2, Plus, Sparkles, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/common/EmptyState";
+import { ConfirmModal } from "@/components/ui/ConfirmModal";
 import { useUiStore } from "@/stores/uiStore";
-import type { ChapterItem } from "@/types/api";
+import type { ArcTreeNode, ChapterItem } from "@/types/api";
 import {
   useCreateArc,
   useCreateChapter,
@@ -42,6 +43,8 @@ export const OutlineSection: React.FC<OutlineSectionProps> = ({ novelUid }) => {
   const [arcsPerVol, setArcsPerVol] = useState(2);
   const [aiInstruction, setAiInstruction] = useState("");
   const [errMsg, setErrMsg] = useState<string | null>(null);
+  const [arcToRegenerate, setArcToRegenerate] = useState<ArcTreeNode | null>(null);
+  const [confirmStructureReset, setConfirmStructureReset] = useState(false);
 
   const showMutationError = (err: unknown, fallback: string) => {
     setErrMsg(err instanceof Error ? err.message : fallback);
@@ -78,18 +81,35 @@ export const OutlineSection: React.FC<OutlineSectionProps> = ({ novelUid }) => {
         arcs_per_volume: arcsPerVol,
         instruction: aiInstruction,
       });
+      setSelectedChapterId(null);
     } catch (err) {
       setErrMsg(err instanceof Error ? err.message : "生成分卷与情节弧失败");
     }
   };
 
-  const handleGenerateArcChapters = async (arcId: number) => {
+  const requestGenerateStructure = () => {
+    if (tree && tree.volumes.length > 0) {
+      setConfirmStructureReset(true);
+      return;
+    }
+    void handleGenerateStructure();
+  };
+
+  const generateArcChapters = async (arcId: number) => {
     setErrMsg(null);
     try {
-      await genArcChMut.mutateAsync({ arcId, chapterCount: 5 });
+      await genArcChMut.mutateAsync({ arcId });
     } catch (err) {
       showMutationError(err, "生成章节大纲失败");
     }
+  };
+
+  const handleGenerateArcChapters = (arc: ArcTreeNode) => {
+    if (arc.chapters.length > 0) {
+      setArcToRegenerate(arc);
+      return;
+    }
+    void generateArcChapters(arc.id);
   };
 
   const handleMoveChapter = (
@@ -122,6 +142,9 @@ export const OutlineSection: React.FC<OutlineSectionProps> = ({ novelUid }) => {
   if (isLoading || !tree) {
     return <p className="p-6 text-xs text-slate-400">正在加载全书目录树...</p>;
   }
+
+  const allArcs = tree.volumes.flatMap((volume) => volume.arcs);
+  const allChapters = allArcs.flatMap((arc) => arc.chapters);
 
   return (
     <div className="mx-auto max-w-5xl space-y-6 p-6">
@@ -184,16 +207,22 @@ export const OutlineSection: React.FC<OutlineSectionProps> = ({ novelUid }) => {
         <Button
           size="sm"
           disabled={genStructureMut.isPending}
-          onClick={handleGenerateStructure}
+          onClick={requestGenerateStructure}
         >
           {genStructureMut.isPending ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
           ) : (
             <Sparkles className="h-3.5 w-3.5" />
           )}
-          AI 生成分卷与情节弧
+          {tree.volumes.length > 0
+            ? "清空并重新生成分卷与情节弧"
+            : "AI 生成分卷与情节弧"}
         </Button>
       </div>
+
+      <p className="-mt-4 text-xs text-slate-500">
+        章节数按本弧的独立事件和剧情转折规划；没有新推进的日常过场会合并处理。
+      </p>
 
       {errMsg && (
         <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
@@ -252,7 +281,7 @@ export const OutlineSection: React.FC<OutlineSectionProps> = ({ novelUid }) => {
                     key={arc.id}
                     arc={arc}
                     isGenerating={genArcChMut.isPending}
-                    onGenerateChapters={(arcId) => void handleGenerateArcChapters(arcId)}
+                    onGenerateChapters={() => handleGenerateArcChapters(arc)}
                     onCreateChapter={(arcId) =>
                       createChMut.mutate({
                         arc_id: arcId,
@@ -277,6 +306,30 @@ export const OutlineSection: React.FC<OutlineSectionProps> = ({ novelUid }) => {
           ))}
         </div>
       )}
+      <ConfirmModal
+        open={confirmStructureReset}
+        onClose={() => setConfirmStructureReset(false)}
+        onConfirm={() => void handleGenerateStructure()}
+        title="清空并重新生成全书目录？"
+        description={`现有 ${tree.volumes.length} 卷、${allArcs.length} 条情节弧、${tree.total_chapters} 章将全部清除；其中 ${allChapters.filter((chapter) => chapter.word_count > 0).length} 章已有正文，${allChapters.filter((chapter) => chapter.status === "final").length} 章已定稿。章节版本、场景、章节记忆、摘要和向量索引也会清除。只有新结构生成并校验成功后才会替换；生成失败时现有内容保留。`}
+        confirmText="清空并重新生成"
+        confirmVariant="danger"
+      />
+      <ConfirmModal
+        open={arcToRegenerate !== null}
+        onClose={() => setArcToRegenerate(null)}
+        onConfirm={() => {
+          if (arcToRegenerate) void generateArcChapters(arcToRegenerate.id);
+        }}
+        title="重新生成本弧章节？"
+        description={
+          arcToRegenerate
+            ? `「${arcToRegenerate.title}」的 ${arcToRegenerate.chapters.length} 个章节将全部清除，其中 ${arcToRegenerate.chapters.filter((chapter) => chapter.word_count > 0).length} 章已有正文，${arcToRegenerate.chapters.filter((chapter) => chapter.status === "final").length} 章已定稿。相关版本和章节记忆也会清除；其他情节弧保留，但后续章节会标记为上下文待更新。`
+            : ""
+        }
+        confirmText="清除并重新生成"
+        confirmVariant="danger"
+      />
     </div>
   );
 };

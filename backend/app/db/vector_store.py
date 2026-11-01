@@ -89,6 +89,18 @@ class NovelVectorStore:
         self._save_all(existing)
         return len(new_chunks)
 
+    def remove_chapter_chunks(self, chapter_ids: list[int]) -> int:
+        """Remove stale chunks for deleted chapters while preserving other chapters."""
+        ids = set(chapter_ids)
+        if not ids:
+            return 0
+        records = self._load_all()
+        retained = [record for record in records if record.chapter_id not in ids]
+        removed_count = len(records) - len(retained)
+        if removed_count:
+            self._save_all(retained)
+        return removed_count
+
     def clear_all_vectors(self) -> None:
         """Remove all stored vector chunks (used before full re-indexing)."""
         if self.store_file.exists():

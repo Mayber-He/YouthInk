@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 
@@ -426,17 +427,13 @@ class OutlineRepository:
         )
 
     def _validate_generated_chapter_timeline(
-        self, arc_id: int, chapters_plan: list[LlmChapterPlanItem]
+        self,
+        prior_chapters: list[ChapterResponse],
+        chapters_plan: list[LlmChapterPlanItem],
     ) -> None:
-        retained = self._conn.execute(
-            "SELECT title, story_time, synopsis FROM chapters "
-            "WHERE arc_id = ? AND (locked = 1 OR status NOT IN ('pending', 'outline')) "
-            "ORDER BY sort_order, id",
-            (arc_id,),
-        ).fetchall()
         entries = [
-            (str(row["title"]), str(row["story_time"] or ""), str(row["synopsis"] or ""))
-            for row in retained
+            (chapter.title, chapter.story_time, chapter.synopsis)
+            for chapter in prior_chapters
         ]
         entries.extend(
             (chapter.title, chapter.story_time, chapter.synopsis) for chapter in chapters_plan
@@ -471,10 +468,93 @@ class OutlineRepository:
     def delete_chapter(self, chapter_id: int) -> None:
         self._conn.execute("DELETE FROM chapters WHERE id = ?", (chapter_id,))
 
+    def _clear_chapter_derived_data(self, chapter_ids: list[int]) -> None:
+        if not chapter_ids:
+            return
+        chapter_id_set = set(chapter_ids)
+        for offset in range(0, len(chapter_ids), 400):
+            batch = chapter_ids[offset : offset + 400]
+            marks = ",".join("?" for _ in batch)
+            version_ids = [
+                int(row["id"])
+                for row in self._conn.execute(
+                    f"SELECT id FROM chapter_versions WHERE chapter_id IN ({marks})", tuple(batch)
+                ).fetchall()
+            ]
+            for version_offset in range(0, len(version_ids), 400):
+                version_batch = version_ids[version_offset : version_offset + 400]
+                version_marks = ",".join("?" for _ in version_batch)
+                self._conn.execute(
+                    f"DELETE FROM chapters_fts WHERE rowid IN ({version_marks})",
+                    tuple(version_batch),
+                )
+            fact_ids = [
+                int(row["id"])
+                for row in self._conn.execute(
+                    f"SELECT id FROM facts WHERE chapter_id IN ({marks})", tuple(batch)
+                ).fetchall()
+            ]
+            for fact_offset in range(0, len(fact_ids), 400):
+                fact_batch = fact_ids[fact_offset : fact_offset + 400]
+                fact_marks = ",".join("?" for _ in fact_batch)
+                self._conn.execute(
+                    f"DELETE FROM facts_fts WHERE rowid IN ({fact_marks})", tuple(fact_batch)
+                )
+            self._conn.execute(
+                f"DELETE FROM generation_logs WHERE chapter_id IN ({marks})", tuple(batch)
+            )
+            self._conn.execute(
+                f"DELETE FROM constraint_checks WHERE chapter_id IN ({marks})", tuple(batch)
+            )
+            self._conn.execute(
+                f"DELETE FROM constraints WHERE target_type = 'chapter' AND target_id IN ({marks})",
+                tuple(batch),
+            )
+            self._conn.execute(
+                f"DELETE FROM summaries WHERE level = 'chapter' AND ref_id IN ({marks})",
+                tuple(batch),
+            )
+            self._conn.execute(
+                f"UPDATE foreshadowing SET is_stale = 1, confirm_status = 'pending', "
+                f"updated_at = datetime('now') WHERE planted_chapter_id IN ({marks})",
+                tuple(batch),
+            )
+
+        for row in self._conn.execute(
+            "SELECT id, related_chapter_ids FROM foreshadowing"
+        ).fetchall():
+            try:
+                related_ids = json.loads(row["related_chapter_ids"] or "[]")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(related_ids, list):
+                continue
+            remaining_ids = [item for item in related_ids if item not in chapter_id_set]
+            if len(remaining_ids) != len(related_ids):
+                self._conn.execute(
+                    "UPDATE foreshadowing SET related_chapter_ids = ?, is_stale = 1, "
+                    "confirm_status = 'pending', updated_at = datetime('now') WHERE id = ?",
+                    (json.dumps(remaining_ids, ensure_ascii=False), int(row["id"])),
+                )
+
+        for offset in range(0, len(chapter_ids), 400):
+            batch = chapter_ids[offset : offset + 400]
+            marks = ",".join("?" for _ in batch)
+            self._conn.execute(f"DELETE FROM chapters WHERE id IN ({marks})", tuple(batch))
+
     # --- AI Batch Structure & Rolling Arc Chapters ---
 
-    def apply_generated_structure(self, volumes_plan: list[LlmVolumePlanItem]) -> OutlineTreeResponse:
-        """Create volumes and arcs from AI plan (preserving any volumes that contain locked chapters)."""
+    def replace_generated_structure(
+        self, volumes_plan: list[LlmVolumePlanItem]
+    ) -> OutlineTreeResponse:
+        """Replace all volumes/arcs and remove chapter-derived content."""
+        chapter_ids = [
+            int(row["id"])
+            for row in self._conn.execute("SELECT id FROM chapters ORDER BY sort_order, id").fetchall()
+        ]
+        self._clear_chapter_derived_data(chapter_ids)
+        self._conn.execute("DELETE FROM summaries")
+        self._conn.execute("DELETE FROM volumes")
         for v_item in volumes_plan:
             vol = self.create_volume(
                 VolumeCreate(title=v_item.title, synopsis=v_item.synopsis, goal=v_item.goal)
@@ -492,27 +572,144 @@ class OutlineRepository:
                 )
         return self.get_outline_tree()
 
-    def replace_unlocked_arc_chapters(
-        self, arc_id: int, chapters_plan: list[LlmChapterPlanItem]
-    ) -> OutlineTreeResponse:
-        """Delete unlocked pending/outline chapters in arc_id and insert newly generated chapters."""
+    def replace_arc_chapters(
+        self,
+        arc_id: int,
+        chapters_plan: list[LlmChapterPlanItem],
+        prior_chapters: list[ChapterResponse],
+    ) -> tuple[OutlineTreeResponse, list[int]]:
+        """Replace all chapters in an arc and clear chapter-derived data."""
         self.get_arc(arc_id)
-        self._validate_generated_chapter_timeline(arc_id, chapters_plan)
-        self._conn.execute(
-            "DELETE FROM chapters WHERE arc_id = ? AND locked = 0 AND status IN ('pending', 'outline')",
+        self._validate_generated_chapter_timeline(prior_chapters, chapters_plan)
+        outline_tree = self.get_outline_tree()
+        target_arc = self.get_arc(arc_id)
+        downstream_arc_ids: list[int] = []
+        downstream_volume_ids: list[int] = []
+        found_arc = False
+        found_volume = False
+        for volume in outline_tree.volumes:
+            if volume.id == target_arc.volume_id:
+                found_volume = True
+            if found_volume:
+                downstream_volume_ids.append(volume.id)
+            for candidate_arc in volume.arcs:
+                if candidate_arc.id == arc_id:
+                    found_arc = True
+                    continue
+                if found_arc:
+                    downstream_arc_ids.append(candidate_arc.id)
+
+        self._conn.execute("DELETE FROM summaries WHERE level = 'arc' AND ref_id = ?", (arc_id,))
+        if downstream_arc_ids:
+            marks = ",".join("?" for _ in downstream_arc_ids)
+            self._conn.execute(
+                f"UPDATE summaries SET is_stale = 1 WHERE level = 'arc' AND ref_id IN ({marks})",
+                tuple(downstream_arc_ids),
+            )
+        if downstream_volume_ids:
+            marks = ",".join("?" for _ in downstream_volume_ids)
+            self._conn.execute(
+                f"UPDATE summaries SET is_stale = 1 WHERE level = 'volume' AND ref_id IN ({marks})",
+                tuple(downstream_volume_ids),
+            )
+        self._conn.execute("UPDATE summaries SET is_stale = 1 WHERE level = 'novel'")
+
+        old_rows = self._conn.execute(
+            "SELECT id, sort_order FROM chapters WHERE arc_id = ? ORDER BY sort_order, id",
             (arc_id,),
-        )
-        for ch_item in chapters_plan:
+        ).fetchall()
+        deleted_ids = [int(row["id"]) for row in old_rows]
+
+        if old_rows:
+            first_old = float(old_rows[0]["sort_order"])
+            last_old = float(old_rows[-1]["sort_order"])
+            previous_sort = self._conn.execute(
+                "SELECT MAX(sort_order) FROM chapters WHERE sort_order < ? AND arc_id != ?",
+                (first_old, arc_id),
+            ).fetchone()[0]
+            next_sort = self._conn.execute(
+                "SELECT MIN(sort_order) FROM chapters WHERE sort_order > ? AND arc_id != ?",
+                (last_old, arc_id),
+            ).fetchone()[0]
+        else:
+            tree = outline_tree
+            earlier_arc_ids: list[int] = []
+            later_arc_ids: list[int] = []
+            found = False
+            for volume in tree.volumes:
+                for candidate_arc in volume.arcs:
+                    if candidate_arc.id == arc_id:
+                        found = True
+                        continue
+                    (later_arc_ids if found else earlier_arc_ids).append(candidate_arc.id)
+            earlier_marks = ",".join("?" for _ in earlier_arc_ids)
+            later_marks = ",".join("?" for _ in later_arc_ids)
+            previous_sort = (
+                self._conn.execute(
+                    f"SELECT MAX(sort_order) FROM chapters WHERE arc_id IN ({earlier_marks})",
+                    tuple(earlier_arc_ids),
+                ).fetchone()[0]
+                if earlier_arc_ids
+                else None
+            )
+            next_sort = (
+                self._conn.execute(
+                    f"SELECT MIN(sort_order) FROM chapters WHERE arc_id IN ({later_marks})",
+                    tuple(later_arc_ids),
+                ).fetchone()[0]
+                if later_arc_ids
+                else None
+            )
+
+        if deleted_ids:
+            self._clear_chapter_derived_data(deleted_ids)
+
+        count = len(chapters_plan)
+        if previous_sort is not None and next_sort is not None:
+            start_sort = float(previous_sort)
+            step = (float(next_sort) - start_sort) / (count + 1)
+            sort_orders = [start_sort + step * (index + 1) for index in range(count)]
+        elif previous_sort is not None:
+            sort_orders = [float(previous_sort) + index + 1.0 for index in range(count)]
+        elif next_sort is not None:
+            sort_orders = [float(next_sort) - count + index for index in range(count)]
+        else:
+            sort_orders = [float(index + 1) for index in range(count)]
+
+        for ch_item, sort_order in zip(chapters_plan, sort_orders):
             self.create_chapter(
                 ChapterCreate(
                     arc_id=arc_id,
                     title=ch_item.title,
                     synopsis=ch_item.synopsis,
                     story_time=ch_item.story_time,
+                    sort_order=sort_order,
                     locked=False,
                 )
             )
-        return self.get_outline_tree()
+
+        if next_sort is not None:
+            new_arc_rows = self._conn.execute(
+                "SELECT id, sort_order FROM chapters WHERE arc_id = ? ORDER BY sort_order, id",
+                (arc_id,),
+            ).fetchall()
+            first_new_sort = float(new_arc_rows[0]["sort_order"]) if new_arc_rows else float(next_sort)
+            downstream = self._conn.execute(
+                "SELECT id FROM chapters WHERE sort_order >= ? AND arc_id != ? ORDER BY sort_order, id",
+                (first_new_sort, arc_id),
+            ).fetchall()
+            if downstream:
+                downstream_ids = [int(row["id"]) for row in downstream]
+                marks = ",".join("?" for _ in downstream_ids)
+                first_new_id = int(new_arc_rows[0]["id"])
+                self._conn.execute(
+                    f"UPDATE chapters SET continuity_review_required = 1, "
+                    f"continuity_dirty_from_chapter_id = ? WHERE id IN ({marks})",
+                    (first_new_id, *downstream_ids),
+                )
+
+        tree = self.get_outline_tree()
+        return tree, deleted_ids
 
     @staticmethod
     def _row_to_volume(row: sqlite3.Row) -> VolumeResponse:

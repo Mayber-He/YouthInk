@@ -133,17 +133,24 @@ class SettingsRepository:
 
     def update_task_assignments(self, payload: TaskAssignmentUpdate) -> TaskAssignmentResponse:
         for category in ("writing", "planning", "extract"):
+            if category not in payload.model_fields_set:
+                continue
             prof_id = getattr(payload, category)
-            if prof_id is not None:
-                self.get_llm_profile(prof_id)
+            if prof_id is None:
                 self._conn.execute(
-                    """
-                    INSERT INTO task_model_assignments (task_category, profile_id)
-                    VALUES (?, ?)
-                    ON CONFLICT(task_category) DO UPDATE SET profile_id = excluded.profile_id
-                    """,
-                    (category, prof_id),
+                    "DELETE FROM task_model_assignments WHERE task_category = ?",
+                    (category,),
                 )
+                continue
+            self.get_llm_profile(prof_id)
+            self._conn.execute(
+                """
+                INSERT INTO task_model_assignments (task_category, profile_id)
+                VALUES (?, ?)
+                ON CONFLICT(task_category) DO UPDATE SET profile_id = excluded.profile_id
+                """,
+                (category, prof_id),
+            )
         return self.get_task_assignments()
 
     # --- Prompt Templates ---

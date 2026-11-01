@@ -1,1 +1,1 @@
-"""Built-in static resources (style presets, default prompts, AI smell vocabulary)."""
+"""Built-in static resources (style presets and default prompts)."""

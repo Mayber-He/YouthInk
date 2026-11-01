@@ -9,12 +9,10 @@ from fastapi.responses import PlainTextResponse
 
 from app.api.deps import (
     get_context_assembler,
-    get_novel_repo,
     get_settings_repo,
     get_writing_repo,
     get_writing_service,
 )
-from app.db.repositories.novel_repo import NovelRepository
 from app.db.repositories.settings_repo import SettingsRepository
 from app.db.repositories.writing_repo import WritingRepository
 from app.schemas.writing import (
@@ -141,19 +139,15 @@ def get_context_preview(
     return assembler.build_context_preview(chapter_id, scene_id, disabled_list)
 
 
-# --- Local AI Smell Scan ---
+# --- Model-Based AI Smell Review ---
 
 @router.post("/ai-smell-scan", response_model=AiSmellScanResponse)
-def check_ai_smell(
+async def check_ai_smell(
+    novel_uid: str,
     payload: AiSmellScanRequest,
-    novel_repo: NovelRepository = Depends(get_novel_repo),
     settings_repo: SettingsRepository = Depends(get_settings_repo),
 ) -> AiSmellScanResponse:
-    novel = novel_repo.get_novel_detail()
-    styles = settings_repo.list_style_templates()
-    matched = next((s for s in styles if s.id == novel.style_template_id), None)
-    extra = matched.forbidden_exprs if matched else []
-    return scan_ai_smell(payload.text, extra_forbidden=extra)
+    return await scan_ai_smell(payload.text, novel_uid, settings_repo, payload.chapter_id)
 
 
 

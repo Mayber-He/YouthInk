@@ -61,7 +61,7 @@ export const MemoryChapterPanel: React.FC<MemoryChapterPanelProps> = ({
               定稿才入库 · 记忆闭环
             </div>
             <p className="mt-0.5 text-[11px] text-indigo-700/80 dark:text-indigo-300/80">
-              草稿修改不污染记忆库；点击定稿自动完成快照备份、向量/FTS索引、摘要与设定抽取。
+              点击定稿表示确认当前正文，并自动通过本章一致性复核，同时更新快照、索引、摘要与设定抽取。
             </p>
           </div>
           <Badge tone={chapterStatus === "final" ? "emerald" : "amber"}>
@@ -87,7 +87,7 @@ export const MemoryChapterPanel: React.FC<MemoryChapterPanelProps> = ({
           <div className="mt-2.5 rounded-lg bg-white/90 p-2 text-[11px] text-slate-600 dark:bg-slate-900 dark:text-slate-300">
             <div className="flex items-center gap-1 font-medium text-emerald-700 dark:text-emerald-400">
               <CheckCircle2 className="h-3.5 w-3.5" />
-              定稿入库成功！已创建快照备份
+              定稿入库成功！本章一致性复核自动通过，已创建快照备份
             </div>
             <div className="mt-1">
               切分索引：{lastResult.chunks_indexed} 个片段 · 信任模式自动确认：
@@ -100,7 +100,7 @@ export const MemoryChapterPanel: React.FC<MemoryChapterPanelProps> = ({
 
       {continuityReviewRequired && (
         <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
-          本章或前文正文有修改，后续上下文记忆暂不参与生成。请按章节顺序完成定稿和逻辑一致性复核；正文不会被自动改写。
+          本章或前文正文有修改，相关上下文暂不参与生成。请先定稿较早章节，再按顺序重新定稿本章和后续受影响章节；定稿表示确认当前正文并自动通过本章复核。
         </div>
       )}
 

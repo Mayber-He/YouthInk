@@ -46,7 +46,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
   const { data: workspace, isLoading } = useChapterWorkspace(novelUid, effectiveChapterId);
   const saveMut = useSaveChapterContent(novelUid, effectiveChapterId ?? 0);
   const restoreMut = useRestoreChapterVersion(novelUid, effectiveChapterId ?? 0);
-  const smellMut = useAiSmellScan(novelUid);
+  const smellMut = useAiSmellScan(novelUid, effectiveChapterId);
 
   const [activeSceneId, setActiveSceneId] = useState<number | null>(null);
   const [disabledContextKeys, setDisabledContextKeys] = useState<string[]>([]);
@@ -58,6 +58,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
   const [selectionRange, setSelectionRange] = useState({ start: 0, end: 0, text: "" });
   const [smellHits, setSmellHits] = useState<AiSmellHit[]>([]);
   const [hasScannedSmell, setHasScannedSmell] = useState(false);
+  const [smellError, setSmellError] = useState<string | null>(null);
   const [reviewOpen, setReviewOpen] = useState(false);
   const [reviewResult, setReviewResult] = useState<ConsistencyReviewResponse | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
@@ -72,6 +73,14 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
   const [critiqueResult, setCritiqueResult] = useState<SelectionCritiqueResult | null>(null);
   const [pipelineStep, setPipelineStep] = useState<WritingPipelineStep>("idle");
   const [streamModelName, setStreamModelName] = useState("");
+  const contentRef = useRef(content);
+  contentRef.current = content;
+
+  useEffect(() => {
+    setSmellHits([]);
+    setHasScannedSmell(false);
+    setSmellError(null);
+  }, [content]);
   const [generatedWordsCount, setGeneratedWordsCount] = useState(0);
   const critiqueMut = useCritiqueSelection(novelUid, effectiveChapterId ?? 0);
   const reviewMut = useRunConsistencyReview(novelUid, effectiveChapterId ?? 0);
@@ -239,6 +248,15 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
         saveMut.mutate({ content: updated, source: "ai", create_new_version: true });
       }
     );
+  };
+
+  const handleApplySmellRewrite = (hit: AiSmellHit) => {
+    if (!effectiveChapterId || !hit.suggested_rewrite.trim()) return;
+    const { start_index: start, end_index: end } = hit;
+    if (content.slice(start, end) !== hit.matched_text) return;
+    const updated = content.slice(0, start) + hit.suggested_rewrite + content.slice(end);
+    setContent(updated);
+    saveMut.mutate({ content: updated, source: "ai", create_new_version: true });
   };
 
   const handleOpenSupplement = () => {
@@ -413,9 +431,16 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
           onWriteWholeChapter={handleWriteWholeChapter}
           onStopStream={() => { stopStream(); setPipelineStep("idle"); }}
           onScanSmell={async () => {
-            const res = await smellMut.mutateAsync(content);
-            setSmellHits(res.hits);
-            setHasScannedSmell(true);
+            setSmellError(null);
+            setHasScannedSmell(false);
+            try {
+              const res = await smellMut.mutateAsync(content);
+              if (contentRef.current !== content) return;
+              setSmellHits(res.hits);
+              setHasScannedSmell(true);
+            } catch (error) {
+              setSmellError(error instanceof Error ? error.message : "模型检测失败");
+            }
           }}
           onRunConsistencyReview={async () => {
             if (!effectiveChapterId) return;
@@ -464,10 +489,12 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
             characters={characters}
             aiSmellHits={smellHits}
             hasScannedSmell={hasScannedSmell}
+            smellError={smellError}
             isStreaming={isStreaming}
             onOpenSupplement={handleOpenSupplement}
             onRewriteSelection={handleRewriteSelection}
             onRewriteSmellHit={handleRewriteSmellHit}
+            onApplySmellRewrite={handleApplySmellRewrite}
             onFocusSmellHit={handleFocusSmellHit}
             onDismissSmell={() => {
               setHasScannedSmell(false);

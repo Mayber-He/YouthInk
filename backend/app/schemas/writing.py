@@ -144,17 +144,31 @@ class StreamSupplementRequest(BaseModel):
         return self
 
 
-# --- Local AI Smell Detection ---
+# --- Model-Assisted AI-Style Review ---
 
 class AiSmellScanRequest(BaseModel):
     text: str
+    chapter_id: int | None = None
+
+
+class LlmAiSmellFinding(BaseModel):
+    quote: str = ""
+    category: str = "写作表达"
+    reason: str = ""
+    suggestion: str = ""
+    suggested_rewrite: str = ""
+
+
+class LlmAiSmellOutput(BaseModel):
+    hits: list[LlmAiSmellFinding] = Field(default_factory=list)
 
 
 class AiSmellHit(BaseModel):
-    pattern: str
     matched_text: str
     category: str
+    reason: str
     suggestion: str
+    suggested_rewrite: str
     start_index: int
     end_index: int
 

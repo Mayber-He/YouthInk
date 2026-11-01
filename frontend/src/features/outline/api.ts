@@ -182,7 +182,7 @@ export function useGenerateStructure(novelUid: string) {
           body: JSON.stringify(input),
         }
       ),
-    onSuccess: () => qc.invalidateQueries({ queryKey: outlineKeys.tree(novelUid) }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["novels", novelUid] }),
   });
 }
 
@@ -191,7 +191,7 @@ export function useGenerateArcChapters(novelUid: string) {
   return useMutation({
     mutationFn: ({
       arcId,
-      chapterCount = 5,
+      chapterCount,
       instruction = "",
     }: {
       arcId: number;
@@ -203,14 +203,13 @@ export function useGenerateArcChapters(novelUid: string) {
         {
           method: "POST",
           body: JSON.stringify({
-            chapter_count: chapterCount,
+            ...(chapterCount !== undefined ? { chapter_count: chapterCount } : {}),
             instruction,
           }),
         }
       ),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: outlineKeys.tree(novelUid) });
-      qc.invalidateQueries({ queryKey: novelKeys.detail(novelUid) });
+      qc.invalidateQueries({ queryKey: ["novels", novelUid] });
     },
   });
 }

@@ -250,7 +250,7 @@ export const WorkbenchLayout: React.FC = () => {
         )}
       </div>
 
-      <StatusBar novel={novel} />
+      <StatusBar novel={novel} activeSection={activeSection} />
 
       <NovelBackupsModal
         novelUid={backupOpen ? novel.novel_uid : null}

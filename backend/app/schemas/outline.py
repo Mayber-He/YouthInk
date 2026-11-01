@@ -131,7 +131,7 @@ class AiGenerateStructureRequest(BaseModel):
 
 
 class AiGenerateArcChaptersRequest(BaseModel):
-    chapter_count: int = Field(default=5, ge=1, le=20)
+    chapter_count: int | None = Field(default=None, ge=1, le=20)
     instruction: str = ""
 
 

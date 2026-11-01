@@ -168,12 +168,12 @@ export function useContextPreview(
   });
 }
 
-export function useAiSmellScan(novelUid: string) {
+export function useAiSmellScan(novelUid: string, chapterId: number | null) {
   return useMutation({
     mutationFn: (text: string) =>
       apiRequest<AiSmellScanResult>(`/api/v1/novels/${novelUid}/ai-smell-scan`, {
         method: "POST",
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({ text, chapter_id: chapterId }),
       }),
   });
 }

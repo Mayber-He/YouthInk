@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import logging
 import time
 from typing import AsyncIterator
 import httpx
@@ -11,6 +12,8 @@ import httpx
 from app.core.exceptions import AppError
 from app.db.manager import get_novel_db
 from app.db.repositories.novel_repo import NovelRepository
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -80,10 +83,16 @@ async def complete_chat(
         async with httpx.AsyncClient(timeout=timeout_sec) as client:
             resp = await client.post(url, headers=headers, json=payload)
     except httpx.HTTPError as exc:
+        logger.exception(
+            "LLM request failed (model=%s, endpoint_host=%s)",
+            model,
+            httpx.URL(url).host,
+        )
+        error_summary = str(exc).strip() or "未提供详细错误信息"
         raise AppError(
             code="UPSTREAM_API_ERROR",
-            message=f"大模型接口连接失败: {exc}",
-            detail=str(exc),
+            message=f"大模型接口连接失败（{type(exc).__name__}）: {error_summary}",
+            detail=f"{type(exc).__name__}: {error_summary}",
             status_code=502,
         ) from exc
 
