@@ -216,24 +216,21 @@ def test_chapter_prompt_uses_outline_once_and_requires_clear_chinese(
         )
 
     assert user_prompt.count(synopsis) == 1
-    assert "这张纸，家里只有爸妈知道”对象错位" in user_prompt
+    # 瘦身后的生成指令保留文笔正面指导与两条关键硬约束，其余连续性禁令移到校对环节
     assert "普通动作用清楚直白的中文写" in user_prompt
-    assert "聊天界面提示必须按当前视角区分发起者和接收者" in user_prompt
-    assert "自己收到对方撤回的消息时，应写“对方撤回了一条消息”" in user_prompt
-    assert "若本章梗概要求重写前文已发生的事件或复用前文标志性原句，以前文为准" in user_prompt
-    assert "前文已出现的完整台词不得原样再次安排" in user_prompt
-    assert "故事时间只用于保持连贯，不要求每章开篇直接报日期或时间" in user_prompt
-    assert "相邻章节开头应改变切入方式" in user_prompt
-    assert "相对日期必须按当前场景的具体故事日期换算" in user_prompt
-    assert "日常动作只保留能推动情节或改变人物状态的部分" in user_prompt
-    assert "不要把收拾、做饭、等待等过程拆成连续的微动作清单" in user_prompt
-    assert "目标字数是参考，不得用重复心理、同义解释或无结果动作补足篇幅" in user_prompt
+    assert "每一段至少推进动作、对话、决定或关系中的一项" in user_prompt
+    assert "自己收到对方撤回的消息写“对方撤回了一条消息”" in user_prompt
+    assert "相对日期按当前场景的具体故事日期换算" in user_prompt
+    assert "不要把收拾、做饭、等待拆成连续的微动作清单" in user_prompt
+    assert "目标字数只是参考" in user_prompt
     assert "建议范围 2,000–2,800 字" in user_prompt
     assert "字数范围仅供参考，叙事完整、表达紧凑优先" in user_prompt
     assert "640–896 字" in scene_user_prompt
     assert "不得为达到下限补写流水账" in scene_user_prompt
-    assert "不得虚构上下文中没有发生过的旧对话或旧事件" in user_prompt
-    assert "不要让人物确认所有人都知道的常识" in user_prompt
+    # 已移除的冗长连续性禁令不应再出现在生成指令里
+    assert "这张纸，家里只有爸妈知道" not in user_prompt
+    assert "声线" not in user_prompt
+    assert "前文已出现的完整台词不得原样再次安排" not in user_prompt
 
 
 def test_next_chapter_prompt_includes_previous_chapter_synopsis(
