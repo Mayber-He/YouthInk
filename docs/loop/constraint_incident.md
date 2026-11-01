@@ -8,7 +8,7 @@
 
 定稿前备份 `backups/novel_20261101_115418_822725_finalize_ch_1.db` 中，以上 11 条约束均为 active，valid_until_chapter_id=NULL。当前库停用时间均为 2026-11-01 11:56:52（字段原值）。后续章节的 list_active_for_chapter 只读取 active/violated，所以这些约束已不再参与生效约束注入。
 
-调用链：ChapterFinalizerService._extract_chapter_memories → parse_extraction_items → _persist_extracted_memories → ConstraintRepository.create_constraint_check：定稿只创建 pending 检查。MemoryRepository.update_pending_item(action=confirm) → _apply_constraint_check_verdict：确认 resolved 后把 constraints.status 改为 resolved 并把有效期截止到该章。batch_update_pending 也会调用该确认路径。现有数据可以证明“已确认并停用”，不能单凭数据库区分当时是逐条还是批量确认，也不能归因成定稿自动确认。
+按当前工作区代码核对的调用链：ChapterFinalizerService._extract_chapter_memories → parse_extraction_items → _persist_extracted_memories → ConstraintRepository.create_constraint_check：定稿只创建 pending 检查。MemoryRepository.update_pending_item(action=confirm) → _apply_constraint_check_verdict：确认 resolved 后把 constraints.status 改为 resolved 并把有效期截止到该章。batch_update_pending 也会调用该确认路径。现有数据可以证明“已确认并停用”，但没有操作审计日志，不能单凭数据库区分当时是逐条还是批量确认，也不能证明历史服务使用了当前代码。记录的 origin/source_hash 表明抽取来源，不表示是谁或哪段历史代码将其设为 confirmed。因此既不能认定定稿自动确认，也不能据此认定用户手动确认；上面的当前调用链不是对历史操作者的归因。
 
 抽取提示词原要求“逐条判定、只输出 violated/resolved”，没有明确“未违反不输出”；解析又豁免了 constraint_checks 的逐字引文校验，因此把未违反误写为 resolved 的记录能进入待确认队列。这是本次修复范围。
 

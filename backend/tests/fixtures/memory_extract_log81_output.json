@@ -1,0 +1,294 @@
+{
+  "facts": [
+    {
+      "content": "八月末的闷热夜晚，江澈躺在床上举着手机。",
+      "fact_type": "state",
+      "character_names": ["江澈"],
+      "location_names": [],
+      "source_quote": "八月末的夜晚还是闷，江澈把凉席往床边拽了拽，后背贴上竹面，手机举在脸前。"
+    },
+    {
+      "content": "网友「吃一口软糖」给江澈发消息，说自己白天在江边站得腿都酸了。",
+      "fact_type": "event",
+      "character_names": ["江澈", "裴南栀"],
+      "location_names": [],
+      "source_quote": "聊天框里，「吃一口软糖」刚发来一条：你热不热啊，我今天在江边站得腿都酸了。"
+    },
+    {
+      "content": "「吃一口软糖」发来的照片拍的是江边步道台阶、落日江面和一艘小轮渡。",
+      "fact_type": "item",
+      "character_names": [],
+      "location_names": [],
+      "source_quote": "江边步道中段那截台阶，栏杆横着切过画面。太阳落在对岸楼群后面，整片江面被染成橙红，一艘轮渡恰好从光的边缘穿过去，在画面里只有拇指盖大小，拖一条长长的尾迹。"
+    },
+    {
+      "content": "裴南栀为拍到船与夕光刚好对上，提前查轮渡时刻表，在同一级台阶上带着水长时间等待。",
+      "fact_type": "event",
+      "character_names": ["裴南栀"],
+      "location_names": [],
+      "source_quote": "第二天我提前查了轮渡时刻表，站在同一级台阶上，还带了瓶水，站到脚都麻了，才等到船跟光刚好对上的一瞬间。"
+    },
+    {
+      "content": "江澈拒绝把自己的照片发给对方，称自己拍的全是废片。",
+      "fact_type": "event",
+      "character_names": ["江澈"],
+      "location_names": [],
+      "source_quote": "“不给。”江澈把那三个字发出去，又补了句，“我拍的全是废片，发了掉价。”"
+    },
+    {
+      "content": "江澈答应开学后补一张照片给「吃一口软糖」。",
+      "fact_type": "event",
+      "character_names": ["江澈", "裴南栀"],
+      "location_names": [],
+      "source_quote": "“行，欠你一张。”他打字，“开学补。”"
+    },
+    {
+      "content": "裴南栀问江澈开学后是否还会像现在这样理她，江澈明确表示不嫌她话多。",
+      "fact_type": "event",
+      "character_names": ["江澈", "裴南栀"],
+      "location_names": [],
+      "source_quote": "“没有可是。你这不叫话多，叫一打开就合不上，我习惯了。”他顿了顿，又补一句，“你要哪天真三天不吭声，我才得问问你是不是出什么事了。”"
+    },
+    {
+      "content": "裴南栀因自己“上头”而害羞，让江澈别当真。",
+      "fact_type": "event",
+      "character_names": ["裴南栀"],
+      "location_names": [],
+      "source_quote": "“哎你别当真啊。我瞎说的。刚有点上头了，你就当没看见。”"
+    },
+    {
+      "content": "江澈从裴南栀“别当真”的消息里看出别的意味，但没有戳破。",
+      "fact_type": "event",
+      "character_names": ["江澈", "裴南栀"],
+      "location_names": [],
+      "source_quote": "他从这几行字里看出点别的味儿来，但犯不着戳破。"
+    },
+    {
+      "content": "江澈回复晚安后，又补了一句“发消息就回”。",
+      "fact_type": "event",
+      "character_names": ["江澈", "裴南栀"],
+      "location_names": [],
+      "source_quote": "想了想，又加了一句：“发消息就回。”"
+    },
+    {
+      "content": "江澈在聊天里保存了裴南栀发来的江边黄昏照。",
+      "fact_type": "event",
+      "character_names": ["江澈", "裴南栀"],
+      "location_names": [],
+      "source_quote": "他在聊天里长按那张图，点了保存，相册图标右上角随即冒出一个小小的红色“1”。"
+    },
+    {
+      "content": "江澈又把那张江边黄昏照加入收藏。",
+      "fact_type": "event",
+      "character_names": ["江澈", "裴南栀"],
+      "location_names": [],
+      "source_quote": "他又点开相册看那张照片，拇指在收藏的小旗图标上停了一下，按下去，退回主屏——人家站了四十分钟才等到的画面，埋在相册底下可惜。"
+    },
+    {
+      "content": "江澈意识到聊了一个暑假，双方都没问、也没提各自读哪所学校、什么专业。",
+      "fact_type": "state",
+      "character_names": ["江澈"],
+      "location_names": [],
+      "source_quote": "聊了一个暑假，她读哪所学校、什么专业，他没问；自己报的哪儿，也没跟她提。"
+    },
+    {
+      "content": "江澈敲了半句问对方下周三有没有空，又删掉了。",
+      "fact_type": "event",
+      "character_names": ["江澈"],
+      "location_names": [],
+      "source_quote": "他敲了半句问她下周三有没有空，看了一眼又删掉。"
+    },
+    {
+      "content": "江澈决定明天先把柜顶的行李箱拽下来收拾。",
+      "fact_type": "event",
+      "character_names": ["江澈"],
+      "location_names": [],
+      "source_quote": "他按灭床头灯，摸黑把充电线往枕下拢了拢，决定明天先把柜顶那只箱子拽下来。"
+    }
+  ],
+  "state_changes": [
+    {
+      "character_name": "江澈",
+      "field": "emotion",
+      "value": "被裴南栀连串感叹号逗笑",
+      "source_quote": "江澈盯着那串感叹号笑了一下"
+    },
+    {
+      "character_name": "江澈",
+      "field": "goal",
+      "value": "答应开学后补一张照片给裴南栀",
+      "source_quote": "“行，欠你一张。”他打字，“开学补。”"
+    },
+    {
+      "character_name": "江澈",
+      "field": "goal",
+      "value": "决定明天先把柜顶的行李箱拽下来收拾",
+      "source_quote": "决定明天先把柜顶那只箱子拽下来。"
+    },
+    {
+      "character_name": "江澈",
+      "field": "item",
+      "value": "手机相册中保存了裴南栀发来的江边黄昏照",
+      "source_quote": "他在聊天里长按那张图，点了保存"
+    },
+    {
+      "character_name": "江澈",
+      "field": "item",
+      "value": "把裴南栀发来的江边黄昏照加入收藏",
+      "source_quote": "拇指在收藏的小旗图标上停了一下，按下去"
+    },
+    {
+      "character_name": "裴南栀",
+      "field": "emotion",
+      "value": "因江澈说不嫌她话多而放心、兴奋",
+      "source_quote": "啊啊那我就放心了！"
+    },
+    {
+      "character_name": "裴南栀",
+      "field": "emotion",
+      "value": "因自己上头而害羞，让江澈别当真",
+      "source_quote": "“哎你别当真啊。我瞎说的。刚有点上头了，你就当没看见。”"
+    }
+  ],
+  "cognitive_records": [
+    {
+      "secret": "裴南栀为拍船与夕光提前查轮渡时刻表，并在同一级台阶上长时间等待",
+      "knower_names": ["江澈"],
+      "learned_by": "裴南栀在聊天中讲述",
+      "source_quote": "第二天我提前查了轮渡时刻表，站在同一级台阶上，还带了瓶水，站到脚都麻了，才等到船跟光刚好对上的一瞬间。"
+    },
+    {
+      "secret": "裴南栀下周要去学校，觉得那地方太闷、规矩多、人说话端着，她待着难受",
+      "knower_names": ["江澈"],
+      "learned_by": "裴南栀在聊天中讲述",
+      "source_quote": "我下周就要去学校了。那个地方吧，也不能说不好，就是太闷了嘛。规矩特别多，人跟人说话都端着，我待着可难受了。"
+    },
+    {
+      "secret": "裴南栀担心开学后给江澈发消息不回、追问会烦，因此问他还理不理她",
+      "knower_names": ["江澈"],
+      "learned_by": "裴南栀在聊天中直接询问",
+      "source_quote": "“你开学以后还跟现在这样理我吗。”"
+    },
+    {
+      "secret": "江澈看出裴南栀说“别当真”时有别的意味，但没有戳破",
+      "knower_names": ["江澈"],
+      "learned_by": "观察聊天语气",
+      "source_quote": "他从这几行字里看出点别的味儿来，但犯不着戳破。"
+    },
+    {
+      "secret": "双方聊了一个暑假，却都没有问、也没有提各自读哪所学校、什么专业",
+      "knower_names": ["江澈"],
+      "learned_by": "江澈回想聊天内容",
+      "source_quote": "聊了一个暑假，她读哪所学校、什么专业，他没问；自己报的哪儿，也没跟她提。"
+    }
+  ],
+  "relationship_changes": [
+    {
+      "char_a_name": "江澈",
+      "char_b_name": "裴南栀",
+      "rel_type": "线上好友",
+      "intimacy": 7,
+      "publicity": "mutual",
+      "change_reason": "江澈明确表示不嫌裴南栀话多，并承诺发消息就回，双方线上关系更亲近",
+      "source_quote": "“没有可是。你这不叫话多，叫一打开就合不上，我习惯了。”他顿了顿，又补一句，“你要哪天真三天不吭声，我才得问问你是不是出什么事了。”"
+    }
+  ],
+  "foreshadowing": [
+    {
+      "description": "江澈与「吃一口软糖」聊了一个暑假却互不知道学校专业，同在一座城各自开学，可能成为后续碰面或身份揭晓的伏笔",
+      "status": "planted",
+      "plan_recover_start": null,
+      "plan_recover_end": null,
+      "source_quote": "聊了一个暑假，她读哪所学校、什么专业，他没问；自己报的哪儿，也没跟她提。同在一座城，各自开学，哪能那么巧就碰上。"
+    },
+    {
+      "description": "江澈答应开学后补一张照片给裴南栀，可能成为后续联系或见面的引子",
+      "status": "planted",
+      "plan_recover_start": null,
+      "plan_recover_end": null,
+      "source_quote": "“行，欠你一张。”他打字，“开学补。”"
+    },
+    {
+      "description": "江澈想问裴南栀下周三有没有空却删掉，留下未发出的邀约",
+      "status": "planted",
+      "plan_recover_start": null,
+      "plan_recover_end": null,
+      "source_quote": "他敲了半句问她下周三有没有空，看了一眼又删掉。"
+    },
+    {
+      "description": "江澈决定明天收拾柜顶行李箱，暗示开学临近",
+      "status": "planted",
+      "plan_recover_start": null,
+      "plan_recover_end": null,
+      "source_quote": "决定明天先把柜顶那只箱子拽下来。"
+    }
+  ],
+  "constraint_checks": [
+    {
+      "constraint_id": 1,
+      "verdict": "resolved",
+      "evidence_quote": "八月末的夜晚还是闷，江澈把凉席往床边拽了拽，后背贴上竹面，手机举在脸前。",
+      "description": "本章为开学前居家夜晚，未涉及报到或老校区认路，未违反。"
+    },
+    {
+      "constraint_id": 2,
+      "verdict": "resolved",
+      "evidence_quote": "聊天框里，「吃一口软糖」刚发来一条：你热不热啊，我今天在江边站得腿都酸了。",
+      "description": "本章仅线上聊天，无现实初次见面与称呼场景，未违反。"
+    },
+    {
+      "constraint_id": 3,
+      "verdict": "resolved",
+      "evidence_quote": "行李箱在衣柜顶上落灰，他这几天一直没仔细收拾。",
+      "description": "本章未写江澈任何消费行为，未违反。"
+    },
+    {
+      "constraint_id": 4,
+      "verdict": "resolved",
+      "evidence_quote": "江澈把手机往上举了举，点开原图看了两秒。",
+      "description": "本章无写代码或机房场景，未涉及技术水平表现，未违反。"
+    },
+    {
+      "constraint_id": 5,
+      "verdict": "resolved",
+      "evidence_quote": "聊了一个暑假，她读哪所学校、什么专业，他没问；自己报的哪儿，也没跟她提。",
+      "description": "江澈明确没有问对方学校与专业，也未提自己的；本章未出现他凭空知道对方私事。"
+    },
+    {
+      "constraint_id": 6,
+      "verdict": "resolved",
+      "evidence_quote": "“我那不是端，我那是不知道说什么。跟你说就……不一样啊。”",
+      "description": "本章为裴南栀与线上熟人的私聊，未与陌生新生现实接触，未违反。"
+    },
+    {
+      "constraint_id": 7,
+      "verdict": "resolved",
+      "evidence_quote": "聊天框里，「吃一口软糖」刚发来一条：你热不热啊，我今天在江边站得腿都酸了。",
+      "description": "本章仅展示「吃一口软糖」线上聊天，未在线下暴露身份或对陌生人使用线上语气，未违反。"
+    },
+    {
+      "constraint_id": 8,
+      "verdict": "resolved",
+      "evidence_quote": "第二天我提前查了轮渡时刻表，站在同一级台阶上，还带了瓶水，站到脚都麻了，才等到船跟光刚好对上的一瞬间。",
+      "description": "本章未写她购买昂贵器材或挥霍，只写自带水等待拍摄，未违反。"
+    },
+    {
+      "constraint_id": 9,
+      "verdict": "resolved",
+      "evidence_quote": "我下周就要去学校了。那个地方吧，也不能说不好，就是太闷了嘛。规矩特别多，人跟人说话都端着，我待着可难受了。",
+      "description": "本章未涉及校内场所指路或熟悉度表现，未违反。"
+    },
+    {
+      "constraint_id": 10,
+      "verdict": "resolved",
+      "evidence_quote": "我就怕到时候，我给你发消息你半天不回，我追问两句你就烦了，那我……",
+      "description": "本章情绪流露发生在与线上熟人的私聊中，未对陌生人或半熟人崩溃哭诉，未违反。"
+    },
+    {
+      "constraint_id": 11,
+      "verdict": "resolved",
+      "evidence_quote": "“你开学以后还跟现在这样理我吗。”",
+      "description": "裴南栀通过询问确认江澈开学后是否还理她，未表现读心或凭空判断江澈想法。"
+    }
+  ]
+}

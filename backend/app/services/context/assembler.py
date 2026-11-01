@@ -16,6 +16,7 @@ from app.db.vector_store import NovelVectorStore
 from app.schemas.writing import ContextBlockItem, ContextPreviewResponse
 from app.services.embedding.encoder import encode_text_sync
 from app.services.llm.client import estimate_tokens
+from app.services.context.memory_selection import select_memory_rows
 from app.services.story_time import time_anchor
 from app.services.rag.dedup import filter_history_hits
 
@@ -358,7 +359,7 @@ class ContextAssembler:
               AND (f.origin = 'manual' OR f.planted_chapter_id IS NULL OR
                    (f.origin = 'extracted' AND f.source_hash = c.content_hash
                     AND c.status = 'final' AND c.continuity_review_required = 0))
-            ORDER BY f.id DESC LIMIT 8
+            ORDER BY c.sort_order DESC, f.id DESC
             """
         ).fetchall()
         fact_rows = self._conn.execute(
@@ -371,10 +372,18 @@ class ContextAssembler:
                    (f.origin = 'extracted' AND f.source_hash = c.content_hash
                     AND c.status = 'final' AND c.continuity_review_required = 0))
               AND (c.sort_order IS NULL OR c.sort_order <= ?)
-            ORDER BY f.id DESC LIMIT 10
+            ORDER BY c.sort_order DESC, (f.status = 'locked') DESC, f.id DESC
             """,
             (ch.sort_order,),
         ).fetchall()
+        # Recency comes first; locked facts are the existing explicit importance
+        # signal within a chapter. Filter before capping so duplicates can backfill.
+        summary_texts = (
+            [str(row["content"]) for row in sum_rows]
+            if "summaries_and_prev" not in disabled else []
+        )
+        fs_rows = select_memory_rows(fs_rows, summary_texts, "description", 4)
+        fact_rows = select_memory_rows(fact_rows, summary_texts, "content", 6)
         fs_lines = [f"• [伏笔-{r['status']}] {r['description']}" for r in fs_rows] + [
             f"• [已确认事实] {r['content']}" for r in fact_rows
         ]

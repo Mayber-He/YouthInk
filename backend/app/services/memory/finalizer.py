@@ -37,7 +37,8 @@ logger = logging.getLogger(__name__)
 # 单独抽成常量以便测试断言提示词覆盖了全部六类与关键字段名。
 MEMORY_EXTRACTION_SCHEMA_GUIDE = (
     "必须严格输出下列六个数组字段的 JSON 对象（无多余字段），每个元素字段名必须与下方完全一致：\n"
-    "1) facts（本章发生的客观事实）：\n"
+    "1) facts（最多 8 条，只收对后续剧情有影响的关系变化、承诺、秘密、关键物品和地点状态）：\n"
+    "   不收看相册、收藏照片等一次性动作；同义内容只保留一条，不把同一事件拆成多条。\n"
     '   {"content": "事实描述", "fact_type": "event|item|place|state|other", '
     '"character_names": ["涉及角色名"], "location_names": ["涉及地点名"], '
     '"source_quote": "正文原句（逐字）"}\n'
@@ -52,7 +53,7 @@ MEMORY_EXTRACTION_SCHEMA_GUIDE = (
     '   {"char_a_name": "角色A", "char_b_name": "角色B", "rel_type": "关系类型", '
     '"intimacy": 0-10 的整数, "publicity": "public|mutual|one_sided", '
     '"change_reason": "变化原因", "source_quote": "正文原句（逐字）"}\n'
-    "5) foreshadowing（伏笔）：\n"
+    "5) foreshadowing（只收有明确回收可能的伏笔；普通情绪、日常动作和已结束事件不算伏笔）：\n"
     '   {"description": "伏笔描述", "status": "planted|hinted|recovered", '
     '"plan_recover_start": 章号或null, "plan_recover_end": 章号或null, '
     '"source_quote": "正文原句（逐字）"}\n'
