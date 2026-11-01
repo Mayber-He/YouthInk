@@ -509,6 +509,7 @@ class SettingGeneratorService:
             layer5_instruction=inst,
             layer6_format=fmt,
             schema_cls=LlmChapterBatchOutput,
+            timeout_sec=180.0,
         )
         if not parsed.chapters or len(parsed.chapters) > 20:
             raise AppError(
@@ -546,6 +547,7 @@ class SettingGeneratorService:
                 )
             ),
             schema_cls=LlmChapterBatchOutput,
+            timeout_sec=180.0,
         )
         if (
             not audit.chapters
