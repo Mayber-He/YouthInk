@@ -266,9 +266,18 @@ class ContextAssembler:
             sum_lines.append(
                 f"【上一章《{prev_row['title']}》梗概（事实与剧情连续性依据）】{prev_row['synopsis']}"
             )
-        prev_content = str(prev_row["latest_content"] or "") if prev_is_fresh else ""
-        if prev_content:
-            sum_lines.append(prev_content)
+        prev_full = str(prev_row["latest_content"] or "").strip() if prev_is_fresh else ""
+        if prev_full:
+            # 只喂上一章结尾片段用于衔接语气与承接悬念；完整事实依据由上一章梗概提供。
+            # 不喂全文，避免模型模仿上一章句式造成文风遗传放大，也控制上下文体量。
+            tail_chars = 1500
+            if len(prev_full) > tail_chars:
+                prev_tail = "……\n" + prev_full[-tail_chars:]
+            else:
+                prev_tail = prev_full
+            sum_lines.append(
+                f"【上一章《{prev_row['title']}》结尾片段（仅用于衔接语气与承接悬念，完整事实以上方梗概为准）】\n{prev_tail}"
+            )
         next_row = self._conn.execute(
             "SELECT title, synopsis FROM chapters WHERE sort_order > ? ORDER BY sort_order ASC LIMIT 1",
             (ch.sort_order,),
@@ -277,7 +286,7 @@ class ContextAssembler:
             sum_lines.append(
                 f"【下一章《{next_row['title']}》梗概（仅作边界，本章严禁提前写入）】{next_row['synopsis']}"
             )
-        if prev_row or prev_content or next_row:
+        if prev_row or prev_full or next_row:
             sum_lines.append(
                 "⚠️ 跨章衔接边界：①上一章已交代的信息，仅实际在场、收到消息或被告知的角色知晓；不得将叙述者知识分配给所有角色，也不得让已知情者再次把它当成新消息；"
                 "上一章梗概与结尾正文是连续性事实来源；角色首次得知某信息的时间，以其中明确写出的场景为准，"

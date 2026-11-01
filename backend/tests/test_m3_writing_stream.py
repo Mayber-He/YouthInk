@@ -236,7 +236,7 @@ def test_chapter_prompt_uses_outline_once_and_requires_clear_chinese(
 def test_next_chapter_prompt_includes_previous_chapter_synopsis(
     client: TestClient, setup_chapter: tuple[str, int, int]
 ) -> None:
-    uid, _previous_chapter_id, _ = setup_chapter
+    uid, previous_chapter_id, _ = setup_chapter
     previous_synopsis = "林夏第一次在放学后独自值班试音，偶遇走错门的陆川。"
     outline = client.get(f"/api/v1/novels/{uid}/outline").json()
     arc_id = outline["volumes"][0]["arcs"][0]["id"]
@@ -260,8 +260,10 @@ def test_next_chapter_prompt_includes_previous_chapter_synopsis(
 
     assert "上一章梗概" in user_prompt
     assert previous_synopsis in user_prompt
-    assert previous_opening in user_prompt
+    # 生成上下文只喂上一章结尾片段（约 1500 字），不喂全文：结尾在、开头被截掉
+    assert "结尾片段" in user_prompt
     assert previous_ending in user_prompt
+    assert previous_opening not in user_prompt
     assert "不得把人物卡里的背景设定当作角色过去已听过的内容" in user_prompt
     assert "回复涉及未来日期的提醒时，必须先核对当前章日期" in user_prompt
     assert "时间尚未到，不得写成已经出发、到达或完成" in user_prompt
