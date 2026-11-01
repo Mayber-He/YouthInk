@@ -39,8 +39,6 @@ export const OutlineSection: React.FC<OutlineSectionProps> = ({ novelUid }) => {
 
   const { setSelectedChapterId, setActiveSection } = useUiStore();
 
-  const [volCount, setVolCount] = useState(3);
-  const [arcsPerVol, setArcsPerVol] = useState(2);
   const [aiInstruction, setAiInstruction] = useState("");
   const [errMsg, setErrMsg] = useState<string | null>(null);
   const [arcToRegenerate, setArcToRegenerate] = useState<ArcTreeNode | null>(null);
@@ -75,15 +73,18 @@ export const OutlineSection: React.FC<OutlineSectionProps> = ({ novelUid }) => {
 
   const handleGenerateStructure = async () => {
     setErrMsg(null);
+    setSelectedChapterId(null);
     try {
       await genStructureMut.mutateAsync({
-        volume_count: volCount,
-        arcs_per_volume: arcsPerVol,
         instruction: aiInstruction,
       });
-      setSelectedChapterId(null);
     } catch (err) {
-      setErrMsg(err instanceof Error ? err.message : "生成分卷与情节弧失败");
+      const message = err instanceof Error ? err.message : "生成分卷与情节弧失败";
+      setErrMsg(
+        err instanceof TypeError
+          ? `${message}；未收到后端响应，无法确认清空状态。请确认后端服务已启动，连接恢复后刷新目录再重试。`
+          : `${message}；旧目录已清空，请重试生成或手动新建。`
+      );
     }
   };
 
@@ -175,31 +176,9 @@ export const OutlineSection: React.FC<OutlineSectionProps> = ({ novelUid }) => {
 
       {/* AI 生成分卷与情节弧 */}
       <div className="flex flex-wrap items-center gap-2.5 rounded-xl border border-indigo-200/80 bg-indigo-50/50 p-3.5 text-xs dark:border-indigo-900/50 dark:bg-indigo-950/30">
-        <span className="font-medium text-slate-700 dark:text-slate-300">
-          分卷数：
-        </span>
-        <input
-          type="number"
-          min={1}
-          max={10}
-          value={volCount}
-          onChange={(e) => setVolCount(Number(e.target.value) || 3)}
-          className="w-14 rounded-lg border border-slate-300 bg-white px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
-        />
-        <span className="font-medium text-slate-700 dark:text-slate-300">
-          每卷情节弧：
-        </span>
-        <input
-          type="number"
-          min={1}
-          max={6}
-          value={arcsPerVol}
-          onChange={(e) => setArcsPerVol(Number(e.target.value) || 2)}
-          className="w-14 rounded-lg border border-slate-300 bg-white px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
-        />
         <input
           type="text"
-          placeholder="可选：补充结构偏好（如：按高一上、高二、高三毕业三阶段划分）"
+          placeholder="可选：补充结构偏好（如：按高一上、高二、高三毕业等阶段组织）"
           value={aiInstruction}
           onChange={(e) => setAiInstruction(e.target.value)}
           className="flex-1 rounded-lg border border-slate-300 bg-white px-3 py-1.5 dark:border-slate-700 dark:bg-slate-900"
@@ -215,13 +194,13 @@ export const OutlineSection: React.FC<OutlineSectionProps> = ({ novelUid }) => {
             <Sparkles className="h-3.5 w-3.5" />
           )}
           {tree.volumes.length > 0
-            ? "清空并重新生成分卷与情节弧"
-            : "AI 生成分卷与情节弧"}
+            ? "清空并按故事结构重新生成"
+            : "AI 按故事结构生成分卷与情节弧"}
         </Button>
       </div>
 
       <p className="-mt-4 text-xs text-slate-500">
-        章节数按本弧的独立事件和剧情转折规划；没有新推进的日常过场会合并处理。
+        分卷与情节弧数量由模型根据故事阶段和剧情转折决定，不要求各卷平均拆分；重复或没有独立推进的内容会在复核时合并。
       </p>
 
       {errMsg && (
@@ -233,7 +212,7 @@ export const OutlineSection: React.FC<OutlineSectionProps> = ({ novelUid }) => {
       {tree.volumes.length === 0 ? (
         <EmptyState
           title="尚未规划分卷与章节目录"
-          description="点击上方「AI 生成分卷与情节弧」，随后在每个情节弧内一键滚动生成章节目录。"
+          description="点击上方「AI 按故事结构生成分卷与情节弧」，随后在每个情节弧内一键生成章节目录。"
         />
       ) : (
         <div className="space-y-6">
@@ -311,7 +290,7 @@ export const OutlineSection: React.FC<OutlineSectionProps> = ({ novelUid }) => {
         onClose={() => setConfirmStructureReset(false)}
         onConfirm={() => void handleGenerateStructure()}
         title="清空并重新生成全书目录？"
-        description={`现有 ${tree.volumes.length} 卷、${allArcs.length} 条情节弧、${tree.total_chapters} 章将全部清除；其中 ${allChapters.filter((chapter) => chapter.word_count > 0).length} 章已有正文，${allChapters.filter((chapter) => chapter.status === "final").length} 章已定稿。章节版本、场景、章节记忆、摘要和向量索引也会清除。只有新结构生成并校验成功后才会替换；生成失败时现有内容保留。`}
+        description={`确认后会立即清除现有 ${tree.volumes.length} 卷、${allArcs.length} 条情节弧和 ${tree.total_chapters} 章；其中 ${allChapters.filter((chapter) => chapter.word_count > 0).length} 章已有正文，${allChapters.filter((chapter) => chapter.status === "final").length} 章已定稿。章节版本、场景、章节记忆、摘要和向量索引也会清除。无论后续生成或复核是否成功，旧目录都不会恢复；失败时目录保持为空。`}
         confirmText="清空并重新生成"
         confirmVariant="danger"
       />

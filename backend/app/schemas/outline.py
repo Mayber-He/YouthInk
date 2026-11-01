@@ -125,8 +125,6 @@ class OutlineTreeResponse(BaseModel):
 # --- AI Outline Generation Schemas ---
 
 class AiGenerateStructureRequest(BaseModel):
-    volume_count: int = Field(default=3, ge=1, le=10)
-    arcs_per_volume: int = Field(default=2, ge=1, le=6)
     instruction: str = ""
 
 
@@ -136,22 +134,22 @@ class AiGenerateArcChaptersRequest(BaseModel):
 
 
 class LlmArcPlanItem(BaseModel):
-    title: str
-    goal: str = ""
-    core_conflict: str = ""
+    title: str = Field(min_length=1)
+    goal: str = Field(min_length=1)
+    core_conflict: str = Field(min_length=1)
     start_chapter: int | None = None
     end_chapter: int | None = None
 
 
 class LlmVolumePlanItem(BaseModel):
-    title: str
-    synopsis: str = ""
-    goal: str = ""
-    arcs: list[LlmArcPlanItem] = Field(default_factory=list)
+    title: str = Field(min_length=1)
+    synopsis: str = Field(min_length=1)
+    goal: str = Field(min_length=1)
+    arcs: list[LlmArcPlanItem] = Field(min_length=1, max_length=6)
 
 
 class LlmStructureOutput(BaseModel):
-    volumes: list[LlmVolumePlanItem]
+    volumes: list[LlmVolumePlanItem] = Field(min_length=1, max_length=10)
 
 
 class LlmChapterPlanItem(BaseModel):

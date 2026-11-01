@@ -38,6 +38,7 @@ from app.db.vector_store import NovelVectorStore
 from app.services.llm.client import complete_chat
 from app.services.llm.json_parser import parse_and_validate_json
 from app.services.prompt.renderer import assemble_six_layer_prompt, render_template
+from app.services.prompt.planning_knowledge import PLANNING_KNOWLEDGE_RULES, PLANNING_TASKS
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -97,8 +98,20 @@ class SettingGeneratorService:
         layer5_instruction: str,
         layer6_format: str,
         schema_cls: type[T],
+        timeout_sec: float = 60.0,
     ) -> T:
         layer1, layer2, layer3 = self._build_base_layers()
+        if task_type in PLANNING_TASKS:
+            characters = self._entity_repo.list_characters()
+            sources = [{
+                "name": c.name, "background": c.background,
+                "arc_design": c.arc_design, "speech_style": c.speech_style,
+            } for c in characters]
+            layer4_context += (
+                "\n【人物经历与交流渠道依据；未写明的渠道不得自行补设】\n"
+                + json.dumps(sources, ensure_ascii=False)
+            )
+            layer5_instruction += "\n" + PLANNING_KNOWLEDGE_RULES
         sys_msg, user_msg = assemble_six_layer_prompt(
             layer1_system_role=layer1,
             layer2_style_template=layer2,
@@ -116,6 +129,7 @@ class SettingGeneratorService:
             system_prompt=sys_msg,
             user_prompt=user_msg,
             temperature=0.7,
+            timeout_sec=timeout_sec,
             novel_uid=self._novel_uid,
             task_type=task_type,
         )
@@ -132,6 +146,7 @@ class SettingGeneratorService:
                     f"格式要求：{layer6_format}\n\n待修复文本：\n{broken_text}"
                 ),
                 temperature=0.1,
+                timeout_sec=timeout_sec,
                 novel_uid=self._novel_uid,
                 task_type=f"{task_type}_json_repair",
             )
@@ -340,13 +355,25 @@ class SettingGeneratorService:
             layer6_format=fmt,
             schema_cls=LlmMainPlotOutput,
         )
-        return self._entity_repo.apply_generated_main_plot(parsed)
+        audited = await self._call_and_parse_json(
+            task_type="review_main_plot",
+            layer4_context=context + "\n【待复核主线初稿】\n" + parsed.model_dump_json(),
+            layer5_instruction=(
+                "在保存前核对主线各转折的因果与角色信息获取顺序，尤其身份识别的证据是否真的可被该角色获得。"
+                "逐项检查从网友到现实初见的渠道边界；修正缺少依据的识别线索及关联转折描述。"
+                "保持主线方向和无问题内容，输出修正后的完整主线。\n作者附加要求：" + instruction
+            ),
+            layer6_format=fmt,
+            schema_cls=LlmMainPlotOutput,
+        )
+        return self._entity_repo.apply_generated_main_plot(audited)
 
     # --- 5. Outline (Volumes + Arcs + Rolling Chapters per Arc) ---
 
-    async def generate_outline_structure(
-        self, volume_count: int = 3, arcs_per_volume: int = 2, instruction: str = ""
-    ) -> OutlineTreeResponse:
+    async def generate_outline_structure(self, instruction: str = "") -> OutlineTreeResponse:
+        self._outline_repo.clear_generated_structure()
+        NovelVectorStore(self._novel_uid).clear_all_vectors()
+
         novel = self._novel_repo.get_novel_detail()
         main_plot = self._entity_repo.get_main_plot()
         chars = self._entity_repo.list_characters()
@@ -357,13 +384,19 @@ class SettingGeneratorService:
             f"主要人物：{json.dumps([c.name for c in chars], ensure_ascii=False)}"
         )
         inst = (
-            f"请为《{novel.title}》规划 {volume_count} 个分卷（Volume），每个分卷包含 {arcs_per_volume} 个情节弧（Arc）。"
+            f"请为《{novel.title}》规划完整的分卷（Volume）与情节弧（Arc），根据故事阶段、主线转折和因果推进自行决定数量。"
+            "全书规划 1 至 10 卷，每卷规划 1 至 6 条情节弧；不同卷的情节弧数量可以不同，不要平均分配或为了达到某个数量拆分剧情。"
+            "每卷应代表清楚可辨的故事阶段、目标变化或主要局势转折；每条情节弧必须有自己的目标、核心冲突和阶段性结果，"
+            "并推动人物、关系或主线至少一项发生实质变化。相邻情节弧不能只是同一事件的不同步骤、重复铺陈或改写标题；"
+            "准备、等待、重复确认等没有独立结果的过场应合并到相关情节弧。卷与弧按故事因果顺序排列，避免重复、遗漏关键转折或凭空添加支线。"
         )
         if instruction:
-            inst += f"\n作者附加要求：{instruction}"
+            inst += (
+                f"\n作者结构偏好（供参考；最终卷数和各卷弧数仍须按故事实际推进决定，不得为满足固定数量拆分剧情）：{instruction}"
+            )
 
         fmt = (
-            '请输出纯 JSON 对象，格式示例：\n'
+            '请输出纯 JSON 对象，卷数为 1 至 10，每卷包含 1 至 6 条情节弧，各卷弧数可不同。\n'
             '{"volumes": [{"title": "第一卷：盛夏入场券", "synopsis": "卷梗概", "goal": "卷目标", '
             '"arcs": [{"title": "第一弧：开学风波", "goal": "弧目标", "core_conflict": "弧冲突", '
             '"start_chapter": 1, "end_chapter": 10}]}]}'
@@ -374,19 +407,31 @@ class SettingGeneratorService:
             layer5_instruction=inst,
             layer6_format=fmt,
             schema_cls=LlmStructureOutput,
+            timeout_sec=180.0,
         )
-        if (
-            len(parsed.volumes) != volume_count
-            or any(len(volume.arcs) != arcs_per_volume for volume in parsed.volumes)
-        ):
-            raise AppError(
-                "OUTLINE_STRUCTURE_INVALID",
-                f"分卷规划应包含 {volume_count} 卷、每卷 {arcs_per_volume} 条情节弧；本次结果不符合要求，原目录未更改。",
-                status_code=502,
-            )
-        tree = self._outline_repo.replace_generated_structure(parsed.volumes)
-        # The full outline reset removes every chapter, so no chapter vector remains valid.
-        NovelVectorStore(self._novel_uid).clear_all_vectors()
+        audit = await self._call_and_parse_json(
+            task_type="review_outline_structure",
+            layer4_context=(
+                f"{context}\n\n【待复核的分卷与情节弧初稿】\n"
+                f"{json.dumps([volume.model_dump() for volume in parsed.volumes], ensure_ascii=False)}"
+            ),
+            layer5_instruction=(
+                "复核这份全书结构是否忠于给定主线和关键转折。逐卷检查它是否代表清晰且不同的故事阶段或局势变化；"
+                "逐弧检查目标、冲突、阶段性结果及其因果顺序。找出只重复同一事件、只改写标题、把一件事拆成多个步骤、"
+                "或没有独立剧情结果的相邻卷/弧，并合并或调整；同时避免合并掉有独立冲突、选择或关系变化的重要内容。"
+                "允许按故事需要改变卷数和各卷弧数，不要求平均拆分；不得为了凑数新增无关剧情，不得改变核心人物关系和主线方向。"
+                "如果初稿已经合理，则原样返回。只输出复核后的完整结构。"
+            ),
+            layer6_format=(
+                '只输出纯 JSON：{"volumes": [{"title": "卷标题", "synopsis": "卷梗概", "goal": "卷目标", '
+                '"arcs": [{"title": "弧标题", "goal": "弧目标", "core_conflict": "弧冲突", '
+                '"start_chapter": 1, "end_chapter": 10}]}]}。最终须为 1 至 10 卷，每卷 1 至 6 条情节弧；'
+                "各卷弧数可不同，并按故事因果顺序排列。"
+            ),
+            schema_cls=LlmStructureOutput,
+            timeout_sec=180.0,
+        )
+        tree = self._outline_repo.insert_generated_structure(audit.volumes)
         return tree
 
     async def generate_arc_chapters(
@@ -395,6 +440,7 @@ class SettingGeneratorService:
         arc = self._outline_repo.get_arc(arc_id)
         vol = self._outline_repo.get_volume(arc.volume_id)
         main_plot = self._entity_repo.get_main_plot()
+        characters = self._entity_repo.list_characters()
         tree = self._outline_repo.get_outline_tree()
         earlier_chapters = []
         found_arc = False
@@ -420,6 +466,8 @@ class SettingGeneratorService:
             f"所属分卷：{vol.title}（{vol.synopsis}）\n"
             f"当前情节弧：{arc.title} | 目标：{arc.goal} | 核心冲突：{arc.core_conflict}\n"
             f"全书主线冲突：{main_plot.core_conflict}\n"
+            "人物卡中的既有经历与人物弧线（章节事实约束）："
+            f"{json.dumps([{'name': c.name, 'role': c.role, 'background': c.background, 'arc_design': c.arc_design} for c in characters], ensure_ascii=False)}\n"
             "本弧之前最近且当前有效的已定稿章节（最多三章，仅作为新大纲的前文锚点）："
             f"{json.dumps([{'title': c.title, 'story_time': c.story_time, 'synopsis': c.synopsis} for c in anchor_chapters], ensure_ascii=False)}"
         )
@@ -433,7 +481,7 @@ class SettingGeneratorService:
             "【章节拆分与节奏】每章围绕一个有实质结果的核心事件，说明角色选择/状态变化及其后果；冲突升级、关键决定、关系转折应留出充分展开空间。"
             "准备、等待、重复确认等没有独立事件结果的过场应合并进相邻章节，不单独拆章。相邻章节必须各自带来新信息、选择、冲突或状态变化，"
             "不能只把同一件事拆成连续步骤。梗概只交代推动正文所需的因果，不堆叠动作清单。"
-            "【人物状态时序优先级】人物卡和全书梗概中的人物背景描述属于故事初始设定；以上前文锚点中明确发生的事件、对话和人物认知代表当前剧情状态。两者冲突时必须以后者为准，不能让人物认知倒退。"
+            "【人物经历与关系连续性】人物卡中的既有经历、关系历史与人物弧线是已经确定的故事事实，必须遵守；不能把已经认识、交谈或建立联系的人物重新写成初次见面、首次加好友或首次得知对方。人物背景仅不代表其他角色自动知晓这些信息，不代表作者可以忽略这些事实。前文锚点中更晚发生的明确事件可更新人物卡所述的较早状态；没有更新记录时，必须遵守人物卡。若某个情节目标与人物既有经历冲突，调整情节安排，不得改写人物历史。"
             "例如，若前文已写明江澈得知对方就读临江大学，人物卡里“从没问过学校”只代表更早阶段，后续不得再安排他询问学校或校区，除非剧情明确出现需要确认的新校区。\n"
             "【跨章连贯要求】①每章必须有区别于相邻章节的新核心事件或关系推进，不得把同一段对话、建议、情绪反应拆写到两章；"
             "标志性台词、具体建议和已发生动作只能在首次发生的章节完整呈现，后续章节不得换个说法再次演一遍。"
@@ -481,9 +529,9 @@ class SettingGeneratorService:
                 f"{json.dumps([chapter.model_dump() for chapter in parsed.chapters], ensure_ascii=False)}"
             ),
             layer5_instruction=(
-                "在保存前核对待生成章节与给出的前文锚点、以及待生成章节彼此之间的剧情连续性和拆章节奏。"
+                "在保存前核对待生成章节与给出的前文锚点、人物卡既有经历/关系，以及待生成章节彼此之间的剧情连续性和拆章节奏。"
                 "重点检查人物已经知道的信息是否被重新询问或重新揭示、同一事件/动作是否重复、日期和相对时间是否冲突。"
-                "人物卡与全书梗概中的初始状态不得覆盖前文锚点确立的后续状态。检查是否把纯过场拆成独立章节；"
+                "人物卡里的既有关系不得被写成首次认识或首次加好友；人物卡的作者信息不代表POV已知，但其明确经历仍是故事事实。更晚的前文锚点可以更新较早人物状态。检查是否把纯过场拆成独立章节；"
                 "若是自适应章数规划，可合并没有独立推进的相邻章节；若用户指定了章数，必须保持章节数量不变。"
                 "若发现问题，只修改有问题章节的必要部分；保持顺序和无问题章节原文。"
                 "若没有问题，原样返回全部章节。"

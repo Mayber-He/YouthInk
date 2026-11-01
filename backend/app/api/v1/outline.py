@@ -136,8 +136,6 @@ async def generate_structure(
     svc: SettingGeneratorService = Depends(get_setting_generator),
 ) -> OutlineTreeResponse:
     return await svc.generate_outline_structure(
-        volume_count=payload.volume_count,
-        arcs_per_volume=payload.arcs_per_volume,
         instruction=payload.instruction,
     )
 

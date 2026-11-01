@@ -170,11 +170,7 @@ export function useDeleteChapter(novelUid: string) {
 export function useGenerateStructure(novelUid: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (input: {
-      volume_count?: number;
-      arcs_per_volume?: number;
-      instruction?: string;
-    }) =>
+    mutationFn: (input: { instruction?: string }) =>
       apiRequest<OutlineTree>(
         `/api/v1/novels/${novelUid}/outline/generate-structure`,
         {
@@ -182,7 +178,19 @@ export function useGenerateStructure(novelUid: string) {
           body: JSON.stringify(input),
         }
       ),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["novels", novelUid] }),
+    onMutate: async () => {
+      await qc.cancelQueries({ queryKey: outlineKeys.tree(novelUid) });
+      qc.setQueryData<OutlineTree>(outlineKeys.tree(novelUid), {
+        volumes: [],
+        total_chapters: 0,
+      });
+    },
+    onSettled: async () => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: outlineKeys.tree(novelUid) }),
+        qc.invalidateQueries({ queryKey: novelKeys.detail(novelUid) }),
+      ]);
+    },
   });
 }
 

@@ -544,10 +544,7 @@ class OutlineRepository:
 
     # --- AI Batch Structure & Rolling Arc Chapters ---
 
-    def replace_generated_structure(
-        self, volumes_plan: list[LlmVolumePlanItem]
-    ) -> OutlineTreeResponse:
-        """Replace all volumes/arcs and remove chapter-derived content."""
+    def _delete_generated_structure(self) -> None:
         chapter_ids = [
             int(row["id"])
             for row in self._conn.execute("SELECT id FROM chapters ORDER BY sort_order, id").fetchall()
@@ -555,6 +552,16 @@ class OutlineRepository:
         self._clear_chapter_derived_data(chapter_ids)
         self._conn.execute("DELETE FROM summaries")
         self._conn.execute("DELETE FROM volumes")
+
+    def clear_generated_structure(self) -> None:
+        """Permanently clear the current outline before a regeneration attempt."""
+        self._delete_generated_structure()
+        self._conn.commit()
+
+    def insert_generated_structure(
+        self, volumes_plan: list[LlmVolumePlanItem]
+    ) -> OutlineTreeResponse:
+        """Insert a validated structure after the old outline was cleared."""
         for v_item in volumes_plan:
             vol = self.create_volume(
                 VolumeCreate(title=v_item.title, synopsis=v_item.synopsis, goal=v_item.goal)
