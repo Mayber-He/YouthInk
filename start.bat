@@ -7,15 +7,15 @@ echo ==============================================
 echo   YouthInk Workbench - Starting Server
 echo ==============================================
 
-if not exist "backend\static\index.html" (
-    echo [1/2] Building frontend static assets...
-    pushd "%~dp0frontend"
-    if not exist "node_modules" call npm install
-    call npm run build
+echo [1/2] Building frontend static assets...
+pushd "%~dp0frontend"
+if not exist "node_modules" call npm install
+call npm run build
+if errorlevel 1 (
     popd
-) else (
-    echo [1/2] Frontend static assets ready.
+    exit /b 1
 )
+popd
 
 echo [2/2] Starting FastAPI on http://localhost:8000 ...
 set "PYTHONPATH=%~dp0backend"
