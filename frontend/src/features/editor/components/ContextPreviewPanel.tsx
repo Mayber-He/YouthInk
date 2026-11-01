@@ -27,6 +27,11 @@ export const ContextPreviewPanel: React.FC<ContextPreviewPanelProps> = ({
 
   return (
     <div className="space-y-4 text-xs">
+      {preview.warnings?.map((warning) => (
+        <p key={warning} role="alert" className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+          {warning}
+        </p>
+      ))}
       <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-800/40">
         <div className="flex items-center justify-between font-semibold">
           <span>上下文 Token 预算</span>

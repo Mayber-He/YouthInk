@@ -116,6 +116,7 @@ class ContextPreviewResponse(BaseModel):
     total_tokens: int
     budget_tokens: int = 24000
     blocks: list[ContextBlockItem]
+    warnings: list[str] = Field(default_factory=list)
 
 
 # --- T5: scene repetition check / one-shot rewrite ---

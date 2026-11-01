@@ -251,7 +251,7 @@ class ChapterFinalizerService:
         return f"【《{title}》章节摘要】" + content[:240].replace("\n", " ")
 
     def _build_extraction_prompt(
-        self, title: str, content: str, char_names: list[str], constraint_lines: str
+        self, title: str, content: str, char_names: list[str], constraint_lines: str, story_time: str = ""
     ) -> str:
         constraint_section = (
             f"\n\n本章生效中的硬约束清单（仅报告真实违反或剧情正式解除，其余不输出）：\n{constraint_lines}\n"
@@ -261,6 +261,10 @@ class ChapterFinalizerService:
         return (
             f"请从章节《{title}》正文中抽取结构化设定变更与记忆条目。\n"
             f"已知角色（请只使用这些角色名）：{', '.join(char_names) or '无'}\n\n"
+            f"本章发生时间：{story_time or '未指定'}\n"
+            "state_changes、facts、foreshadowing 中明天/下周/过几天等相对时间，"
+            "必须改写成相对本章时间（story_time）的次日/下一周/数日后，或可确定的具体日期；"
+            "不得把相对时间原样写入跨章记忆，无法确定日期时不得猜补年份或日期。\n"
             f"{MEMORY_EXTRACTION_SCHEMA_GUIDE}"
             f"{constraint_section}\n\n"
             f"章节正文：\n{content[:5000]}"
@@ -291,7 +295,7 @@ class ChapterFinalizerService:
             for c in active_constraints
         )
         base_prompt = self._build_extraction_prompt(
-            title, content, char_names, constraint_lines
+            title, content, char_names, constraint_lines, story_time=ch.story_time or ""
         )
 
         try:

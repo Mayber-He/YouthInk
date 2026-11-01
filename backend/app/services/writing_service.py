@@ -438,6 +438,12 @@ class WritingService:
         # strip the "【上一章《…》完整正文】" header line so it is not treated as prose
         previous_chapter = raw_prev.split("\n", 1)[1] if raw_prev.startswith("【") and "\n" in raw_prev else raw_prev
         must_not = split_must_not_include(scene.beat) if scene else []
+        from app.services.story_time import story_time_gap
+        prev_time = self._conn.execute(
+            'SELECT story_time FROM chapters WHERE sort_order < ? ORDER BY sort_order DESC, id DESC LIMIT 1',
+            (ch.sort_order,),
+        ).fetchone()
+        gap = story_time_gap(str(prev_time['story_time'] or ''), ch.story_time or '') if prev_time else None
 
         _, base_url, model, api_key = self._settings_repo.get_credentials_for_task("writing")
 
@@ -482,6 +488,7 @@ class WritingService:
             rewrite_fn=_rewrite,
             record_fn=_record,
             auto_rewrite=auto_rewrite,
+            story_time_gap_days=gap,
         )
 
     async def check_write_boundary(self, req: StreamWriteRequest) -> str:

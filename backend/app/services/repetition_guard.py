@@ -129,6 +129,8 @@ class RepetitionReport:
     dialogues: list[ReusedDialogue] = field(default_factory=list)
     action_hits: list[ActionPhraseHit] = field(default_factory=list)
     forbidden_hits: list[ForbiddenHit] = field(default_factory=list)
+    time_hits: list[str] = field(default_factory=list)
+    story_time_gap_days: int | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -136,6 +138,8 @@ class RepetitionReport:
     def describe_for_model(self, max_items: int = 8) -> str:
         """Concrete, quotable list of what to avoid when rewriting (fed back to the model)."""
         lines: list[str] = []
+        if self.time_hits:
+            lines.append(f'- 与上一章相隔 {self.story_time_gap_days} 天，正文出现“{"、".join(self.time_hits)}”；请核对日期，不能用这些词指称上一章的事件，改用具体日期或准确的时间间隔。')
         for dl in self.dialogues[:max_items]:
             where = "上一章" if dl.source == "previous_chapter" else "本章前文"
             lines.append(f"- 整句台词与{where}重复：「{dl.text}」")
@@ -301,12 +305,19 @@ def analyze_scene_repetition(
     chapter_so_far: str = "",
     must_not_include: list[str] | None = None,
     config: RepetitionConfig | None = None,
+    story_time_gap_days: int | None = None,
 ) -> RepetitionReport:
     """Run all three checks on a freshly generated scene and decide whether it is over threshold."""
     cfg = config or RepetitionConfig()
     report = RepetitionReport()
     if not cfg.enabled or not (scene_text or "").strip():
         return report
+
+    report.story_time_gap_days = story_time_gap_days
+    if story_time_gap_days is not None and story_time_gap_days > 1:
+        report.time_hits = [word for word in ('昨晚', '昨天', '昨夜') if word in scene_text]
+        if report.time_hits:
+            report.reasons.append(f'与上一章相隔 {story_time_gap_days} 天，疑似相对时间错位：' + '、'.join(report.time_hits))
 
     cov_prev, spans_prev = find_reused_spans(scene_text, previous_chapter, cfg.ngram, "previous_chapter")
     cov_here, spans_here = find_reused_spans(scene_text, chapter_so_far, cfg.ngram, "chapter_so_far")

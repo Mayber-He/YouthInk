@@ -42,6 +42,7 @@ def _severity(report: RepetitionReport) -> int:
         + len([s for s in report.spans if s.length >= 10]) * 2
         + len(report.action_hits)
         + len(report.forbidden_hits) * 3
+        + len(report.time_hits) * 3
     )
 
 
@@ -65,6 +66,7 @@ async def run_repetition_pipeline(
     rewrite_fn: RewriteFn,
     record_fn: RecordFn | None = None,
     auto_rewrite: bool | None = None,
+    story_time_gap_days: int | None = None,
 ) -> dict:
     """Run the full flow. Returns a dict matching ``RepetitionCheckResponse``."""
     allow_rewrite = config.auto_rewrite if auto_rewrite is None else auto_rewrite
@@ -77,6 +79,7 @@ async def run_repetition_pipeline(
             chapter_so_far=chapter_so_far,
             must_not_include=must_not_include,
             config=config,
+            story_time_gap_days=story_time_gap_days,
         )
 
     def _record(stage: str, action: str, rep: RepetitionReport) -> int | None:

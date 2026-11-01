@@ -49,6 +49,7 @@ export interface ContextPreview {
   total_tokens: number;
   budget_tokens: number;
   blocks: ContextBlockItem[];
+  warnings?: string[];
 }
 
 export interface AiSmellHit {

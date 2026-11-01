@@ -16,6 +16,7 @@ from app.db.vector_store import NovelVectorStore
 from app.schemas.writing import ContextBlockItem, ContextPreviewResponse
 from app.services.embedding.encoder import encode_text_sync
 from app.services.llm.client import estimate_tokens
+from app.services.story_time import time_anchor
 
 _MENTION_RE = re.compile(r"@([^\s，,。；;！!？?\n]+)")
 
@@ -244,7 +245,7 @@ class ContextAssembler:
         ]
         prev_row = self._conn.execute(
             """
-            SELECT c.id, c.title, c.synopsis, c.continuity_review_required,
+            SELECT c.id, c.title, c.synopsis, c.story_time, c.continuity_review_required,
                    c.content_hash, cv.content AS latest_content
             FROM chapters c
             LEFT JOIN chapter_versions cv ON cv.id = (
@@ -255,6 +256,10 @@ class ContextAssembler:
             """,
             (ch.sort_order,),
         ).fetchone()
+        time_note, time_warnings = time_anchor(
+            str(prev_row['story_time'] or '') if prev_row else None, ch.story_time or '',
+        )
+        sum_lines.append(time_note)
         prev_is_fresh = bool(
             prev_row
             and not prev_row["continuity_review_required"]
@@ -389,6 +394,7 @@ class ContextAssembler:
             total_tokens=total_tokens,
             budget_tokens=24000,
             blocks=blocks,
+            warnings=time_warnings,
         )
 
     @staticmethod
