@@ -45,7 +45,12 @@ export function useStreamGenerate(novelUid: string) {
       },
       onChunk: (delta: string) => void,
       onComplete?: (fullGenerated: string) => void,
-      onMeta?: (meta: { model: string; context_tokens: number }) => void,
+      onMeta?: (meta: {
+        model: string;
+        context_tokens: number;
+        boundary_status?: "ok" | "skipped" | "failed";
+        boundary_note?: string;
+      }) => void,
       onInterrupted?: () => void
     ) => {
       stopStream();

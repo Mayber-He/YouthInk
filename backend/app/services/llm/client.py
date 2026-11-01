@@ -161,10 +161,14 @@ async def stream_chat_sse(
     template_ver: str | None = None,
     chapter_id: int | None = None,
     scene_id: int | None = None,
+    meta_extra: dict[str, object] | None = None,
 ) -> AsyncIterator[str]:
     """
     Yield standard YouthInk SSE events (meta, delta, done, error) per Dev Doc 5.2.
     Always records generation_logs even if stopped midway.
+
+    ``meta_extra`` is merged into the first ``meta`` frame (e.g. a user-visible notice that a
+    pre-generation check did not run). It never overrides the core meta keys.
     """
     url = build_chat_completions_url(base_url)
     messages = []
@@ -174,10 +178,9 @@ async def stream_chat_sse(
 
     context_tokens = estimate_tokens(system_prompt + user_prompt)
     gen_id = int(time.time() * 1000) % 1_000_000
-    yield _sse_event(
-        "meta",
-        {"generation_id": gen_id, "model": model, "context_tokens": context_tokens},
-    )
+    meta_payload: dict[str, object] = {**(meta_extra or {})}
+    meta_payload.update({"generation_id": gen_id, "model": model, "context_tokens": context_tokens})
+    yield _sse_event("meta", meta_payload)
 
     headers = {
         "Authorization": f"Bearer {api_key}",

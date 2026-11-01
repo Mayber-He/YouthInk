@@ -23,8 +23,12 @@ async def stream_write_prose(
         settings_repo = SettingsRepository(global_conn)
         _, base_url, model, api_key = settings_repo.get_credentials_for_task("writing")
         svc = WritingService(novel_uid, novel_conn, settings_repo)
-        boundary = await svc.check_write_boundary(payload)
+        boundary, boundary_status, boundary_note = await svc.check_write_boundary_ex(payload)
         sys_prompt, user_prompt = svc.prepare_stream_write_prompts(payload, boundary)
+
+    meta_extra: dict[str, object] = {"boundary_status": boundary_status}
+    if boundary_note:
+        meta_extra["boundary_note"] = boundary_note
 
     event_gen = stream_chat_sse(
         base_url=base_url,
@@ -37,6 +41,7 @@ async def stream_write_prose(
         task_type="write_scene" if payload.mode == "scene" else "write_chapter",
         chapter_id=payload.chapter_id,
         scene_id=payload.scene_id,
+        meta_extra=meta_extra,
     )
     return StreamingResponse(
         event_gen,

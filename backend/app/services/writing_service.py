@@ -485,7 +485,21 @@ class WritingService:
         )
 
     async def check_write_boundary(self, req: StreamWriteRequest) -> str:
-        from app.services.writing_boundary import check_writing_boundary
+        """Back-compat wrapper: returns only the text to inject (``''`` when nothing to inject)."""
+        text, _status, _note = await self.check_write_boundary_ex(req)
+        return text
+
+    async def check_write_boundary_ex(self, req: StreamWriteRequest) -> tuple[str, str, str]:
+        """Run the continuity check; return ``(text, status, note)``.
+
+        status:
+          * ``ok``      – check ran; ``text`` is the lean injection.
+          * ``skipped`` – nothing to check against (opening chapter / no prior prose). Not an error.
+          * ``failed``  – the check could NOT run (timeout, unparseable reply, no credentials …).
+                          ``note`` is the user-visible "衔接检查未生效" message; ``text`` is ``''``.
+        A fabricated-evidence verdict (``BOUNDARY_EVIDENCE_MISMATCH``) still aborts with an error.
+        """
+        from app.services.writing_boundary import check_writing_boundary, unavailable_notice
         from app.services.prompt.author_style import author_style_prompt
 
         ch = self._outline_repo.get_chapter(req.chapter_id)
@@ -501,20 +515,29 @@ class WritingService:
             f"作者补充：{req.instruction}\n{req.custom_context}\n"
             + author_style_prompt(self._novel_repo.get_novel_detail())
         )
-        # 衔接检查只是生成前的参考：格式解析失败/超时等技术性故障降级为空，不阻断正文生成；
+        # 衔接检查只是生成前的参考：格式解析失败/超时等技术性故障降级，不阻断正文生成；
         # 但证据与前文不匹配（模型幻觉引用了不存在的原文）是有意义的警报，保留中止。
+        # 降级时不再静默：写 warning 日志，并把“衔接检查未生效”带给调用方显示。
         from app.core.exceptions import AppError
+
+        if not history.strip():
+            return "", "skipped", ""  # 开篇章节，没有前文可衔接：正常，不是故障
         try:
-            return await check_writing_boundary(
+            text = await check_writing_boundary(
                 novel_uid=self._novel_uid, chapter_id=req.chapter_id, settings=self._settings_repo,
                 history=history, plan=plan,
             )
+            return text, "ok", ""
         except AppError as e:
             if e.code == "BOUNDARY_EVIDENCE_MISMATCH":
                 raise
-            return ""
-        except Exception:
-            return ""
+            reason = f"{e.code}: {e.message}"
+        except Exception as e:  # noqa: BLE001 - any technical failure degrades, never blocks writing
+            reason = f"{type(e).__name__}: {e}"
+        _scene_logger.warning(
+            "衔接检查未生效 (chapter_id=%s scene_id=%s): %s", req.chapter_id, req.scene_id, reason
+        )
+        return "", "failed", unavailable_notice(reason[:120])
 
     def prepare_stream_rewrite_prompts(self, req: StreamRewriteRequest) -> tuple[str, str]:
         """Build (system_prompt, user_prompt) for selection rewrite/expand/shorten/polish/tone_shift."""

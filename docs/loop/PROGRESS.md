@@ -200,6 +200,44 @@ foreshadowing 用 `content` 而非 `description`。
     完整历史在 `repetition_checks` 表。
   - 检测只覆盖“逐场景流式写作”路径；整章一次性生成（`mode=chapter`）与改写/补写不检测。
 
-### T6 衔接检查结果瘦身 [待做]
+### T6 衔接检查结果瘦身 [完成]
+- [x] 注入正文请求的内容改为两样：**“本场景从这里接”**（`next_step` 的第一句，≤80 字，引号内的句号不算句末）
+      + **“已写过、不要再写”**（短语清单，≤8 条、每条 ≤24 字、去重）。不再注入 `evidence_quote`
+      原文、不再注入 `established` 清单、不再注入 `next_step` 后面那段“下一段可写…”的具体剧本。
+      `evidence_quote` 仍只用于**幻觉校验**（`BOUNDARY_EVIDENCE_MISMATCH` 照旧中止），校验完不再注入。
+- [x] **短语由检查模型直接给**：检查提示词新增 `avoid` 字段（≤20 字名词性短语，不写评语）。
+      schema 里 `avoid` 默认空，旧输出/模型没给时走**保守回退**（见下“重要发现”）。
+- [x] **检查失败不再静默**：`check_write_boundary_ex` 返回 `(text, status, note)`，状态 `ok / skipped / failed`。
+      `skipped`=开篇章节无前文（正常，不提示）；`failed`=技术故障 → 写 `logger.warning("衔接检查未生效 …")`，
+      并经 SSE 首帧 `meta.boundary_status/boundary_note` 送到前端，界面显示琥珀色提示条“衔接检查未生效…”。
+      生成**不被阻断**。旧的 `check_write_boundary()` 保留，返回值语义不变（兼容现有测试）。
+- [x] 开关：`YOUTHINK_BOUNDARY_SLIM`（默认开；=0 恢复整段 JSON 注入）。
+- 改动文件：
+  - 改 `backend/app/services/writing_boundary.py`（精简格式、短语质检、`avoid` 字段、新提示词）
+  - 改 `backend/app/services/writing_service.py`（`check_write_boundary_ex`）、`app/api/v1/stream.py`
+    （meta 带 boundary 状态）、`app/services/llm/client.py`（`stream_chat_sse` 增可选 `meta_extra`）
+  - 改前端 `lib/sse.ts`、`features/editor/hooks/useStreamGenerate.ts`、`WritingWorkbench.tsx`（提示条）
+  - 新增 `backend/tests/test_boundary_slim.py`、`tests/fixtures/boundary_real_outputs.json`（16 条真实输出）
+- 验证结果：
+  - 新增 21 测试全过；全量 `pytest tests`：**116 passed / 5 failed**（5 个为基线既有失败，无新增）；前端 `tsc --noEmit` 通过。
+  - 做了变异检查：故意破坏“引号内标点屏蔽”和“泄漏 evidence”两处，对应测试确实变红，还原后全绿。
+  - 真实数据（16 次真实检查）注入体量：**均值 2487 字 → 约 120 字（-95%）**，最大 3304 → 217。
+  - 失败可见性有测试：模型回非 JSON / 上游 500 → `failed` + 日志含“衔接检查未生效”+ SSE 首帧带提示，且正文仍照常流出；
+    编造证据 → 仍 502 中止；开篇章节 → `skipped` 且无提示。
+- **重要发现（需你知晓）**：
+  - 我最初想用正则把 `repeated_events.statement` 压成短语，在 62 条真实语句上测下来**不可靠**：
+    约 1/5 产出为空或残片（如“要写的”“江澈已经问过”），有的会**反向误导**
+    （“计划要写 A，但前文已写 B，不能写 A”压成“写 A”，模型反而会去写 A）。
+    原因是这个字段本质是模型写的“判断+理由”评语，不是素材名词。所以改为让检查模型直接产出 `avoid`，
+    并把回退路径收紧到“宁缺毋滥”：含否定/条件/建议措辞的、被截断的、带评语词的一律不注入。
+  - 因此**回退路径（旧格式输出，没有 `avoid`）只能保住约 1/3 的条目**：62 条里 19 条可用，
+    16 次检查里有 10 次最后没有任何“已写过”清单（只剩“从哪里接”）。这是有意的取舍，不是 bug；
+    新的检查提示词上线后，模型会直接给 `avoid`，预期明显改善——但**我无法在不调真实 LLM 的前提下验证
+    真实模型是否会稳定输出合格的 `avoid`**，需要你实际跑几章后看日志 `writing_boundary` 的输出确认。
+- 遗留问题 / 需人工确认：
+  - `established`（已确立事实）不再注入。理由：它占注入体量约一半，且这些事实已在“本章已写前文/上一章结尾”里原文存在。
+    若你发现续写出现前后矛盾（楼层、物品状态），可 `YOUTHINK_BOUNDARY_SLIM=0` 恢复完整注入对比。
+  - 检查模型的提示词改了（要求首句写落点 + 输出 `avoid`），会影响 `writing_boundary` 任务的真实输出，上线后请抽查。
+  - 前端提示条只提示“未生效”，未提供一键重试；刷新/切章会清除。
 
 ### T7 日志与流式结束判定 [待做]

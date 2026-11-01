@@ -4,6 +4,10 @@ export interface SseMetaEvent {
   generation_id: number;
   model: string;
   context_tokens: number;
+  /** 生成前衔接检查状态：ok 已生效 | skipped 无前文可衔接（正常） | failed 未生效 */
+  boundary_status?: "ok" | "skipped" | "failed";
+  /** boundary_status 为 failed 时给用户看的说明（“衔接检查未生效…”） */
+  boundary_note?: string;
 }
 
 export interface SseDoneEvent {

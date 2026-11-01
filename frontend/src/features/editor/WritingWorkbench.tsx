@@ -84,6 +84,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
     text: string;
     details: string[];
   } | null>(null);
+  const [boundaryNotice, setBoundaryNotice] = useState<string | null>(null);
   const contentRef = useRef(content);
   contentRef.current = content;
 
@@ -251,6 +252,10 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
           if (currentChapterRef.current !== effectiveChapterId) return;
           setStreamModelName(meta.model);
           setPipelineStep("connecting");
+          // T6：衔接检查没跑成时不再静默——提示用户本次生成没有“从哪里接/已写过哪些”的参考。
+          if (meta.boundary_status === "failed") {
+            setBoundaryNotice(meta.boundary_note || "衔接检查未生效，请留意是否重复前文。");
+          }
         },
         () => resolve(null)
       );
@@ -263,6 +268,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
     setReviewResult(null);
     setReviewError(null);
     setRepetitionNotice(null);
+    setBoundaryNotice(null);
     setPipelineStep("assembling");
     const chapterId = effectiveChapterId;
     const originalContent = content;
@@ -322,6 +328,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
     setReviewResult(null);
     setReviewError(null);
     setRepetitionNotice(null);
+    setBoundaryNotice(null);
     setPipelineStep("assembling");
     const chapterId = effectiveChapterId;
     const originalContent = content;
@@ -644,6 +651,19 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
         {streamError && (
           <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
             {streamError}
+          </div>
+        )}
+
+        {boundaryNotice && (
+          <div className="mt-3 flex items-start justify-between gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+            <span>⚠️ {boundaryNotice}</span>
+            <button
+              type="button"
+              className="shrink-0 cursor-pointer text-[11px] underline"
+              onClick={() => setBoundaryNotice(null)}
+            >
+              知道了
+            </button>
           </div>
         )}
 
