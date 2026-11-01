@@ -14,6 +14,10 @@ export interface SseDoneEvent {
   input_tokens: number;
   output_tokens: number;
   elapsed_ms: number;
+  /** 上游结束原因：stop 正常 | length 撞长度上限被截断 | content_filter 被过滤 | null 上游没给 */
+  finish_reason?: string | null;
+  /** true = 输出已知不完整（length / content_filter）。不能当作成功完成。旧后端无此字段，视为 false。 */
+  truncated?: boolean;
 }
 
 export interface SseErrorEvent {

@@ -159,13 +159,16 @@ class NovelRepository:
         template_ver: str | None = None,
         chapter_id: int | None = None,
         scene_id: int | None = None,
+        temperature: float | None = None,
+        finish_reason: str | None = None,
     ) -> int:
         cur = self._conn.execute(
             """
             INSERT INTO generation_logs (
                 task_type, model, template_id, template_ver, prompt, output,
-                input_tokens, output_tokens, elapsed_ms, chapter_id, scene_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                input_tokens, output_tokens, elapsed_ms, chapter_id, scene_id,
+                temperature, finish_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 task_type,
@@ -179,6 +182,8 @@ class NovelRepository:
                 elapsed_ms,
                 chapter_id,
                 scene_id,
+                temperature,
+                finish_reason,
             ),
         )
         return int(cur.lastrowid)

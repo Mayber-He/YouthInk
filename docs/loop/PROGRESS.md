@@ -3,6 +3,31 @@
 > 工作约定：每轮只做一个任务；mock/固定样本，不调真实 LLM；不动现有小说数据；
 > schema 改动必须向后兼容（只加列/加表、带默认值），改前已备份。
 
+## 总览（T1–T7 全部完成）
+
+| 任务 | 状态 | 提交 | 要点 |
+|---|---|---|---|
+| T1 记忆抽取 | 完成 | 3861d38 | 逐条容错 + 引文逐字校验 + 重试 + 兜底(待确认) + 前端失败标记 |
+| T2 约束/人物状态 | 完成 | 2fc5227 | 按章过滤补测（字段与逻辑原本就有）+ 起点快照文案 + 只读审计脚本 |
+| T3 场景事件清单 | 完成 | 129664d | 事件清单拼进 `scenes.beat`（零迁移）+ 相邻重复校验/重拆 + 章梗概改写 |
+| T4 提示词精简重排 | 完成* | 25d7d5f | 铁律 -62.6%；**整条 prompt 仅 -16.9%（未达 30%）** |
+| T5 重复检测+重写 | 完成 | 2f69a69 | 新表 `repetition_checks`；阈值是小样本标定，有已知误报 |
+| T6 衔接检查瘦身 | 完成 | f264fd7 | 注入体量 -95%；检查失败可见；回退路径只保住约 1/3 条目 |
+| T7 日志与结束判定 | 完成 | （本次） | 新增 2 列；`length` 截断前端不当成功；前端无自动化测试 |
+
+**全量测试**：基线 36 passed / 5 failed → 现在 **146 passed / 5 failed**（新增 110 个测试；那 5 个是改动前就存在的失败，无新增）。
+**真实库**：始终只读；已逐表比对，内容与改动前快照一致。三次备份在 `backend/data/_loop_backups/`（已被 .gitignore 忽略）。
+
+### 需要你人工确认 / 处理的事项（按重要性）
+1. **T4 的“降低至少 30%”**：我按“铁律文字”口径判定达标（-62.6%）；按整条 prompt 口径只有 -16.9%，**未达标**。你的本意若是后者，需另开任务压缩上下文块。
+2. **所有真实模型行为都没验证过**（规则禁止调真实 LLM）：T1 新提示词能否让真实模型输出合规字段、T3 事件清单质量、T5 重写质量、T6 的 `avoid` 字段是否稳定输出——请实际跑几章后抽查对应 `generation_logs`。
+3. **T5 阈值是在 4 个章节上标定的**，存在已知误报（故意的跨章呼应会被判重复）。看 `repetition_checks` 表再调；嫌打扰设 `YOUTHINK_REPEAT_AUTO_REWRITE=0`。
+4. **前端改动没有自动化测试，也没在浏览器里实跑**（只过了 `tsc`）：T1 的失败标记、T5 的重复提示条、T6 的“衔接检查未生效”提示条、T7 的截断处理。请手动走一遍。
+5. **已有 global.db 里的 `generate_scenes` 提示词模板仍是旧版**（种子 `INSERT OR IGNORE` 不会覆盖）；T3 的事件清单要求写在代码里所以不受影响，但界面“提示词模板”页显示的是旧文案。
+6. **新 schema 会在你下次启动后端时自动应用到真实库**：`repetition_checks` 新表、`generation_logs` 新增两列（均为只加、可空/带默认、幂等）。我没有在真实库上执行过迁移，只在副本上验证。
+7. **超出任务字面的几处决定**，请确认是否接受：T4 把“主角概念”也封顶 300 字；T6 不再注入 `established`；T7 把 `content_filter` 也当截断；T1 里 `constraint_checks` 的证据豁免逐字校验。
+8. 仍存在的 5 个基线失败（M2 时间线/滚动大纲、M3 AI 腔扫描、M5 百章压测）不是本轮引入，也没有修。
+
 ## 环境与基线
 
 - 后端：FastAPI + SQLite 双库（global.db + 每部作品 novel.db），Python 3.12。
@@ -240,4 +265,36 @@ foreshadowing 用 `content` 而非 `description`。
   - 检查模型的提示词改了（要求首句写落点 + 输出 `avoid`），会影响 `writing_boundary` 任务的真实输出，上线后请抽查。
   - 前端提示条只提示“未生效”，未提供一键重试；刷新/切章会清除。
 
-### T7 日志与流式结束判定 [待做]
+### T7 日志与流式结束判定 [完成]
+- [x] `generation_logs` 新增 `temperature REAL`、`finish_reason TEXT`（**可空，不回填**）。新库建表即带列；
+      旧库启动时由幂等的 `ALTER TABLE ADD COLUMN` 补上。旧行保持 NULL = “当时没有记录”，
+      没有编造成 `stop`。流式和非流式（`complete_chat`）都记录。
+- [x] 流式区分结束原因：解析 `choices[0].finish_reason` 并归一化（`max_tokens` 等别名 → `length`）。
+      `done` 帧新增 `finish_reason` 和 `truncated`（`length`/`content_filter` 为 true）。
+      `truncated` 时服务端仍正常发 `done`（不是 error），由前端据此决定不当成功。
+- [x] 前端不再把截断当成功：`useStreamGenerate` 的写正文 / 改写 / 补充三条路径遇到 `truncated`
+      **都不走成功回调**——写正文走“中断”分支（还原原稿、不保存、不自动审查、整章循环停下，
+      不让半截文本当上文喂给下一个场景）；改写不替换选区；补充不当候选。并显示明确原因
+      （长度上限 / 内容过滤）。
+- 改动文件：
+  - 改 `backend/app/services/llm/client.py`（`normalize_finish_reason` / `is_truncated`，流式+非流式解析与落库）
+  - 改 `backend/app/db/init_schema.py`（建表列 + 迁移）、`app/db/repositories/novel_repo.py`（落库参数）
+  - 改前端 `lib/sse.ts`、`features/editor/hooks/useStreamGenerate.ts`
+  - 新增 `backend/tests/test_finish_reason.py`
+- 备份：迁移前新建 `backend/data/_loop_backups/20261101-191746/`（integrity ok）。迁移在**真实库副本**上验证：
+  新增 2 列、64 条既有日志逐字节不变、旧行新列全 NULL、已有表行数零变化、幂等。**未对真实库写入**。
+- 验证结果：
+  - 新增 30 测试全过，含你要求的两种结束情况（`stop` 正常、`length` 截断）；全量 `pytest tests`：
+    **146 passed / 5 failed**（5 个为基线既有失败，无新增）；前端 `tsc --noEmit` 通过。
+  - 变异检查：故意改坏 3 处（未知值当 stop、同帧 finish_reason 读不到、从不判截断），11 个测试变红，还原后全绿。
+  - 覆盖的真实世界边角：finish_reason 与正文在同一帧；末尾单独的 usage 帧（choices 为空）；
+    上游从不发 finish_reason（按未知处理、不误报截断）；畸形帧；上游连接中断（记为 `error`）。
+- 遗留问题 / 需人工确认：
+  - **前端没有单元测试框架**（无 vitest/jest），`useStreamGenerate` 的截断分支只过了 `tsc` 类型检查，
+    **没有自动化测试，也没在浏览器里实跑过**。建议你手动验证一次：把某场景目标字数/模型最大输出调到很小
+    触发 `length`，确认出现“因达到长度上限被截断…已保留原稿”提示且正文没有被保存。
+  - 上游若**从不发** finish_reason，截断无法被发现（只能当成功）——这是协议限制，不是 bug。
+  - 非流式调用（记忆抽取、大纲、场景拆分等）只**记录** finish_reason 并在被截断时打 warning，
+    **没有改变行为**（不抛错、不重试）。被 length 截断的 JSON 仍会在解析层失败，但现在日志里能直接看到原因。
+  - 暂无读取 `generation_logs` 的接口/界面，`temperature`/`finish_reason` 目前只能查库看到。
+  - 内容过滤（`content_filter`）我也按“截断”处理了，任务只要求 `length`，这是顺手加的，需要你确认是否接受。

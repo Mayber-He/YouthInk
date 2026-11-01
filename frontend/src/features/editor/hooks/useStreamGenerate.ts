@@ -11,6 +11,13 @@ interface StreamMetrics {
   elapsedMs: number;
 }
 
+/** 被截断时给用户看的说明（length=撞长度上限；content_filter=被安全策略过滤）。 */
+function truncationMessage(reason: string, what: string, kept: string): string {
+  return reason === "content_filter"
+    ? `${what}内容被模型安全策略截断，结果不完整，${kept}。请调整要求后重试。`
+    : `${what}因达到长度上限被截断，结果不完整，${kept}。请缩短范围或在模型设置里调高最大输出长度后重试。`;
+}
+
 export function useStreamGenerate(novelUid: string) {
   const abortRef = useRef<AbortController | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -61,6 +68,9 @@ export function useStreamGenerate(novelUid: string) {
       let accumulated = "";
       let completed = false;
       let hadError = false;
+      // T7：服务端告知输出被截断（length / content_filter）。这种“流正常结束但内容不完整”
+      // 不能走成功路径，否则半截正文会被保存、审查，并作为上文喂给下一个场景。
+      let truncatedReason: string | null = null;
 
       try {
         await consumeSseStream(
@@ -84,6 +94,7 @@ export function useStreamGenerate(novelUid: string) {
             },
             onDone: (done) => {
               completed = true;
+              if (done.truncated) truncatedReason = done.finish_reason ?? "length";
               setMetrics((prev) => ({
                 model: prev?.model ?? "",
                 contextTokens: done.input_tokens,
@@ -104,11 +115,17 @@ export function useStreamGenerate(novelUid: string) {
         }
       } finally {
         if (abortRef.current === controller) {
-          if (accumulated && completed && !hadError && !controller.signal.aborted) {
+          if (accumulated && completed && !hadError && !controller.signal.aborted && !truncatedReason) {
             await onComplete?.(accumulated);
           } else {
             onInterrupted?.();
-            if (!hadError && !controller.signal.aborted) setStreamError("生成未完整结束，已保留原稿，请重试。");
+            if (!hadError && !controller.signal.aborted) {
+              setStreamError(
+                truncatedReason
+                  ? truncationMessage(truncatedReason, "生成", "已保留原稿")
+                  : "生成未完整结束，已保留原稿，请重试。"
+              );
+            }
           }
           if (abortRef.current === controller) {
             setIsStreaming(false);
@@ -137,6 +154,7 @@ export function useStreamGenerate(novelUid: string) {
       setIsStreaming(true);
       setStreamError(null);
       let accumulated = "";
+      let truncatedReason: string | null = null;
 
       try {
         await consumeSseStream(
@@ -147,12 +165,18 @@ export function useStreamGenerate(novelUid: string) {
             onDelta: (delta) => {
               accumulated += delta;
             },
+            onDone: (done) => {
+              if (done.truncated) truncatedReason = done.finish_reason ?? "length";
+            },
             onError: (err) => {
               setStreamError(err.message);
             },
           }
         );
-        if (accumulated.trim()) {
+        // 改写结果会替换选区并自动保存新版本：被截断的半截文本绝不能走这条路径。
+        if (truncatedReason) {
+          setStreamError(truncationMessage(truncatedReason, "改写", "原文未被替换"));
+        } else if (accumulated.trim()) {
           onResult(accumulated.trim());
         }
       } catch (err) {
@@ -186,6 +210,7 @@ export function useStreamGenerate(novelUid: string) {
       setStreamError(null);
       let accumulated = "";
       let hadError = false;
+      let truncatedReason: string | null = null;
 
       try {
         await consumeSseStream(
@@ -206,6 +231,7 @@ export function useStreamGenerate(novelUid: string) {
               onChunk(delta);
             },
             onDone: (done) => {
+              if (done.truncated) truncatedReason = done.finish_reason ?? "length";
               setMetrics((prev) => ({
                 model: prev?.model ?? "",
                 contextTokens: done.input_tokens,
@@ -227,7 +253,10 @@ export function useStreamGenerate(novelUid: string) {
       } finally {
         setIsStreaming(false);
         abortRef.current = null;
-        if (!hadError && !controller.signal.aborted && accumulated.trim()) {
+        if (truncatedReason && !hadError && !controller.signal.aborted) {
+          // 补充内容是需要用户确认的候选；被截断的候选不当作“生成完成”呈现。
+          setStreamError(truncationMessage(truncatedReason, "补充", "候选未被采用"));
+        } else if (!hadError && !controller.signal.aborted && accumulated.trim()) {
           onComplete(accumulated.trim());
         }
       }

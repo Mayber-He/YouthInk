@@ -348,6 +348,8 @@ CREATE TABLE IF NOT EXISTS generation_logs (
     elapsed_ms      INTEGER,
     chapter_id      INTEGER REFERENCES chapters(id) ON DELETE SET NULL,
     scene_id        INTEGER REFERENCES scenes(id) ON DELETE SET NULL,
+    temperature     REAL,
+    finish_reason   TEXT,
     created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -558,6 +560,8 @@ def _migrate_novel_memory_revision_columns(conn: sqlite3.Connection) -> None:
             "is_stale": "INTEGER NOT NULL DEFAULT 0",
         },
         "consistency_reviews": {"content_hash": "TEXT", "upstream_hash": "TEXT"},
+        # T7：只加可空列、不回填。旧行为 NULL = "当时没有记录"，比编造默认值（如 'stop'）诚实。
+        "generation_logs": {"temperature": "REAL", "finish_reason": "TEXT"},
     }
     for table, table_columns in columns.items():
         existing = {str(row[1]) for row in conn.execute(f'PRAGMA table_info("{table}")')}

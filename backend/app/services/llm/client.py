@@ -23,6 +23,34 @@ class LlmCompletionResult:
     input_tokens: int
     output_tokens: int
     elapsed_ms: int
+    # 上游给出的结束原因（已归一化，见 normalize_finish_reason）；None = 上游没给 / 未知。
+    finish_reason: str | None = None
+
+
+# 上游各家对“因长度上限被截断”的叫法不一；统一成 'length'，其余原样（小写）保留。
+_LENGTH_REASONS = {"length", "max_tokens", "max_output_tokens", "max_length", "token_limit"}
+# 这些结束原因意味着输出**不完整**，不能当作成功完成：length=撞上限被截断；content_filter=被安全过滤截断。
+TRUNCATING_REASONS = frozenset({"length", "content_filter"})
+
+
+def normalize_finish_reason(raw: object) -> str | None:
+    """Map a provider ``finish_reason`` to a stable value.
+
+    * ``None`` / empty / non-string -> ``None`` (the provider said nothing; do NOT assume 'stop').
+    * ``length`` aliases (``max_tokens`` …) -> ``'length'``.
+    * anything else is lower-cased and kept (``stop``, ``content_filter``, ``tool_calls`` …).
+    """
+    if not isinstance(raw, str):
+        return None
+    val = raw.strip().lower()
+    if not val:
+        return None
+    return "length" if val in _LENGTH_REASONS else val
+
+
+def is_truncated(finish_reason: str | None) -> bool:
+    """True when the output is known to be incomplete (hit the length cap / was filtered)."""
+    return finish_reason in TRUNCATING_REASONS
 
 
 def build_chat_completions_url(base_url: str) -> str:
@@ -117,6 +145,15 @@ async def complete_chat(
             status_code=502,
         ) from exc
 
+    # 非流式只记录/暴露结束原因，不改变行为（不抛错）；被 length 截断的 JSON 会在解析层失败，
+    # 有了这个字段才能在日志里一眼看出“是被截断，不是模型乱写”。
+    finish_reason = normalize_finish_reason(data["choices"][0].get("finish_reason"))
+    if is_truncated(finish_reason):
+        logger.warning(
+            "LLM completion truncated (task=%s model=%s finish_reason=%s, %d chars)",
+            task_type, model, finish_reason, len(content),
+        )
+
     usage = data.get("usage") or {}
     in_tok = int(usage.get("prompt_tokens") or estimate_tokens(system_prompt + user_prompt))
     out_tok = int(usage.get("completion_tokens") or estimate_tokens(content))
@@ -135,6 +172,8 @@ async def complete_chat(
             template_ver=template_ver,
             chapter_id=chapter_id,
             scene_id=scene_id,
+            temperature=temperature,
+            finish_reason=finish_reason,
         )
 
     return LlmCompletionResult(
@@ -143,6 +182,7 @@ async def complete_chat(
         input_tokens=in_tok,
         output_tokens=out_tok,
         elapsed_ms=elapsed_ms,
+        finish_reason=finish_reason,
     )
 
 
@@ -195,6 +235,8 @@ async def stream_chat_sse(
 
     start_ns = time.perf_counter_ns()
     collected: list[str] = []
+    # 上游最终给出的 finish_reason。None=没给（不能假定是 stop）；'error'=连接异常中断。
+    finish_reason: str | None = None
 
     # 流式场景下 read 超时按“两次数据块之间的间隔”计，不是整段生成的总时长。
     # 用单值会把 read 也卡死在 timeout_sec——模型开头思考久一点或网络抖动就断流，
@@ -224,25 +266,46 @@ async def stream_chat_sse(
                         break
                     try:
                         chunk = json.loads(data_str)
-                        delta = chunk["choices"][0].get("delta", {}).get("content")
-                        if delta:
-                            collected.append(delta)
-                            yield _sse_event("delta", {"content": delta})
-                    except (json.JSONDecodeError, KeyError, IndexError):
+                    except json.JSONDecodeError:
                         continue
+                    # 部分服务商会单独发 usage 帧（choices 为空）或在内容帧里同时带 finish_reason；
+                    # 所以取 choice 与取 delta / finish_reason 要各自容错，互不吞掉对方。
+                    choices = chunk.get("choices") if isinstance(chunk, dict) else None
+                    if not choices or not isinstance(choices[0], dict):
+                        continue
+                    choice = choices[0]
+                    delta_obj = choice.get("delta") or {}
+                    delta = delta_obj.get("content") if isinstance(delta_obj, dict) else None
+                    if delta:
+                        collected.append(delta)
+                        yield _sse_event("delta", {"content": delta})
+                    fr = normalize_finish_reason(choice.get("finish_reason"))
+                    if fr is not None:
+                        finish_reason = fr
 
         elapsed_ms = int((time.perf_counter_ns() - start_ns) / 1_000_000)
         full_output = "".join(collected)
         out_tokens = estimate_tokens(full_output)
+        truncated = is_truncated(finish_reason)
+        if truncated:
+            logger.warning(
+                "LLM stream truncated (task=%s model=%s finish_reason=%s, %d chars)",
+                task_type, model, finish_reason, len(full_output),
+            )
         yield _sse_event(
             "done",
             {
                 "input_tokens": context_tokens,
                 "output_tokens": out_tokens,
                 "elapsed_ms": elapsed_ms,
+                # finish_reason 可能为 null（上游没给）——此时 truncated 为 false，按正常完成处理，
+                # 否则对不发 finish_reason 的服务商会全部误报“被截断”。
+                "finish_reason": finish_reason,
+                "truncated": truncated,
             },
         )
     except httpx.HTTPError as exc:
+        finish_reason = "error"
         yield _sse_event(
             "error",
             {
@@ -267,6 +330,8 @@ async def stream_chat_sse(
                 template_ver=template_ver,
                 chapter_id=chapter_id,
                 scene_id=scene_id,
+                temperature=temperature,
+                finish_reason=finish_reason,
             )
 
 
@@ -288,6 +353,8 @@ def _safe_log_generation(
     template_ver: str | None,
     chapter_id: int | None,
     scene_id: int | None,
+    temperature: float | None = None,
+    finish_reason: str | None = None,
 ) -> None:
     try:
         with get_novel_db(novel_uid) as conn:
@@ -304,6 +371,9 @@ def _safe_log_generation(
                 template_ver=template_ver,
                 chapter_id=chapter_id,
                 scene_id=scene_id,
+                temperature=temperature,
+                finish_reason=finish_reason,
             )
     except Exception:
-        pass
+        # 写日志失败绝不能影响生成本身；但完全吞掉会让“日志缺失”无从排查，至少留一条告警。
+        logger.warning("failed to record generation_log (task=%s)", task_type, exc_info=True)
