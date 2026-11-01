@@ -13,8 +13,10 @@ class EvidencedEvent(BaseModel):
 
 
 class WritingBoundary(BaseModel):
-    established: list[EvidencedEvent] = Field(max_length=12)
-    repeated_events: list[EvidencedEvent] = Field(max_length=8)
+    # 不限制条数：长章节的已确立事实/重复事件可能很多，截断会让合法响应被判非法。
+    # 这些只是生成前的参考信息，列表长短不影响后续正文生成。
+    established: list[EvidencedEvent] = Field(default_factory=list)
+    repeated_events: list[EvidencedEvent] = Field(default_factory=list)
     next_step: str = Field(min_length=1)
 
 

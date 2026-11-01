@@ -258,10 +258,20 @@ class WritingService:
             f"作者补充：{req.instruction}\n{req.custom_context}\n"
             + author_style_prompt(self._novel_repo.get_novel_detail())
         )
-        return await check_writing_boundary(
-            novel_uid=self._novel_uid, chapter_id=req.chapter_id, settings=self._settings_repo,
-            history=history, plan=plan,
-        )
+        # 衔接检查只是生成前的参考：格式解析失败/超时等技术性故障降级为空，不阻断正文生成；
+        # 但证据与前文不匹配（模型幻觉引用了不存在的原文）是有意义的警报，保留中止。
+        from app.core.exceptions import AppError
+        try:
+            return await check_writing_boundary(
+                novel_uid=self._novel_uid, chapter_id=req.chapter_id, settings=self._settings_repo,
+                history=history, plan=plan,
+            )
+        except AppError as e:
+            if e.code == "BOUNDARY_EVIDENCE_MISMATCH":
+                raise
+            return ""
+        except Exception:
+            return ""
 
     def prepare_stream_rewrite_prompts(self, req: StreamRewriteRequest) -> tuple[str, str]:
         """Build (system_prompt, user_prompt) for selection rewrite/expand/shorten/polish/tone_shift."""
