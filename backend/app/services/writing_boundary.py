@@ -1,5 +1,7 @@
 """Check a writing plan against actual preceding prose before streaming a draft."""
+import asyncio
 from dataclasses import dataclass
+from time import monotonic
 import logging
 import math
 import os
@@ -46,8 +48,7 @@ def evidence_in_history(quote: str, history_norm: str) -> bool:
 
 
 class WritingBoundary(BaseModel):
-    # 不限制条数：长章节的已确立事实/重复事件可能很多，截断会让合法响应被判非法。
-    # 这些只是生成前的参考信息，列表长短不影响后续正文生成。
+    # 不用 max_length 拒绝冗长响应；解析后再截短，避免因长度触发重试。
     established: list[EvidencedEvent] = Field(default_factory=list)
     repeated_events: list[EvidencedEvent] = Field(default_factory=list)
     next_step: str = Field(min_length=1)
@@ -282,15 +283,15 @@ def boundary_slim_enabled() -> bool:
     return os.environ.get("YOUTHINK_BOUNDARY_SLIM", "1").strip().lower() not in ("0", "false", "no", "")
 
 
-# 每轮衔接检查的超时。检查只返回一小段 JSON，旧的硬编码 90 秒在“重试一次”时最坏要等 3 分钟。
-# 默认 40 秒 → 最坏 2×40=80 秒；可用 ``YOUTHINK_BOUNDARY_TIMEOUT_SEC`` 覆盖（限制在 5–120 秒）。
-BOUNDARY_TIMEOUT_DEFAULT_SEC = 40.0
+# HTTP 空闲超时与单轮等待上限；两次检查另受 150 秒总预算约束。
+BOUNDARY_TIMEOUT_DEFAULT_SEC = 90.0
+BOUNDARY_TOTAL_TIMEOUT_SEC = 150.0
 BOUNDARY_TIMEOUT_MIN_SEC = 5.0
 BOUNDARY_TIMEOUT_MAX_SEC = 120.0
 
 
 def boundary_timeout_sec() -> float:
-    """Per-attempt timeout for the continuity check (configurable, default 40 s)."""
+    """Per-attempt timeout for the continuity check (configurable, default 90 s)."""
     raw = os.environ.get("YOUTHINK_BOUNDARY_TIMEOUT_SEC", "").strip()
     if not raw:
         return BOUNDARY_TIMEOUT_DEFAULT_SEC
@@ -325,6 +326,7 @@ _SYSTEM_PROMPT = (
     "不要把叙述者知识分给所有角色。发现计划重演前文时，指出已发生的部分，"
     "建议从事件后果继续推进；如果本章目标已写完，建议简短收束，不凑字数、不另造事件。"
     "前文若为草稿，只作衔接参考，不宣称已经定稿。"
+    "简短作答，不展开推理或解释。"
 )
 _USER_SCHEMA = (
     '返回严格 JSON：{"established":[{"statement":"已确立状态",'
@@ -335,7 +337,29 @@ _USER_SCHEMA = (
     '"avoid":["已写过、不要再写的素材，每条是不超过20字的名词性短语，如“修打印机”“她抱怨冰棍化手”，'
     '不要写评语、理由或建议"]}。'
 )
-# 首次调用的证据要求保持原文不变：无法用真实模型验证，不在这里顺手改动首次提示词的行为。
+_OUTPUT_LIMIT_RULE = (
+    "established、repeated_events、avoid各最多5条；statement、evidence_quote、avoid每条不超过30字；"
+    "next_step总共不超过80字。只保留与本场景直接相关的信息，证据选短的连续原句。"
+)
+
+
+def _limit_output(boundary: WritingBoundary) -> WritingBoundary:
+    """Accept verbose valid JSON, then cap its size instead of rejecting it."""
+    def events(items: list[EvidencedEvent]) -> list[EvidencedEvent]:
+        return [item.model_copy(update={
+            "statement": item.statement[:30], "evidence_quote": item.evidence_quote[:30],
+        }) for item in items[:5]
+            # A cut must not remove a later negation/condition and turn it into a fact.
+            if len(item.statement) <= 30 or is_safe_to_phrase(item.statement)]
+
+    return boundary.model_copy(update={
+        "established": events(boundary.established),
+        "repeated_events": events(boundary.repeated_events),
+        "avoid": [phrase[:30] for phrase in boundary.avoid[:5]],
+        "next_step": boundary.next_step[:80],
+    })
+
+
 _EVIDENCE_RULE = "没有证据的项目不要输出，列表可以为空。证据不得拼接、改写或使用省略号。"
 # 重试时追加的纠错提示，两种重试原因都带上这句固定要求。
 _RETRY_QUOTE_RULE = "引用必须是前文中连续的原文片段，不要改动标点，不确定就不引用。"
@@ -422,14 +446,18 @@ def _render(boundary: "WritingBoundary", slim: bool) -> str:
     if not slim:
         return (
             "【生成前章节衔接检查】以下是基于原文证据的写作边界；与梗概重复时从已发生事件之后推进。\n"
-            + boundary.model_dump_json()
+            + _limit_output(boundary).model_dump_json()
         )
-    return format_boundary_for_prompt(boundary)
+    # Keep original statements until the negation gate and phrase extraction have run.
+    # The slim renderer already caps phrases and next_step; only cap list counts here.
+    return format_boundary_for_prompt(boundary.model_copy(update={
+        "avoid": boundary.avoid[:5], "repeated_events": boundary.repeated_events[:5],
+    }))
 
 
 async def check_writing_boundary_result(
     *, novel_uid: str, chapter_id: int, settings: SettingsRepository,
-    history: str, plan: str,
+    history: str, plan: str, scene_id: int | None = None,
 ) -> BoundaryResult:
     """Run the continuity check; mismatched evidence never aborts the write.
 
@@ -447,38 +475,54 @@ async def check_writing_boundary_result(
     history_norm = _normalize_for_match(history)
     slim = boundary_slim_enabled()
 
-    async def _call(feedback: str) -> "WritingBoundary":
+    started = monotonic()
+    first_timeout = boundary_timeout_sec()
+
+    async def _call(feedback: str, timeout_sec: float) -> "WritingBoundary":
         result = await complete_chat(
             base_url=base_url, api_key=api_key, model=model, temperature=0.2,
             system_prompt=_SYSTEM_PROMPT,
-            user_prompt=f"【已写正文】\n{history}\n\n【本次写作计划】\n{plan}\n\n{_USER_SCHEMA}{_EVIDENCE_RULE}{feedback}",
+            user_prompt=f"【已写正文】\n{history}\n\n【本次写作计划】\n{plan}\n\n{_USER_SCHEMA}{_OUTPUT_LIMIT_RULE}{_EVIDENCE_RULE}{feedback}",
             novel_uid=novel_uid, chapter_id=chapter_id, task_type="writing_boundary",
-            timeout_sec=boundary_timeout_sec(),
+            scene_id=scene_id, timeout_sec=timeout_sec,
         )
         return await parse_and_validate_json(result.content, WritingBoundary)
 
     feedback = ""
-    problem = ""
+    failures: list[str] = []
     for attempt in range(1, MAX_ATTEMPTS + 1):
+        remaining = BOUNDARY_TOTAL_TIMEOUT_SEC - (monotonic() - started)
+        if remaining <= 0:
+            break
+        # Retry gets a longer HTTP idle allowance; wall time is still capped by the shared budget.
+        timeout_sec = first_timeout if attempt == 1 else min(120.0, first_timeout * 1.5)
+        wait_sec = min(timeout_sec, remaining)
+        attempt_started = monotonic()
         try:
-            boundary = await _call(feedback)
-        except Exception as exc:  # noqa: BLE001 - CancelledError is BaseException and still propagates
-            problem = f"{exc.code}: {exc.message}" if isinstance(exc, AppError) else f"{type(exc).__name__}: {exc}"
-            feedback = _RETRY_FAILED  # 整体失败的重试同样带上“引用必须是连续原文”的固定要求
-            logger.warning(
-                "writing boundary: attempt %d/%d failed (chapter_id=%s): %s", attempt, MAX_ATTEMPTS, chapter_id, problem,
-            )
-            continue
-        filtered, offered, kept = _filter_verbatim(boundary, history_norm, slim=slim)
-        if offered and not kept:
+            boundary = await asyncio.wait_for(_call(feedback, timeout_sec), timeout=wait_sec)
+        except Exception as exc:  # noqa: BLE001 - CancelledError still propagates
+            if isinstance(exc, TimeoutError):
+                problem = f"等待上限{wait_sec:.1f}秒（TimeoutError）"
+            else:
+                problem = f"{exc.code}: {exc.message}" if isinstance(exc, AppError) else f"{type(exc).__name__}: {exc}"
+            feedback = _RETRY_FAILED
+        else:
+            filtered, offered, kept = _filter_verbatim(boundary, history_norm, slim=slim)
+            if not offered or kept:
+                return BoundaryResult(_render(filtered, slim), dropped=offered - kept)
             problem = "模型给出的引用与前文对不上"
             feedback = _RETRY_EVIDENCE
-            logger.warning(
-                "writing boundary: attempt %d/%d had no verbatim evidence (chapter_id=%s)", attempt, MAX_ATTEMPTS, chapter_id,
-            )
-            continue
-        return BoundaryResult(_render(filtered, slim), dropped=offered - kept)
-    return BoundaryResult("", note=f"{problem}，已重试一次")
+        elapsed = monotonic() - attempt_started
+        failures.append(f"第{attempt}次{elapsed:.1f}秒：{problem[:100]}")
+        logger.warning(
+            "writing boundary: attempt %d/%d failed (chapter_id=%s scene_id=%s "
+            "elapsed=%.1fs idle_timeout=%.1fs wait_limit=%.1fs): %s",
+            attempt, MAX_ATTEMPTS, chapter_id, scene_id, elapsed, timeout_sec, wait_sec, problem,
+        )
+    elapsed = monotonic() - started
+    retry_note = "已重试一次" if len(failures) == MAX_ATTEMPTS else "总等待预算已用尽"
+    return BoundaryResult("", note=f"总耗时{elapsed:.1f}秒；{'；'.join(failures)}，{retry_note}")
+
 
 
 async def check_writing_boundary(

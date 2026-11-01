@@ -531,7 +531,7 @@ class WritingService:
         try:
             res = await check_writing_boundary_result(
                 novel_uid=self._novel_uid, chapter_id=req.chapter_id, settings=self._settings_repo,
-                history=history, plan=plan,
+                history=history, plan=plan, scene_id=req.scene_id,
             )
         except AppError as e:
             reason = f"{e.code}: {e.message}"
@@ -546,7 +546,7 @@ class WritingService:
         _scene_logger.warning(
             "衔接检查未生效 (chapter_id=%s scene_id=%s): %s", req.chapter_id, req.scene_id, reason
         )
-        return "", "failed", unavailable_notice(reason[:120])
+        return "", "failed", unavailable_notice(reason)
 
     def prepare_stream_rewrite_prompts(self, req: StreamRewriteRequest) -> tuple[str, str]:
         """Build (system_prompt, user_prompt) for selection rewrite/expand/shorten/polish/tone_shift."""

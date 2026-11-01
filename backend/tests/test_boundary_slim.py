@@ -514,15 +514,15 @@ def test_unavailable_notice_text() -> None:
     assert n.startswith("衔接检查未生效（timeout）")
 
 
-def test_boundary_timeout_defaults_to_40_and_is_configurable(monkeypatch) -> None:
+def test_boundary_timeout_defaults_to_90_and_is_configurable(monkeypatch) -> None:
     monkeypatch.delenv("YOUTHINK_BOUNDARY_TIMEOUT_SEC", raising=False)
-    assert boundary_timeout_sec() == 40.0
+    assert boundary_timeout_sec() == 90.0
     monkeypatch.setenv("YOUTHINK_BOUNDARY_TIMEOUT_SEC", "30")
     assert boundary_timeout_sec() == 30.0
     monkeypatch.setenv("YOUTHINK_BOUNDARY_TIMEOUT_SEC", "45")
     assert boundary_timeout_sec() == 45.0
     monkeypatch.setenv("YOUTHINK_BOUNDARY_TIMEOUT_SEC", "not-a-number")
-    assert boundary_timeout_sec() == 40.0
+    assert boundary_timeout_sec() == 90.0
     monkeypatch.setenv("YOUTHINK_BOUNDARY_TIMEOUT_SEC", "1")
     assert boundary_timeout_sec() == 5.0  # clamped to the sane lower bound
     monkeypatch.setenv("YOUTHINK_BOUNDARY_TIMEOUT_SEC", "999")
@@ -530,7 +530,7 @@ def test_boundary_timeout_defaults_to_40_and_is_configurable(monkeypatch) -> Non
 
 
 def test_boundary_call_passes_the_configured_timeout(client, two_chapters, monkeypatch) -> None:
-    """The 30–45 s setting must reach complete_chat; worst case is two attempts."""
+    """The configured first-attempt setting must reach complete_chat."""
     from types import SimpleNamespace
     import app.services.writing_boundary as wb
 
@@ -650,3 +650,145 @@ def test_real_calls_that_used_to_abort_now_keep_their_good_items(client, two_cha
         results[name] = res
     # LIVE#86/#87 used to abort on a repeated_event; they have `avoid`, so those quotes are not injected
     assert "已写过、不要再写：" in results["LIVE#87"].text
+
+
+@pytest.mark.parametrize("configured,expected", [(None, [90.0, 120.0]), ("30", [30.0, 45.0])])
+def test_boundary_retry_timeout_and_diagnostics(client, two_chapters, monkeypatch, configured, expected):
+    import app.services.writing_boundary as wb
+    from app.core.exceptions import AppError
+    if configured is None:
+        monkeypatch.delenv("YOUTHINK_BOUNDARY_TIMEOUT_SEC", raising=False)
+    else:
+        monkeypatch.setenv("YOUTHINK_BOUNDARY_TIMEOUT_SEC", configured)
+    seen = []
+
+    async def fail(**kw):
+        seen.append(kw["timeout_sec"])
+        raise AppError(code="UPSTREAM_API_ERROR", message="ReadTimeout", status_code=502)
+
+    monkeypatch.setattr(wb, "complete_chat", fail)
+    uid, _, c2 = two_chapters
+    text, status, note = _ex(uid, c2)
+    assert seen == expected
+    assert text == "" and status == "failed"
+    assert "ReadTimeout" in note and "第1次" in note and "第2次" in note
+    assert "总耗时" in note and "秒" in note
+
+
+def test_boundary_total_wait_budget(client, two_chapters, monkeypatch):
+    import app.services.writing_boundary as wb
+    from app.core.exceptions import AppError
+    clock = [0.0]
+    waits = []
+    monkeypatch.delenv("YOUTHINK_BOUNDARY_TIMEOUT_SEC", raising=False)
+    monkeypatch.setattr(wb, "monotonic", lambda: clock[0])
+
+    async def fail(**kw):
+        clock[0] += 90 if len(waits) == 1 else 60
+        raise AppError(code="UPSTREAM_API_ERROR", message="ReadTimeout", status_code=502)
+
+    async def wait_for(coro, timeout):
+        waits.append(timeout)
+        return await coro
+
+    monkeypatch.setattr(wb, "complete_chat", fail)
+    monkeypatch.setattr(wb.asyncio, "wait_for", wait_for)
+    uid, _, c2 = two_chapters
+    text, status, note = _ex(uid, c2)
+    assert waits == [90.0, 60.0]
+    assert status == "failed" and text == ""
+    assert "总耗时150.0秒" in note
+
+
+def test_boundary_parse_truncates_verbose_output_without_retry(client, two_chapters, monkeypatch):
+    import app.services.writing_boundary as wb
+    from types import SimpleNamespace
+    captured = []
+    item = {"statement": "状态" * 100, "evidence_quote": "宿舍在四楼。" * 100}
+    reply = _payload(established=[item] * 8, repeated_events=[item] * 8,
+                     avoid=["搬箱子" * 100] * 8, next_step="从搬完箱子处接。" * 100)
+
+    async def complete(**kw):
+        captured.append(kw)
+        return SimpleNamespace(content=reply)
+
+    monkeypatch.setattr(wb, "complete_chat", complete)
+    monkeypatch.setenv("YOUTHINK_BOUNDARY_SLIM", "0")
+    uid, _, c2 = two_chapters
+    with get_global_db() as g:
+        result = asyncio.run(wb.check_writing_boundary_result(
+            novel_uid=uid, chapter_id=c2, settings=SettingsRepository(g),
+            history=item["evidence_quote"], plan="本次计划"))
+    parsed = json.loads(result.text.split("\n", 1)[1])
+    assert result.note == "" and len(captured) == 1
+    for field in ("established", "repeated_events"):
+        assert len(parsed[field]) == 5
+        assert all(len(e["statement"]) <= 30 and len(e["evidence_quote"]) <= 30 for e in parsed[field])
+    assert len(parsed["avoid"]) == 5 and all(len(a) <= 30 for a in parsed["avoid"])
+    assert len(parsed["next_step"]) <= 80
+    assert "最多5条" in captured[0]["user_prompt"] and "30字" in captured[0]["user_prompt"]
+
+
+
+def test_boundary_deadline_cancels_pending_call(client, two_chapters, monkeypatch):
+    import app.services.writing_boundary as wb
+    cancelled = []
+    monkeypatch.setattr(wb, "BOUNDARY_TOTAL_TIMEOUT_SEC", 0.03)
+
+    async def pending(**kw):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.append(True)
+
+    monkeypatch.setattr(wb, "complete_chat", pending)
+    uid, _, c2 = two_chapters
+    text, status, note = _ex(uid, c2)
+    assert cancelled == [True]
+    assert status == "failed" and text == ""
+    assert "TimeoutError" in note and "总等待预算已用尽" in note
+
+
+def test_boundary_shortening_does_not_hide_invented_evidence(client, two_chapters, monkeypatch):
+    uid, _, c2 = two_chapters
+    real = "宿舍在四楼。" * 10
+    prompts = _mock_model(monkeypatch, _payload(repeated_events=[{
+        "statement": "搬箱子上楼", "evidence_quote": real + "虚构的后半句",
+    }]))
+    from app.services.writing_boundary import check_writing_boundary_result
+    with get_global_db() as g:
+        result = asyncio.run(check_writing_boundary_result(
+            novel_uid=uid, chapter_id=c2, settings=SettingsRepository(g), history=real, plan="计划"))
+    assert result.text == "" and result.note and len(prompts) == 2
+
+
+
+def test_boundary_truncation_keeps_negated_repetition_out_of_prompt(monkeypatch):
+    from types import SimpleNamespace
+    import app.services.writing_boundary as wb
+    statement = "他独自搬箱子上四楼，这一段内容的具体情况还需要进一步进行说明和确认，但不是前文已发生的事件"
+
+    async def complete(**kw):
+        return SimpleNamespace(content=_payload(repeated_events=[{
+            "statement": statement, "evidence_quote": "宿舍在四楼。",
+        }]))
+
+    class Settings:
+        def get_credentials_for_task(self, task):
+            return None, "https://api.example.com", "mock", "test"
+
+    monkeypatch.setattr(wb, "complete_chat", complete)
+    result = asyncio.run(wb.check_writing_boundary_result(
+        novel_uid="test", chapter_id=2, settings=Settings(), history="宿舍在四楼。", plan="计划"))
+    assert not result.note
+    assert "已写过、不要再写" not in result.text
+
+
+
+def test_legacy_truncation_does_not_turn_negation_into_fact():
+    from app.services.writing_boundary import _render
+    statement = "他独自搬箱子上四楼，这一段内容的具体情况还需要进一步进行说明和确认，但不是前文已发生的事件"
+    boundary = _wb(established=[{"statement": statement, "evidence_quote": "宿舍在四楼。"}],
+                   repeated_events=[{"statement": statement, "evidence_quote": "宿舍在四楼。"}])
+    parsed = json.loads(_render(boundary, False).split("\n", 1)[1])
+    assert parsed["established"] == [] and parsed["repeated_events"] == []

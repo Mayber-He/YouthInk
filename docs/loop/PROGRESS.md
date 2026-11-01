@@ -426,3 +426,26 @@ T6 之后哪些 evidence 字段真正进提示词，随开关/模型输出而变
 - **归一化去全部标点：接受**（只做存在性判断）。
 - **真实模型实测是下一步**：本任务仍只用 mock/固定样本，没有调用真实 LLM。
 - **本次验证**：全量 `pytest tests` **178 passed / 5 failed**（无新增失败）；边界两个模块 63 passed。
+
+
+## 2026-11-01：第 2 章衔接检查 ReadTimeout 调查与修复
+
+用户约束：先只读调查，不调用真实 LLM，不修改小说数据；修复后补测试并提交。
+
+调查明细见 [BOUNDARY_TIMEOUT_INVESTIGATION.md](BOUNDARY_TIMEOUT_INVESTIGATION.md)，包含活动库全部 7 次检查的输入/输出字符数、elapsed_ms、失败场景还原、不确定性、HTTPX 超时定义和流式利弊。
+
+- 当前成功检查输出 1525–3235 字符，耗时 24.765–71.991 秒，3/7 超过 40 秒；40 秒偏短。吞吐折算中位数约 44.9 字符/秒，只能粗估，包含输入处理、等待及可能的推理。
+- 本轮第 2 章场景 4/5 的正文日志 #88/#89 无衔接提示；场景 6 的 #91 有提示。2 个场景缺少提示。失败调用没落库，不能声称精确拿到了失败请求；根据 #90 同轮计划与 #88/#89 前文还原，上一章全文 2779 字，本章已写 0/1463 字，prompt 5585/7044 字符（含日志标签；重试再加 78 字符）。
+- 默认首次超时恢复 90 秒；环境变量 `YOUTHINK_BOUNDARY_TIMEOUT_SEC` 保留（5–120 秒）。重试 HTTP 空闲超时 = min(120, 首次 × 1.5)，新增单调时钟 150 秒共享墙钟预算，并通过 `asyncio.wait_for` 取消超时请求。默认首次耗满 90 秒时，重试剩 60 秒；首次快速失败时重试可获更长等待。
+- HTTPX 的非流式读取也是按相邻网络块空闲超时，并非整次请求总时限。流式仅可能改善上游发包节奏，仍需处理首块等待、缓冲、半截 JSON、usage/finish_reason 与总预算。本次不迁移流式，不改公共 HTTP 客户端或正文 SSE。
+- 提示词限制 established/repeated_events/avoid 各最多 5 条，statement/evidence_quote/avoid 每条最多 30 字、next_step 最多 80 字。解析合法冗长 JSON 时不报长度错误，输出前截短；完整引用先校验，瘦身模式完整判断句先通过否定安全检查，再抽短语。兼容完整模式省略不宜截短的长否定/条件判断，防止把“不是已发生事件”剪成肯定事实。
+- 降级信息补充总耗时、每次原因/耗时，应用 warning 含 chapter_id、scene_id、HTTP 空闲超时和实际等待额度；服务层保留完整诊断。成功检查日志传入 scene_id，便于关联场景。降级仍不注入衔接内容、不阻断正文。
+- 独立审查发现并修复了截短后丢失否定的风险，默认瘦身与兼容完整模式均补回归测试。
+
+**最终验证**：
+- 后端全量 `python -m pytest tests -q -p deny_network --basetemp=.pytest-boundary-complete`：**186 passed / 5 failed**（261.29 秒）。独立 HEAD 基线 **178 passed / 5 failed**（298.25 秒），5 个失败项和断言完全一致，无新增失败。
+- 最终衔接专项 **61 passed**；前端 `node --test tests/useStreamGenerate.test.mjs` **4 passed**，`npm run typecheck` 通过，`git diff --check` 通过。
+- 新增主要回归在旧实现上 5 failed / 1 passed；截断否定语义的两种回归分别先验证失败，再修复通过。独立代码审查最终无剩余问题。
+- 全量的 5 个既有失败：`test_character_timeline_temporal_query`、`test_float_sort_order_and_rolling_chapter_generation`、`test_rolling_generation_uses_retained_chapter_and_rejects_reversed_batch`、`test_ai_smell_scanner_and_sse_streaming`、`test_m5_hundred_chapter_long_book_stress_and_temporal_isolation`。本次不改动这些路径。
+
+所有模型响应使用 mock/已有固定样本，运行时额外阻断外部 socket 连接；测试数据库使用临时目录。调查前记录的 13 个现有数据库/密钥文件 SHA-256 核对未变化。
