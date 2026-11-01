@@ -11,6 +11,7 @@ import { useUiStore } from "@/stores/uiStore";
 import {
   useAiSmellScan,
   useChapterWorkspace,
+  useCheckSceneRepetition,
   useContextPreview,
   useGenerateScenes,
   useRestoreChapterVersion,
@@ -49,6 +50,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
   const { data: workspace, isLoading } = useChapterWorkspace(novelUid, effectiveChapterId);
   const saveMut = useSaveChapterContent(novelUid, effectiveChapterId ?? 0);
   const generateScenesMut = useGenerateScenes(novelUid, effectiveChapterId ?? 0);
+  const repetitionMut = useCheckSceneRepetition(novelUid, effectiveChapterId ?? 0);
   const restoreMut = useRestoreChapterVersion(novelUid, effectiveChapterId ?? 0);
   const smellMut = useAiSmellScan(novelUid, effectiveChapterId);
 
@@ -77,6 +79,11 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
   const [critiqueResult, setCritiqueResult] = useState<SelectionCritiqueResult | null>(null);
   const [pipelineStep, setPipelineStep] = useState<WritingPipelineStep>("idle");
   const [streamModelName, setStreamModelName] = useState("");
+  const [repetitionNotice, setRepetitionNotice] = useState<{
+    tone: "info" | "warn";
+    text: string;
+    details: string[];
+  } | null>(null);
   const contentRef = useRef(content);
   contentRef.current = content;
 
@@ -193,10 +200,50 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
           generated += delta;
           setContent(prefix + generated);
         },
-        (fullGenerated) => {
+        async (fullGenerated) => {
           if (currentChapterRef.current !== effectiveChapterId) {
             resolve(null);
             return;
+          }
+          // T5：整个场景流完成后做一次确定性重复检测。超阈值时后端只重写该场景一次；
+          // 检测接口本身出错则放行原文（检测器故障不应阻塞写作）。
+          if (mode === "scene" && sceneId !== null) {
+            try {
+              const check = await repetitionMut.mutateAsync({
+                sceneId,
+                sceneText: fullGenerated,
+                chapterSoFar: baseContent,
+              });
+              if (currentChapterRef.current !== effectiveChapterId) {
+                resolve(null);
+                return;
+              }
+              if (check.action === "rewritten") {
+                setContent(prefix + check.final_text);
+                setRepetitionNotice({
+                  tone: "info",
+                  text: "检测到与前文重复，已自动重写该场景一次。",
+                  details: [],
+                });
+                resolve(check.final_text);
+                return;
+              }
+              if (check.action === "kept_with_warning" || check.action === "rewrite_failed") {
+                setRepetitionNotice({
+                  tone: "warn",
+                  text:
+                    check.action === "rewrite_failed"
+                      ? "该场景与前文有重复，自动重写失败，已保留原文，请手动处理。"
+                      : "该场景与前文仍有重复（已处理一次），已保留，请留意。",
+                  details: check.warnings,
+                });
+                setContent(prefix + check.final_text);
+                resolve(check.final_text);
+                return;
+              }
+            } catch {
+              // fail-open：检测不可用时按原文继续
+            }
           }
           resolve(fullGenerated);
         },
@@ -215,6 +262,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
     setGeneratedWordsCount(0);
     setReviewResult(null);
     setReviewError(null);
+    setRepetitionNotice(null);
     setPipelineStep("assembling");
     const chapterId = effectiveChapterId;
     const originalContent = content;
@@ -273,6 +321,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
     setGeneratedWordsCount(0);
     setReviewResult(null);
     setReviewError(null);
+    setRepetitionNotice(null);
     setPipelineStep("assembling");
     const chapterId = effectiveChapterId;
     const originalContent = content;
@@ -595,6 +644,34 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
         {streamError && (
           <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
             {streamError}
+          </div>
+        )}
+
+        {repetitionNotice && (
+          <div
+            className={
+              repetitionNotice.tone === "warn"
+                ? "mt-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800"
+                : "mt-3 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-800"
+            }
+          >
+            <div className="flex items-start justify-between gap-2">
+              <span>{repetitionNotice.text}</span>
+              <button
+                type="button"
+                className="shrink-0 cursor-pointer text-[11px] underline"
+                onClick={() => setRepetitionNotice(null)}
+              >
+                知道了
+              </button>
+            </div>
+            {repetitionNotice.details.length > 0 && (
+              <ul className="mt-1 list-disc pl-4">
+                {repetitionNotice.details.map((d, i) => (
+                  <li key={i}>{d}</li>
+                ))}
+              </ul>
+            )}
           </div>
         )}
 

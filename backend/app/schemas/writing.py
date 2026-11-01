@@ -118,6 +118,27 @@ class ContextPreviewResponse(BaseModel):
     blocks: list[ContextBlockItem]
 
 
+# --- T5: scene repetition check / one-shot rewrite ---
+
+class RepetitionCheckRequest(BaseModel):
+    scene_text: str = Field(..., min_length=1)
+    chapter_so_far: str = ""
+    # None => follow server config (YOUTHINK_REPEAT_AUTO_REWRITE, default on).
+    auto_rewrite: bool | None = None
+
+
+class RepetitionCheckResponse(BaseModel):
+    triggered: bool
+    # 'none' 未超阈值 | 'rewritten' 已重写且复检通过 | 'kept_with_warning' 重写后仍超标，保留
+    # | 'rewrite_failed' 重写调用失败，保留原文
+    action: Literal["none", "rewritten", "kept_with_warning", "rewrite_failed"]
+    final_text: str
+    reasons: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    report: dict[str, object] = Field(default_factory=dict)
+    check_ids: list[int] = Field(default_factory=list)
+
+
 # --- SSE Stream Requests ---
 
 class StreamWriteRequest(BaseModel):

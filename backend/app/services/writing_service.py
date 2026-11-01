@@ -403,6 +403,87 @@ class WritingService:
             layer6_output_format=fmt,
         )
 
+    async def check_scene_repetition(
+        self,
+        chapter_id: int,
+        scene_id: int,
+        scene_text: str,
+        chapter_so_far: str = "",
+        auto_rewrite: bool | None = None,
+    ) -> dict:
+        """T5: deterministic repetition check on a freshly generated scene, with ONE rewrite.
+
+        Compares against the previous chapter's full text and the already-written part of this
+        chapter; counts stock action phrases chapter-wide; checks the scene's own
+        ``must_not_include``. Over threshold -> the model rewrites this scene once with the
+        concrete repeated spans listed; still over -> keep + warn (never loops). Every
+        measurement is stored in ``repetition_checks`` for later review.
+        """
+        from app.services.repetition_guard import RepetitionConfig, split_must_not_include
+        from app.services.repetition_service import (
+            build_rewrite_instruction,
+            run_repetition_pipeline,
+        )
+
+        cfg = RepetitionConfig.from_env()
+        ch = self._outline_repo.get_chapter(chapter_id)
+        scene = next((s for s in self._writing_repo.list_scenes(chapter_id) if s.id == scene_id), None)
+        if cfg.enabled is False:
+            return {
+                "triggered": False, "action": "none", "final_text": scene_text,
+                "reasons": [], "warnings": [], "report": {}, "check_ids": [],
+            }
+
+        raw_prev = self._writing_repo.get_previous_chapter_text(ch.sort_order, tail_chars=None)
+        # strip the "【上一章《…》完整正文】" header line so it is not treated as prose
+        previous_chapter = raw_prev.split("\n", 1)[1] if raw_prev.startswith("【") and "\n" in raw_prev else raw_prev
+        must_not = split_must_not_include(scene.beat) if scene else []
+
+        _, base_url, model, api_key = self._settings_repo.get_credentials_for_task("writing")
+
+        async def _rewrite(text: str, report) -> str:
+            sys_msg = (
+                "你是青春小说的资深编辑。按要求重写给定的一个场景，保持剧情事件不变，"
+                "只输出重写后的场景正文，不加标题、说明或前后缀。"
+            )
+            user_msg = (
+                f"{build_rewrite_instruction(report)}\n\n【待重写的场景正文】\n{text}"
+            )
+            res = await complete_chat(
+                base_url=base_url, api_key=api_key, model=model,
+                system_prompt=sys_msg, user_prompt=user_msg,
+                temperature=0.8, timeout_sec=120.0,
+                novel_uid=self._novel_uid, task_type="rewrite_repetition",
+                chapter_id=chapter_id, scene_id=scene_id,
+            )
+            return res.content
+
+        def _record(stage: str, action: str, report, thresholds: dict) -> int:
+            cur = self._conn.execute(
+                "INSERT INTO repetition_checks (chapter_id, scene_id, stage, triggered, action_taken, "
+                "coverage, reasons_json, report_json, thresholds_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    chapter_id, scene_id, stage, 1 if report.triggered else 0, action,
+                    report.coverage,
+                    json.dumps(report.reasons, ensure_ascii=False),
+                    json.dumps(report.to_dict(), ensure_ascii=False),
+                    json.dumps(thresholds, ensure_ascii=False),
+                ),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid or 0)
+
+        return await run_repetition_pipeline(
+            scene_text,
+            previous_chapter=previous_chapter,
+            chapter_so_far=chapter_so_far,
+            must_not_include=must_not,
+            config=cfg,
+            rewrite_fn=_rewrite,
+            record_fn=_record,
+            auto_rewrite=auto_rewrite,
+        )
+
     async def check_write_boundary(self, req: StreamWriteRequest) -> str:
         from app.services.writing_boundary import check_writing_boundary
         from app.services.prompt.author_style import author_style_prompt

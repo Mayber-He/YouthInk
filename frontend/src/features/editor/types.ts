@@ -66,6 +66,19 @@ export interface AiSmellScanResult {
   hits: AiSmellHit[];
 }
 
+/** T5: 场景正文生成后的确定性重复检测结果。 */
+export interface RepetitionCheckResult {
+  triggered: boolean;
+  // none 未超阈值 | rewritten 已自动重写一次且复检通过
+  // | kept_with_warning 重写后仍超标（或关闭了自动重写），保留文本并警告
+  // | rewrite_failed 自动重写失败，保留原文
+  action: "none" | "rewritten" | "kept_with_warning" | "rewrite_failed";
+  final_text: string;
+  reasons: string[];
+  warnings: string[];
+  check_ids: number[];
+}
+
 export type RewriteActionType =
   | "rewrite"
   | "expand"

@@ -157,7 +157,48 @@ foreshadowing 用 `content` 而非 `description`。
     本作品实测核心设定为 35 字（首句+书名号网友句），已足够；如需更丰富可在作品里手写核心设定字段（未新增）。
   - 已存在 global.db 的 `system_role` 若被用户在“提示词模板”页覆盖过，则仍用其覆盖版；本库无覆盖。
 
-### T5 生成后的确定性重复检测与自动重写一次 [待做]
+### T5 生成后的确定性重复检测与自动重写一次 [完成]
+- [x] 新模块 `repetition_guard.py`（纯函数）：(a) 8 字 n-gram 与“上一章全文 + 本章已写内容”的重合，
+      对白/聊天行比较前剥掉说话人标签；另加“整句台词复用”信号；(b) 固定动作词计数（默认含手指悬/
+      盯着/扣在桌上/风扇/屏幕暗下去等，可用 `YOUTHINK_REPEAT_ACTION_WORDS` 配置）；(c) 与本场景
+      `must_not_include` 的重合（从 T3 写进 `scenes.beat` 的“本场禁止出现：…”行解析）。
+- [x] 超阈值：把**具体重复片段**列给模型，非流式**只重写该场景一次**（`repetition_service.py`）；
+      重写后仍超标 → 保留（取更不重复的一版）+ 警告；重写调用失败 → 保留原文；**不循环**。
+- [x] 阈值全部在 `RepetitionConfig`，可用 `YOUTHINK_REPEAT_*` 环境变量覆盖；总开关
+      `YOUTHINK_REPEAT_ENABLED`（默认开）、`YOUTHINK_REPEAT_AUTO_REWRITE`（默认开）。
+- [x] 每次测量写入**新表** `repetition_checks`（只加表、带默认值、`IF NOT EXISTS`），含阈值快照，便于回看。
+- [x] 接线：`POST /novels/{uid}/chapters/{cid}/scenes/{sid}/repetition-check`；前端
+      `WritingWorkbench.runSceneStream` 在每个场景**流结束后**调用，改写/警告以提示条展示；
+      检测接口自身出错时放行原文（fail-open）。
+- 备份：改 schema 前新建 `backend/data/_loop_backups/20261101-182613/`（integrity ok）。
+  迁移在**真实库副本**上验证：新增 1 张表，已有表行数零变化，可重复执行。**未对真实库写入**。
+- 改动文件：
+  - 新增 `backend/app/services/repetition_guard.py`、`repetition_service.py`
+  - 改 `backend/app/services/writing_service.py`（`check_scene_repetition`）、`app/api/v1/writing.py`（路由）、
+    `app/schemas/writing.py`（请求/响应）、`app/db/init_schema.py`（新表）
+  - 改 `frontend/src/features/editor/{api.ts,types.ts,WritingWorkbench.tsx}`
+  - 新增 `backend/tests/test_repetition_guard.py`、`tests/fixtures/repeat_chapter{2,3}.txt`
+- 验证结果：
+  - 新增 25 测试全过；全量 `pytest tests`：**95 passed / 5 failed**（5 个为基线既有失败，无新增）。
+  - 前端 `tsc --noEmit` 通过（未构建，未动 dist）。
+  - 第 2、3 章样本：第 3 章三句复述（“那你九月一号路上小心”“现实里是另一个人”
+    “我怎么跟你操心起这个来了”）均被检出；干净场景不触发、不调模型。
+- **阈值标定的真实数据（需你知晓）**：
+  - 整体 8-gram 覆盖率**区分度很差**：第 3 章 vs 第 2 章仅 2.9%，正常章节 0–1.8%，因为这类重复是
+    “几句标志性台词被复述”而非大段抄写。所以覆盖率只作兜底（≥15%），主信号是“重复片段/整句台词”。
+  - 按场景切片回测，**仍有疑似误报**：旧版第 2 章 vs 第 1 章有 3 个场景被触发，原因是
+    ① 故意的跨章呼应（“其实我一点都不想懂事”“明天跟你说件事”）；② 章内自复述（“你问这个干嘛”）；
+    ③ 固定意象泛滥（“风扇”在第 3 章出现 4 次、“盯着”×3）。②③ 我认为是真问题，① 是设计内的呼应，
+    检测器分不出来。**取舍：宁可多报，再靠“只重写一次 + 保留”兜底**，没有为了好看去放宽阈值。
+  - 尚未用真实模型验证重写质量（规则禁止调用真实 LLM）；重写提示词只在 mock 下验证了流程。
+- 遗留问题 / 需人工确认：
+  - 阈值是在 4 个章节上标定的小样本，建议你用真实写作跑几章后，通过 `repetition_checks` 表回看
+    误报率再调（`YOUTHINK_REPEAT_MIN_SPAN` / `_MAX_SPANS` / `_ACTION_MAX`）。
+  - “故意呼应”会被误报并触发一次重写；若你觉得打扰，可 `YOUTHINK_REPEAT_AUTO_REWRITE=0`
+    （只警告不重写），或调高 `_MIN_SPAN`。
+  - 前端提示条在整章逐场景生成时只显示**最后一次**提示（后一个场景会覆盖前一个），
+    完整历史在 `repetition_checks` 表。
+  - 检测只覆盖“逐场景流式写作”路径；整章一次性生成（`mode=chapter`）与改写/补写不检测。
 
 ### T6 衔接检查结果瘦身 [待做]
 

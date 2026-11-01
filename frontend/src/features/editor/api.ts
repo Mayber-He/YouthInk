@@ -8,6 +8,7 @@ import type {
   AiSmellScanResult,
   ChapterWorkspace,
   ContextPreview,
+  RepetitionCheckResult,
   SceneItem,
   SelectionCritiqueResult,
 } from "./types";
@@ -165,6 +166,22 @@ export function useContextPreview(
       );
     },
     enabled: Boolean(novelUid && chapterId),
+  });
+}
+
+export function useCheckSceneRepetition(novelUid: string, chapterId: number) {
+  return useMutation({
+    mutationFn: (input: { sceneId: number; sceneText: string; chapterSoFar: string }) =>
+      apiRequest<RepetitionCheckResult>(
+        `/api/v1/novels/${novelUid}/chapters/${chapterId}/scenes/${input.sceneId}/repetition-check`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            scene_text: input.sceneText,
+            chapter_so_far: input.chapterSoFar,
+          }),
+        }
+      ),
   });
 }
 

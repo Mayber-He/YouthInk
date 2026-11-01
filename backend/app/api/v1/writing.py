@@ -22,6 +22,8 @@ from app.schemas.writing import (
     ChapterSaveRequest,
     ChapterWorkspaceResponse,
     ContextPreviewResponse,
+    RepetitionCheckRequest,
+    RepetitionCheckResponse,
     SceneCreate,
     SceneResponse,
     SceneUpdate,
@@ -111,6 +113,27 @@ def delete_scene(
     repo: WritingRepository = Depends(get_writing_repo),
 ) -> None:
     repo.delete_scene(scene_id)
+
+
+@router.post(
+    "/chapters/{chapter_id}/scenes/{scene_id}/repetition-check",
+    response_model=RepetitionCheckResponse,
+)
+async def check_scene_repetition(
+    chapter_id: int,
+    scene_id: int,
+    payload: RepetitionCheckRequest,
+    svc: WritingService = Depends(get_writing_service),
+) -> RepetitionCheckResponse:
+    """Check a freshly generated scene for repetition; over threshold -> one rewrite, then keep+warn."""
+    result = await svc.check_scene_repetition(
+        chapter_id=chapter_id,
+        scene_id=scene_id,
+        scene_text=payload.scene_text,
+        chapter_so_far=payload.chapter_so_far,
+        auto_rewrite=payload.auto_rewrite,
+    )
+    return RepetitionCheckResponse(**result)
 
 
 @router.post("/chapters/{chapter_id}/scenes/generate", response_model=list[SceneResponse])

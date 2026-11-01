@@ -383,6 +383,23 @@ CREATE TABLE IF NOT EXISTS consistency_reviews (
     model           TEXT,
     created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
 );
+-- T5: 场景正文生成后的确定性重复检测记录（只加表，向后兼容；旧库启动时自动建表）
+CREATE TABLE IF NOT EXISTS repetition_checks (
+    id              INTEGER PRIMARY KEY,
+    chapter_id      INTEGER REFERENCES chapters(id) ON DELETE CASCADE,
+    scene_id        INTEGER REFERENCES scenes(id) ON DELETE SET NULL,
+    stage           TEXT    NOT NULL DEFAULT 'initial'
+                        CHECK(stage IN ('initial','after_rewrite')),
+    triggered       INTEGER NOT NULL DEFAULT 0,
+    action_taken    TEXT    NOT NULL DEFAULT 'none'
+                        CHECK(action_taken IN ('none','rewritten','kept_with_warning','rewrite_failed')),
+    coverage        REAL    NOT NULL DEFAULT 0,
+    reasons_json    TEXT    NOT NULL DEFAULT '[]',
+    report_json     TEXT    NOT NULL DEFAULT '{}',
+    thresholds_json TEXT    NOT NULL DEFAULT '{}',
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_repetition_checks_chapter ON repetition_checks(chapter_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_consistency_reviews_chapter ON consistency_reviews(chapter_id);
 CREATE INDEX IF NOT EXISTS idx_facts_status   ON facts(status);
 CREATE INDEX IF NOT EXISTS idx_facts_entities ON facts(entity_ids);
