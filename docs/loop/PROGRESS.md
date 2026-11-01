@@ -449,3 +449,12 @@ T6 之后哪些 evidence 字段真正进提示词，随开关/模型输出而变
 - 全量的 5 个既有失败：`test_character_timeline_temporal_query`、`test_float_sort_order_and_rolling_chapter_generation`、`test_rolling_generation_uses_retained_chapter_and_rejects_reversed_batch`、`test_ai_smell_scanner_and_sse_streaming`、`test_m5_hundred_chapter_long_book_stress_and_temporal_isolation`。本次不改动这些路径。
 
 所有模型响应使用 mock/已有固定样本，运行时额外阻断外部 socket 连接；测试数据库使用临时目录。调查前记录的 13 个现有数据库/密钥文件 SHA-256 核对未变化。
+
+
+## 2026-11-01：登记后续任务 T8–T12（仅计划）
+
+- 当前分支没有 `docs/loop/PLAN.md`；按本次要求及本文已有工作约定新建该文件，未重建或改写 T1–T7 历史。
+- T8–T12 均为 **待执行**：T8 约束解除判定与待确认保护；T9 时间锚点与相对时间检测；T10 活跃人物判定；T11 RAG 去重；T12 记忆精简。各项已列明改动范围、回归验证及人工确认事项。
+- 保留每轮一个任务、验证、更新进度、一个 commit、禁止真实 LLM 和禁止修改小说数据的总规则；T8 恢复 SQL 只出草稿，必须由用户决定是否手动执行。
+- 本轮验证：逐项核对 T8–T12 要求及任务编号/待执行状态；确认原有 PROGRESS 内容逐字节保留，已有 `eval_export.md` 未变；`git diff --check` 通过。本轮仅改文档，未运行应用测试、未访问小说数据库、未调用 LLM。
+- 本轮没有代码实现或功能验收结果。执行结果与需人工确认的具体数据，留待每项任务完成后分别记录；下一轮从 T8 的只读调查开始。
