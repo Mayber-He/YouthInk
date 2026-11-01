@@ -20,6 +20,7 @@ interface SelectionToolbarProps {
   ) => void;
   onRewriteSmellHit: (hit: AiSmellHit) => void;
   onApplySmellRewrite: (hit: AiSmellHit) => void;
+  onApplyAllSmellRewrites?: () => void;
   onFocusSmellHit?: (hit: AiSmellHit) => void;
   onDismissSmell?: () => void;
   onCritiqueSelection?: () => void;
@@ -40,6 +41,7 @@ export const SelectionToolbar: React.FC<SelectionToolbarProps> = ({
   onRewriteSelection,
   onRewriteSmellHit,
   onApplySmellRewrite,
+  onApplyAllSmellRewrites,
   onFocusSmellHit,
   onDismissSmell,
   onCritiqueSelection,
@@ -244,16 +246,31 @@ export const SelectionToolbar: React.FC<SelectionToolbarProps> = ({
                 模型发现 {aiSmellHits.length} 处值得检查的表达（点击定位原文；改写需手动触发）：
               </span>
             </div>
-            {onDismissSmell && (
-              <button
-                type="button"
-                onClick={onDismissSmell}
-                className="rounded p-1 text-amber-700 hover:bg-amber-100 cursor-pointer"
-                title="收起检测结果"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            )}
+            <div className="flex items-center gap-1.5">
+              {onApplyAllSmellRewrites &&
+                aiSmellHits.some((h) => h.suggested_rewrite.trim()) && (
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={isStreaming}
+                    onClick={onApplyAllSmellRewrites}
+                    title="按建议一次性重写全部命中片段并保存"
+                  >
+                    <Sparkles className="mr-1 h-3 w-3" />
+                    一键应用全部建议
+                  </Button>
+                )}
+              {onDismissSmell && (
+                <button
+                  type="button"
+                  onClick={onDismissSmell}
+                  className="rounded p-1 text-amber-700 hover:bg-amber-100 cursor-pointer"
+                  title="收起检测结果"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
           </div>
           <div className="mt-2 flex flex-wrap gap-2">
             {aiSmellHits.map((hit, idx) => (

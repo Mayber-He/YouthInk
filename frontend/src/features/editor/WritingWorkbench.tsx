@@ -362,6 +362,33 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
     saveMut.mutate({ content: updated, source: "ai", create_new_version: true });
   };
 
+  // 一键应用全部建议重写：按 start_index 从后往前替换，避免前面的替换移位后续偏移；
+  // 替换前校验原文片段仍匹配，跳过已被编辑过的命中。
+  const handleApplyAllSmellRewrites = () => {
+    if (!effectiveChapterId) return;
+    const applicable = smellHits
+      .filter((h) => h.suggested_rewrite.trim())
+      .sort((a, b) => b.start_index - a.start_index);
+    let updated = content;
+    let appliedCount = 0;
+    const appliedStarts = new Set<number>();
+    for (const hit of applicable) {
+      const { start_index: start, end_index: end } = hit;
+      if (updated.slice(start, end) !== hit.matched_text) continue;
+      updated = updated.slice(0, start) + hit.suggested_rewrite + updated.slice(end);
+      appliedStarts.add(start);
+      appliedCount += 1;
+    }
+    if (appliedCount === 0) {
+      setSmellError("建议片段已与当前正文不匹配（可能已被编辑），请重新扫描。");
+      return;
+    }
+    setContent(updated);
+    setSmellHits((prev) => prev.filter((h) => !appliedStarts.has(h.start_index)));
+    setSmellError(null);
+    saveMut.mutate({ content: updated, source: "ai", create_new_version: true });
+  };
+
   const handleOpenSupplement = () => {
     const insertAt = selectionRange.text
       ? selectionRange.end
@@ -589,6 +616,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
             onRewriteSelection={handleRewriteSelection}
             onRewriteSmellHit={handleRewriteSmellHit}
             onApplySmellRewrite={handleApplySmellRewrite}
+            onApplyAllSmellRewrites={handleApplyAllSmellRewrites}
             onFocusSmellHit={handleFocusSmellHit}
             onDismissSmell={() => {
               setHasScannedSmell(false);
