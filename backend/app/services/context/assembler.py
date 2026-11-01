@@ -17,6 +17,7 @@ from app.schemas.writing import ContextBlockItem, ContextPreviewResponse
 from app.services.embedding.encoder import encode_text_sync
 from app.services.llm.client import estimate_tokens
 from app.services.story_time import time_anchor
+from app.services.rag.dedup import filter_history_hits
 
 _MENTION_RE = re.compile(r"@([^\s，,。；;！!？?\n]+)")
 _FORBIDDEN_LINE_RE = re.compile(r"^\s*本场禁止出现\s*[:：]")
@@ -47,6 +48,7 @@ class ContextAssembler:
         chapter_id: int,
         scene_id: int | None = None,
         disabled_keys: list[str] | None = None,
+        existing_content: str | None = None,
     ) -> ContextPreviewResponse:
         disabled = set(disabled_keys or [])
         ch = self._outline_repo.get_chapter(chapter_id)
@@ -388,6 +390,13 @@ class ContextAssembler:
 
         # 7. RAG 历史高相关场景片段
         rag_lines: list[str] = []
+        excluded_ids = {chapter_id} | ({int(prev_row["id"])} if prev_row else set())
+        if existing_content is None:
+            version = self._conn.execute(
+                "SELECT content FROM chapter_versions WHERE chapter_id = ? "
+                "ORDER BY version DESC, id DESC LIMIT 1", (chapter_id,),
+            ).fetchone()
+            existing_content = str(version["content"] or "") if version else ""
         if self._vector_store.store_file.exists():
             fresh_chapter_hashes = {
                 int(row["id"]): str(row["content_hash"])
@@ -397,6 +406,7 @@ class ContextAssembler:
                     "AND content_hash IS NOT NULL",
                     (ch.sort_order,),
                 ).fetchall()
+                if int(row["id"]) not in excluded_ids
             }
             query_str = combined_beats.strip() or ch.title
             q_vec = encode_text_sync(query_str)
@@ -406,19 +416,21 @@ class ContextAssembler:
                 allowed_chapter_hashes=fresh_chapter_hashes,
                 top_k=3,
             )
+            vec_hits = filter_history_hits(
+                vec_hits, excluded_chapter_ids=excluded_ids,
+                history_texts=[prev_full[-1500:], existing_content],
+            )
             rag_lines = [
                 f"• [历史章节 #{rec.chapter_id} 片段] {rec.text[:260]}"
                 for rec, _score in vec_hits
             ]
-        blocks.append(
-            self._make_block(
-                "rag_history",
-                "RAG 检索相关历史场景片段",
-                "\n".join(rag_lines) or "暂无已定稿历史向量片段",
-                disabled,
-                priority="optional",
+        if rag_lines:
+            blocks.append(
+                self._make_block(
+                    "rag_history", "RAG 检索相关历史场景片段",
+                    "\n".join(rag_lines), disabled, priority="optional",
+                )
             )
-        )
 
         total_tokens = sum(b.tokens for b in blocks if b.enabled)
         return ContextPreviewResponse(

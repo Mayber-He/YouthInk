@@ -308,7 +308,7 @@ class WritingService:
         if legacy:
             layer1 = _LEGACY_SYSTEM_ROLE
         preview = self._assembler.build_context_preview(
-            req.chapter_id, req.scene_id, req.disabled_context_keys
+            req.chapter_id, req.scene_id, req.disabled_context_keys, existing_content=req.existing_content
         )
         enabled_blocks = [b for b in preview.blocks if b.enabled]
 
@@ -605,7 +605,7 @@ class WritingService:
         layer1, layer2, layer3 = self._build_base_layers()
         chapter = self._outline_repo.get_chapter(req.chapter_id)
         preview = self._assembler.build_context_preview(
-            req.chapter_id, disabled_keys=req.disabled_context_keys
+            req.chapter_id, disabled_keys=req.disabled_context_keys, existing_content=req.content
         )
         context_parts = [
             f"### {block.label}\n{block.content}"
