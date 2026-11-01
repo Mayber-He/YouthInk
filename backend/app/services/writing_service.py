@@ -27,6 +27,20 @@ from app.services.prompt.renderer import assemble_six_layer_prompt, render_templ
 
 _scene_logger = logging.getLogger(__name__)
 
+# T4 之前的 system_role 全文（六条“严禁”铁律）。仅用于 scripts/compare_write_prompt.py
+# 复现“改动前”基线以量化瘦身效果；生产路径不再使用。
+_LEGACY_SYSTEM_ROLE = (
+    "你是一位擅长青春文学与长篇连载创作的资深小说作家与文学统筹编辑。\n"
+    "你的文笔自然细腻、充满生活质感与时代气息，善于用具体的感官细节（光线、声音、气味、细微动作）替代空洞的情绪形容词。\n"
+    "创作铁律（六大常理与视角边界准则，全程严禁违反）：\n"
+    "1. 【设定事实与角色认知隔离（防上帝视角渗透）】：人物卡中的既有经历、关系历史和全书设定属于必须遵守的故事事实，不得因角色本人尚不知情而改写；但这些作者信息不等于 POV 已经知道，严禁让角色知晓其尚未得知的秘密或未亲历的事实。\n"
+    "2. 【空间与环境熟悉度常理】：严格依据角色身份与当前剧情阶段展现环境熟悉度。凡属初次到访（如新生刚报到、刚转学、首次去某场所），必须通过观察路牌、四处打量、看地图、问路或走错路等细节体现陌生感，严禁表现得熟门熟路、轻车熟路。\n"
+    "3. 【人际关系与初见边界】：对话称呼、语气与肢体距离必须严格匹配人物卡既有关系、已确认关系变化和前文事实。没有结构化关系记录不代表初见或不熟；只有设定与前文确认为初次见面或尚不熟稔时，才按初见边界处理，严禁无铺垫自来熟、严禁未经自我介绍或他人提及便直呼对方姓名/绰号/过往隐私。\n"
+    "4. 【限知视角与感官边界】：采用限知视角写作时，严格从当前场景视角人物（POV）的五感与认知出发描写；POV 角色只能观察他人外在言行与微表情，严禁直接读取他人内心独白或描写 POV 视线/听觉范围之外的死角。\n"
+    "5. 【时间、季节与物理状态连续性】：严格遵守故事内时间流速、昼夜光线、季节气候与服装搭配、人物身体伤病/体力限制及随身物品状态；物品、食物与道具称谓严禁前后自相矛盾或中途随意漂移（如前文挂面后文绝不能擅自写成泡面）；已完成的物理动作与状态（如食物吃完、物品放下、已消耗或已离开）在后续必须保持一致，严禁出现吃完又继续吃等动作前后矛盾；空间移动必须有合理的动作与路径过渡，严禁空间瞬移或前后道具凭空出现/消失。\n"
+    "6. 【场景在场与年龄身份边界】：仅限当前场景在场人物参与对话与互动，未到场或已离场角色严禁凭空插话；人物言行、消费能力、社会阅历与技能水平必须符合其年龄与身份常理。严禁在章节末尾强行升华主题或替读者总结点题。"
+)
+
 
 def _word_count_range(target: int) -> str:
     lower = round(target * 0.8)
@@ -52,35 +66,77 @@ class WritingService:
         self._settings_repo = settings_repo
         self._assembler = ContextAssembler(novel_conn, novel_uid, settings_repo)
 
-    def _build_base_layers(self) -> tuple[str, str, str]:
+    def _build_base_layers(self, prose: bool = False) -> tuple[str, str, str]:
+        """Return (system_role, style, core_setting).
+
+        ``prose=True`` is used only by the prose-writing path (T4): the style layer
+        always carries forbidden expressions + up to 2 example paragraphs (even when the
+        author wrote a style_note), and the core setting uses a 1–2 sentence blurb instead
+        of the whole-book synopsis (which holds late-plot spoilers). All other callers keep
+        the previous behaviour.
+        """
+        from app.services.prompt.prose_prompt import (
+            core_setting_blurb,
+            prose_prompt_v2_enabled,
+            protagonist_brief,
+            style_layer,
+        )
+
         prompts = {p.task_type: p for p in self._settings_repo.list_prompt_templates()}
         layer1 = prompts["system_role"].content
         novel = self._novel_repo.get_novel_detail()
         styles = self._settings_repo.list_style_templates()
         style = next((s for s in styles if s.id == novel.style_template_id), None)
+        has_note = bool((novel.style_note or "").strip())
 
-        layer2 = ""
-        if style and not (novel.style_note or '').strip():
-            examples = "\n".join(f"示例：{ex}" for ex in style.example_paras[:2])
-            layer2 = (
-                f"风格模板：{style.name}\n"
-                f"叙事视角：{novel.pov or style.pov} | 语感：{style.tense_feel}\n"
-                f"基调：{novel.tone or style.tone} | 句式：{style.sentence_pref} | 对话比例：{style.dialogue_ratio}\n"
-                f"描写侧重：{style.desc_focus} | 节奏：{style.pacing}\n"
-                f"禁用套话表达：{', '.join(style.forbidden_exprs)}\n"
-                f"{examples}"
+        use_v2 = prose and prose_prompt_v2_enabled()
+
+        if use_v2 and style:
+            layer2 = style_layer(
+                style_name=style.name,
+                pov=novel.pov or style.pov,
+                tense_feel=style.tense_feel,
+                tone=novel.tone or style.tone,
+                sentence_pref=style.sentence_pref,
+                dialogue_ratio=style.dialogue_ratio,
+                desc_focus=style.desc_focus,
+                pacing=style.pacing,
+                forbidden_exprs=list(style.forbidden_exprs),
+                example_paras=list(style.example_paras),
+                has_style_note=has_note,
             )
+        else:
+            layer2 = ""
+            if style and not has_note:
+                examples = "\n".join(f"示例：{ex}" for ex in style.example_paras[:2])
+                layer2 = (
+                    f"风格模板：{style.name}\n"
+                    f"叙事视角：{novel.pov or style.pov} | 语感：{style.tense_feel}\n"
+                    f"基调：{novel.tone or style.tone} | 句式：{style.sentence_pref} | 对话比例：{style.dialogue_ratio}\n"
+                    f"描写侧重：{style.desc_focus} | 节奏：{style.pacing}\n"
+                    f"禁用套话表达：{', '.join(style.forbidden_exprs)}\n"
+                    f"{examples}"
+                )
 
         from app.services.prompt.author_style import author_style_prompt
         layer2 += "\n" + author_style_prompt(novel)
 
-        layer3 = (
-            f"书名：《{novel.title}》\n"
-            f"题材：{novel.genre or '校园'} | 基调：{novel.tone or '清新治愈'} | 视角：{novel.pov or '第三人称限知'}\n"
-            f"主角概念：{novel.protagonist_concept or ''}\n"
-            f"全书梗概：{novel.synopsis or ''}\n"
-            f"结局方向：感情线({novel.romance_ending or 'HE'}) / 成长线({novel.growth_ending or 'HE'})"
-        )
+        if use_v2:
+            blurb = core_setting_blurb(novel.synopsis or "", novel.protagonist_concept or "")
+            layer3 = (
+                f"书名：《{novel.title}》\n"
+                f"题材：{novel.genre or '校园'} | 基调：{novel.tone or '清新治愈'} | 视角：{novel.pov or '第三人称限知'}\n"
+                f"主角概念：{protagonist_brief(novel.protagonist_concept or '')}\n"
+                f"核心设定：{blurb}"
+            )
+        else:
+            layer3 = (
+                f"书名：《{novel.title}》\n"
+                f"题材：{novel.genre or '校园'} | 基调：{novel.tone or '清新治愈'} | 视角：{novel.pov or '第三人称限知'}\n"
+                f"主角概念：{novel.protagonist_concept or ''}\n"
+                f"全书梗概：{novel.synopsis or ''}\n"
+                f"结局方向：感情线({novel.romance_ending or 'HE'}) / 成长线({novel.growth_ending or 'HE'})"
+            )
         return layer1, layer2, layer3
 
     async def generate_chapter_scenes(
@@ -226,24 +282,67 @@ class WritingService:
             )
         return self._writing_repo.replace_chapter_scenes(chapter_id, scenes_to_create)
 
-    def prepare_stream_write_prompts(self, req: StreamWriteRequest, boundary: str = "") -> tuple[str, str]:
-        """Build (system_prompt, user_prompt) for scene-by-scene or full-chapter SSE generation."""
-        layer1, layer2, layer3 = self._build_base_layers()
+    # 约束与人物类 → 上一章/前文类 → 本章细纲(含本场景事件清单)；任务指令永远在最后。
+    _CONSTRAINT_BLOCK_KEYS = (
+        "hard_constraints",
+        "character_states",
+        "cognitive_constraints",
+        "location_and_worldview",
+    )
+    _HISTORY_BLOCK_KEYS = ("summaries_and_prev", "foreshadowing_and_facts", "rag_history")
+    _SCENE_BLOCK_KEYS = ("chapter_beats",)
+
+    def prepare_stream_write_prompts(
+        self, req: StreamWriteRequest, boundary: str = "", legacy: bool = False
+    ) -> tuple[str, str]:
+        """Build (system_prompt, user_prompt) for scene-by-scene or full-chapter SSE generation.
+
+        ``legacy=True`` reproduces the pre-T4 assembly (used only by the before/after
+        comparison script). Default is the T4 layout, switchable off globally with
+        ``YOUTHINK_PROSE_PROMPT_V2=0``.
+        """
+        from app.services.prompt.prose_prompt import ending_rule, prose_prompt_v2_enabled
+
+        v2 = (not legacy) and prose_prompt_v2_enabled()
+        layer1, layer2, layer3 = self._build_base_layers(prose=v2)
+        if legacy:
+            layer1 = _LEGACY_SYSTEM_ROLE
         preview = self._assembler.build_context_preview(
             req.chapter_id, req.scene_id, req.disabled_context_keys
         )
-        enabled_parts = [
-            f"### {b.label}\n{b.content}" for b in preview.blocks if b.enabled
-        ]
-        if boundary:
-            enabled_parts.append(boundary)
-        if req.custom_context.strip():
-            enabled_parts.append(f"### 作者手动补充参考\n{req.custom_context.strip()}")
-        if req.existing_content.strip():
-            tail = req.existing_content.strip()[-1800:]
-            enabled_parts.append(f"### 本章已写前文（请自然衔接续写，切勿重复）\n{tail}")
+        enabled_blocks = [b for b in preview.blocks if b.enabled]
 
-        layer4 = "\n\n".join(enabled_parts)
+        def _fmt(b) -> str:
+            return f"### {b.label}\n{b.content}"
+
+        if v2:
+            by_key = {b.key: b for b in enabled_blocks}
+            known = set(self._CONSTRAINT_BLOCK_KEYS + self._HISTORY_BLOCK_KEYS + self._SCENE_BLOCK_KEYS)
+            constraint_parts = [_fmt(by_key[k]) for k in self._CONSTRAINT_BLOCK_KEYS if k in by_key]
+            # 未知 key（日后新增的块）并入约束段，保证不丢信息。
+            constraint_parts += [_fmt(b) for b in enabled_blocks if b.key not in known]
+            if req.custom_context.strip():
+                constraint_parts.append(f"### 作者手动补充参考\n{req.custom_context.strip()}")
+
+            history_parts = [_fmt(by_key[k]) for k in self._HISTORY_BLOCK_KEYS if k in by_key]
+            if boundary:
+                history_parts.append(boundary)
+            if req.existing_content.strip():
+                tail = req.existing_content.strip()[-1800:]
+                history_parts.append(f"### 本章已写前文（请自然衔接续写，切勿重复）\n{tail}")
+
+            scene_parts = [_fmt(by_key[k]) for k in self._SCENE_BLOCK_KEYS if k in by_key]
+            layer4 = "\n\n".join(constraint_parts + history_parts + scene_parts)
+        else:
+            enabled_parts = [_fmt(b) for b in enabled_blocks]
+            if boundary:
+                enabled_parts.append(boundary)
+            if req.custom_context.strip():
+                enabled_parts.append(f"### 作者手动补充参考\n{req.custom_context.strip()}")
+            if req.existing_content.strip():
+                tail = req.existing_content.strip()[-1800:]
+                enabled_parts.append(f"### 本章已写前文（请自然衔接续写，切勿重复）\n{tail}")
+            layer4 = "\n\n".join(enabled_parts)
         ch = self._outline_repo.get_chapter(req.chapter_id)
         scenes = self._writing_repo.list_scenes(req.chapter_id)
 
@@ -289,6 +388,10 @@ class WritingService:
             "不得把“明天”跨越未写出的日期直接当成既定事件日；跨日章节先标明关键事件的实际发生日期。"
             "不改动既定人物关系和剧情方向，不输出校对过程。"
         )
+
+        if v2:
+            # 场景模式按场景序号轮换收尾方式；整章模式用 1（章末同样落在对话/动作/决定）。
+            inst += ending_rule(scene_idx if (req.mode == "scene" and req.scene_id is not None) else 1)
 
         fmt = "直接输出小说正文段落，不要输出章节标题、序号或任何解释性话语。用具体细节代替抽象情绪。"
         return assemble_six_layer_prompt(
