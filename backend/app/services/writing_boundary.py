@@ -1,4 +1,6 @@
 """Check a writing plan against actual preceding prose before streaming a draft."""
+import re
+
 from pydantic import BaseModel, Field
 
 from app.core.exceptions import AppError
