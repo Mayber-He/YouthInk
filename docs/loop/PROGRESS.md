@@ -61,9 +61,32 @@ foreshadowing 用 `content` 而非 `description`。
   - 兜底“失败”状态下 facts 走 pending、**不自动确认**；前端面板已显示红/黄标记，
     但“标记”目前只在定稿后的即时结果区展示，未落库为持久字段（如需在列表历史回看，可后续加列）。
 
-### T2 约束与人物状态按阶段生效 [待做]
-注：schema 里 constraints 已有 valid_from_chapter_id / valid_until_chapter_id 列，
-assembler 过滤逻辑待核实是否已按章过滤。
+### T2 约束与人物状态按阶段生效 [完成]
+- [x] constraints 生效范围字段：`valid_from_chapter_id` / `valid_until_chapter_id` **已存在于 schema
+      且 create/update 已暴露**；`ConstraintRepository.list_active_for_chapter` **已按当前章 sort_order
+      过滤**窗口。本轮补测试证明过滤真实生效（窗口内出现、窗口外不出现、until 含当章）。未再改生产代码逻辑。
+- [x] 人物“当前状态”无结构化记录时的默认文案：由“保持初始基准状态”改为
+      “无结构化状态变更记录；以本章起点为准，沿用人物卡基准状态与前文已写事件，不要据此另造新状态”。
+      （关系栏文案此前已较完整，保持不动。）
+- [x] 新增只读审计脚本 `backend/scripts/audit_constraints.py`：以只读模式打开 novel.db，
+      列出全部约束+生效范围，启发式标注可能冲突（人物“陌生某地”但该地点 related_chars 含该人物／
+      背景提到居住；生效窗口为空或 until 早于最新章而仍 active；文本同时含陌生+熟悉措辞），
+      输出 `docs/loop/constraint_audit.md`，不修改数据。
+- 改动文件：
+  - 改 `backend/app/services/context/assembler.py`（人物状态空值文案）
+  - 新增 `backend/scripts/audit_constraints.py`
+  - 新增 `docs/loop/constraint_audit.md`（在真实库 novel_cf825d92d2d9 上只读生成）
+  - 新增 `backend/tests/test_constraint_phasing.py`
+- 验证结果：
+  - 新增 5 测试全过（按章过滤 2 + 文案 1 + 审计脚本运行/只读 2）。
+  - 全量 `pytest tests`：50 passed / 5 failed，5 个为基线既有失败，无新增。
+  - 审计脚本在真实库跑通：21 条约束，启发式标注 2 条“可能冲突”（#9/#12，经判定为误报，
+    属不同地点的复合约束/否定句式——正说明启发式只作人工复核提示，报告已注明）。
+- 遗留问题 / 需人工确认：
+  - 审计的“文本同时含陌生+熟悉措辞”启发式偏噪（会命中“对A地熟悉但对B地陌生”这类正常复合约束）。
+    保留为人工复核提示，未据此改数据。
+  - 现有约束 21 条 valid_from/until 均为空（全程生效），与当前仅 5 章、全在报到阶段一致；
+    如需按阶段收窄某条约束，请在约束管理里设置生效范围，assembler 会自动按章过滤。
 
 ### T3 场景拆分改为事件清单 [待做]
 

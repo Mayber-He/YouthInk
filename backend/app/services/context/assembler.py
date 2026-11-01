@@ -121,7 +121,7 @@ class ContextAssembler:
             snap = self._entity_repo.get_character_timeline_snapshot(cid, ch.sort_order)
             state_str = (
                 "；".join(f"{k}:{v}" for k, v in snap.current_states.items())
-                or "保持初始基准状态"
+                or "无结构化状态变更记录；以本章起点为准，沿用人物卡基准状态与前文已写事件，不要据此另造新状态"
             )
             rel_str = (
                 "；".join(
