@@ -94,6 +94,16 @@ export const MemoryChapterPanel: React.FC<MemoryChapterPanelProps> = ({
               {lastResult.auto_confirmed_count} 项 · 待人工确认：
               {lastResult.pending_count} 项
             </div>
+            {lastResult.extraction_status === "failed" && (
+              <div className="mt-1.5 rounded bg-rose-50 px-2 py-1 font-medium text-rose-700 dark:bg-rose-950/40 dark:text-rose-300">
+                ⚠️ 本章记忆抽取失败：仅生成了占位事实，请在下方待确认列表中人工补录。
+              </div>
+            )}
+            {lastResult.extraction_status === "partial" && (
+              <div className="mt-1.5 rounded bg-amber-50 px-2 py-1 font-medium text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
+                ⚠️ 本章记忆抽取部分失败：部分条目因格式不符或引文不在正文中已被丢弃，请核对下方结果。
+              </div>
+            )}
           </div>
         )}
       </div>

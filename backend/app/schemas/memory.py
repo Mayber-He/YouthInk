@@ -105,6 +105,9 @@ class FinalizeChapterResponse(BaseModel):
     chapter_summary: str
     auto_confirmed_count: int
     pending_count: int
+    # 记忆抽取结果：'ok' 全部成功 | 'partial' 部分条目被丢弃 | 'failed' 整批失败走兜底。
+    # 前端据此显示“本章记忆抽取失败/部分失败”标记。
+    extraction_status: str = "ok"
 
 
 # --- LLM Memory Extraction Structured Output Schemas ---

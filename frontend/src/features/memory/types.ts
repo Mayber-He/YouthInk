@@ -114,4 +114,6 @@ export interface FinalizeChapterResponse {
   chapter_summary: string;
   auto_confirmed_count: number;
   pending_count: number;
+  // 'ok' | 'partial' | 'failed'：记忆抽取结果，用于显示失败/部分失败标记
+  extraction_status: string;
 }

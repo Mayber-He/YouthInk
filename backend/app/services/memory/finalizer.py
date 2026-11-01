@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sqlite3
 
 from app.core.exceptions import AppError
@@ -15,11 +16,58 @@ from app.db.repositories.outline_repo import OutlineRepository
 from app.db.repositories.settings_repo import SettingsRepository
 from app.db.repositories.writing_repo import WritingRepository
 from app.db.vector_store import NovelVectorStore, VectorChunkRecord
-from app.schemas.memory import FinalizeChapterResponse, LlmMemoryExtractionOutput
+from app.schemas.memory import (
+    FinalizeChapterResponse,
+    LlmExtractedFact,
+    LlmMemoryExtractionOutput,
+)
 from app.services.backup_service import create_novel_backup
 from app.services.embedding.encoder import encode_text_sync
 from app.services.llm.client import complete_chat
-from app.services.llm.json_parser import parse_and_validate_json
+from app.services.memory.extraction_parse import (
+    ExtractionParseResult,
+    normalize_for_quote_match,
+    parse_extraction_items,
+)
+
+logger = logging.getLogger(__name__)
+
+
+# Field/枚举说明 + 一个示例，与 app/schemas/memory.py 的六类子模型逐字对齐。
+# 单独抽成常量以便测试断言提示词覆盖了全部六类与关键字段名。
+MEMORY_EXTRACTION_SCHEMA_GUIDE = (
+    "必须严格输出下列六个数组字段的 JSON 对象（无多余字段），每个元素字段名必须与下方完全一致：\n"
+    "1) facts（本章发生的客观事实）：\n"
+    '   {"content": "事实描述", "fact_type": "event|item|place|state|other", '
+    '"character_names": ["涉及角色名"], "location_names": ["涉及地点名"], '
+    '"source_quote": "正文原句（逐字）"}\n'
+    "2) state_changes（人物状态变更）：\n"
+    '   {"character_name": "角色名", '
+    '"field": "location|body|emotion|goal|identity|item|appearance", '
+    '"value": "新状态值", "source_quote": "正文原句（逐字）"}\n'
+    "3) cognitive_records（谁知道了什么秘密/认知）：\n"
+    '   {"secret": "秘密或认知内容", "knower_names": ["知情角色名"], '
+    '"learned_by": "如何得知", "source_quote": "正文原句（逐字）"}\n'
+    "4) relationship_changes（人物关系变化，a≠b）：\n"
+    '   {"char_a_name": "角色A", "char_b_name": "角色B", "rel_type": "关系类型", '
+    '"intimacy": 0-10 的整数, "publicity": "public|mutual|one_sided", '
+    '"change_reason": "变化原因", "source_quote": "正文原句（逐字）"}\n'
+    "5) foreshadowing（伏笔）：\n"
+    '   {"description": "伏笔描述", "status": "planted|hinted|recovered", '
+    '"plan_recover_start": 章号或null, "plan_recover_end": 章号或null, '
+    '"source_quote": "正文原句（逐字）"}\n'
+    "6) constraint_checks（对下方硬约束逐条判定，只输出 violated/resolved）：\n"
+    '   {"constraint_id": 约束编号, "verdict": "violated|resolved", '
+    '"evidence_quote": "正文原句（逐字）", "description": "判定说明"}\n'
+    "规则：source_quote / evidence_quote 必须是正文中真实存在的连续原句，不得改写、拼接或省略；"
+    "无法给出原句证据的条目一律不要输出；无相应内容的数组请给空数组 []。\n"
+    "示例（仅示意字段形态，不要照抄内容）：\n"
+    '{"facts": [{"content": "江澈修好了王姨的旧打印机", "fact_type": "event", '
+    '"character_names": ["江澈"], "location_names": [], '
+    '"source_quote": "吐出来的那张测试页平整干净，字口清楚。"}], '
+    '"state_changes": [], "cognitive_records": [], "relationship_changes": [], '
+    '"foreshadowing": [], "constraint_checks": []}'
+)
 
 
 def split_text_chunks(text: str, chunk_size: int = 650, overlap: int = 100) -> list[str]:
@@ -94,8 +142,14 @@ class ChapterFinalizerService:
         )
         self.conn.commit()
 
-        extraction = await self._extract_chapter_memories(chapter_id, ch.title, content)
-        auto_confirmed, pending_cnt = self._persist_extracted_memories(chapter_id, extraction, source_hash)
+        extraction, extraction_status = await self._extract_chapter_memories(
+            chapter_id, ch.title, content
+        )
+        # 整批失败走兜底事实时，禁止自动确认——必须进待确认队列由人工把关。
+        auto_confirmed, pending_cnt = self._persist_extracted_memories(
+            chapter_id, extraction, source_hash,
+            force_pending=(extraction_status == "failed"),
+        )
 
         self.conn.execute(
             "UPDATE chapters SET status = 'final', content_hash = ?, updated_at = datetime('now') WHERE id = ?",
@@ -109,6 +163,7 @@ class ChapterFinalizerService:
             chapter_summary=summary_text,
             auto_confirmed_count=auto_confirmed,
             pending_count=pending_cnt,
+            extraction_status=extraction_status,
         )
 
     def _current_embedding_model_id(self) -> str:
@@ -193,9 +248,31 @@ class ChapterFinalizerService:
             pass
         return f"【《{title}》章节摘要】" + content[:240].replace("\n", " ")
 
+    def _build_extraction_prompt(
+        self, title: str, content: str, char_names: list[str], constraint_lines: str
+    ) -> str:
+        constraint_section = (
+            f"\n\n本章生效中的硬约束清单（必须逐条判定，写入 constraint_checks）：\n{constraint_lines}\n"
+            if constraint_lines
+            else ""
+        )
+        return (
+            f"请从章节《{title}》正文中抽取结构化设定变更与记忆条目。\n"
+            f"已知角色（请只使用这些角色名）：{', '.join(char_names) or '无'}\n\n"
+            f"{MEMORY_EXTRACTION_SCHEMA_GUIDE}"
+            f"{constraint_section}\n\n"
+            f"章节正文：\n{content[:5000]}"
+        )
+
     async def _extract_chapter_memories(
         self, chapter_id: int, title: str, content: str
-    ) -> LlmMemoryExtractionOutput:
+    ) -> tuple[LlmMemoryExtractionOutput, str]:
+        """Extract memories with per-item tolerance; returns (output, status).
+
+        status ∈ {'ok','partial','failed'} drives the frontend badge. 'failed'
+        means the batch could not be parsed at all and a non-auto-confirmable
+        fallback fact was produced.
+        """
         char_names = [c.name for c in self.entity_repo.list_characters()]
         ch = self.outline_repo.get_chapter(chapter_id)
         scenes = self.writing_repo.list_scenes(chapter_id)
@@ -211,54 +288,98 @@ class ChapterFinalizerService:
             f"·{c.target_type}{'「' + c.target_name + '」' if c.target_name else ''}】{c.content}"
             for c in active_constraints
         )
-        constraint_section = (
-            f"\n\n本章生效中的硬约束清单（必须逐条判定）：\n{constraint_lines}\n"
-            "对每条约束给出判定：ok（本章遵守或无关，不输出）；"
-            "violated（本章正文违反了该约束，必须附原文证据 evidence_quote）；"
-            "resolved（本章剧情表明该约束已自然解除，如人物已熟悉校园，必须附证据）。"
-            "只输出 violated / resolved 的条目。"
-            if constraint_lines
-            else ""
+        base_prompt = self._build_extraction_prompt(
+            title, content, char_names, constraint_lines
         )
-        prompt = (
-            f"请从章节《{title}》正文中抽取结构化设定变更与记忆条目（每项必须含原文引用 source_quote）。\n"
-            f"已知角色：{', '.join(char_names) or '无'}\n"
-            "输出 JSON (facts, state_changes, cognitive_records, relationship_changes, foreshadowing, constraint_checks)，"
-            "其中 constraint_checks 数组每项为 "
-            '{"constraint_id": 约束编号, "verdict": "violated|resolved", '
-            '"evidence_quote": "原文证据", "description": "判定说明"}。\n'
-            f"{constraint_section}\n\n"
-            f"章节正文：\n{content[:5000]}"
-        )
+
         try:
             _pid, base_url, model, api_key = self.settings_repo.get_credentials_for_task("extract")
+        except Exception:
+            logger.warning("memory extract: no LLM credentials; using fallback (chapter_id=%s)", chapter_id)
+            return self._fallback_extraction(title, content, char_names), "failed"
+
+        async def _call(user_prompt: str) -> str:
             res = await complete_chat(
                 base_url=base_url,
                 api_key=api_key,
                 model=model,
                 system_prompt="你是小说记忆抽取引擎，严格输出 JSON 对象。",
-                user_prompt=prompt,
+                user_prompt=user_prompt,
                 novel_uid=self.novel_uid,
                 task_type="memory_extract",
                 chapter_id=chapter_id,
             )
-            return await parse_and_validate_json(res.content, LlmMemoryExtractionOutput)
-        except Exception:
-            first_para = content.split("\n")[0][:80]
-            return LlmMemoryExtractionOutput(
-                facts=[
-                    {  # type: ignore[list-item]
-                        "content": f"《{title}》发生事件：{first_para}",
-                        "fact_type": "event",
-                        "character_names": char_names[:2],
-                        "location_names": [],
-                        "source_quote": first_para,
-                    }
-                ]
+            return res.content
+
+        # Attempt 1: normal call + per-item tolerant parse.
+        parse_result: ExtractionParseResult | None = None
+        last_error = ""
+        try:
+            raw = await _call(base_prompt)
+            parse_result = parse_extraction_items(raw, content)
+        except Exception as exc:  # outer-JSON failure or network error
+            last_error = str(exc)
+            logger.warning("memory extract attempt 1 failed (chapter_id=%s): %s", chapter_id, last_error)
+
+        # Attempt 2 (only when the whole batch was unusable): feed the error back.
+        if parse_result is None or parse_result.kept == 0:
+            retry_hint = (
+                "\n\n上一次输出无法解析或没有任何合法条目。"
+                f"错误信息：{last_error or '所有条目字段不符合要求或引文不在正文中'}。"
+                "请严格按上面的字段名与 JSON 结构重新输出，不要加解释文字。"
             )
+            try:
+                raw2 = await _call(base_prompt + retry_hint)
+                retry_result = parse_extraction_items(raw2, content)
+                if parse_result is None or retry_result.kept >= parse_result.kept:
+                    parse_result = retry_result
+            except Exception as exc:
+                last_error = str(exc)
+                logger.warning("memory extract retry failed (chapter_id=%s): %s", chapter_id, last_error)
+
+        if parse_result is not None and parse_result.kept > 0:
+            if parse_result.drop_log:
+                logger.info(
+                    "memory extract chapter_id=%s kept=%d dropped_invalid=%d dropped_quote=%d; %s",
+                    chapter_id, parse_result.kept, parse_result.dropped_invalid,
+                    parse_result.dropped_quote, "; ".join(parse_result.drop_log[:10]),
+                )
+            return parse_result.output, parse_result.status
+
+        # Batch still unusable: non-auto-confirmable fallback fact.
+        logger.warning(
+            "memory extract fully failed (chapter_id=%s); using fallback fact. last_error=%s",
+            chapter_id, last_error,
+        )
+        return self._fallback_extraction(title, content, char_names), "failed"
+
+    def _fallback_extraction(
+        self, title: str, content: str, char_names: list[str]
+    ) -> LlmMemoryExtractionOutput:
+        """A single placeholder fact so the chapter isn't left with nothing.
+
+        Marked so the caller never auto-confirms it (handled via status='failed').
+        The quote is a verbatim slice of the chapter so it survives quote checks.
+        """
+        first_para = content.split("\n")[0][:80]
+        return LlmMemoryExtractionOutput(
+            facts=[
+                LlmExtractedFact(
+                    content=f"《{title}》发生事件（自动抽取失败，待人工确认）：{first_para}",
+                    fact_type="event",
+                    character_names=char_names[:2],
+                    location_names=[],
+                    source_quote=first_para,
+                )
+            ]
+        )
 
     def _persist_extracted_memories(
-        self, chapter_id: int, extraction: LlmMemoryExtractionOutput, source_hash: str
+        self,
+        chapter_id: int,
+        extraction: LlmMemoryExtractionOutput,
+        source_hash: str,
+        force_pending: bool = False,
     ) -> tuple[int, int]:
         for table, column in (("facts", "chapter_id"), ("character_state_changes", "chapter_id"), ("cognitive_records", "chapter_id"), ("relationship_changes", "chapter_id"), ("foreshadowing", "planted_chapter_id"), ("constraint_checks", "chapter_id")):
             self.conn.execute(f"UPDATE {table} SET is_stale = 1 WHERE {column} = ? AND origin = 'extracted'", (chapter_id,))
@@ -268,7 +389,11 @@ class ChapterFinalizerService:
         default_cid = chars[0].id if chars else None
         auto_cnt, pend_cnt = 0, 0
 
-        fact_st = "confirmed" if (trust.enabled and trust.auto_confirm_facts) else "pending"
+        fact_st = (
+            "pending"
+            if force_pending
+            else ("confirmed" if (trust.enabled and trust.auto_confirm_facts) else "pending")
+        )
         for f in extraction.facts:
             eids = [name_to_id[n] for n in f.character_names if n in name_to_id]
             cur = self.conn.execute(
