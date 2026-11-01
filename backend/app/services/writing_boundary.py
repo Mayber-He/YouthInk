@@ -1,4 +1,5 @@
 """Check a writing plan against actual preceding prose before streaming a draft."""
+import logging
 import re
 
 from pydantic import BaseModel, Field
@@ -8,10 +9,29 @@ from app.db.repositories.settings_repo import SettingsRepository
 from app.services.llm.client import complete_chat
 from app.services.llm.json_parser import parse_and_validate_json
 
+logger = logging.getLogger(__name__)
+
 
 class EvidencedEvent(BaseModel):
     statement: str = Field(min_length=1)
     evidence_quote: str = Field(min_length=1)
+
+
+# 模型复述原句时极少逐字节一致：标点、引号样式、空白常漂移，但语义是对的。
+# 我们要拦的是“编造了前文没有的内容”，而不是格式差异。因此比对前先归一化：
+# 去掉所有空白，并把常见中英标点/引号变体折叠成统一形式。归一化后仍找不到才判幻觉。
+_PUNCT_FOLD = {
+    ord("“"): '"', ord("”"): '"', ord("‘"): "'", ord("’"): "'",
+    ord("「"): '"', ord("」"): '"', ord("『"): '"', ord("』"): '"',
+    ord("，"): ",", ord("。"): ".", ord("！"): "!", ord("？"): "?",
+    ord("；"): ";", ord("："): ":", ord("、"): ",",
+    ord("（"): "(", ord("）"): ")", ord("—"): "-", ord("…"): ".",
+}
+
+
+def _normalize_for_match(text: str) -> str:
+    folded = text.translate(_PUNCT_FOLD)
+    return re.sub(r"\s+", "", folded)
 
 
 class WritingBoundary(BaseModel):
@@ -51,8 +71,13 @@ async def check_writing_boundary(
         timeout_sec=90.0,
     )
     boundary = await parse_and_validate_json(result.content, WritingBoundary)
+    history_norm = _normalize_for_match(history)
     for event in boundary.established + boundary.repeated_events:
-        if event.evidence_quote not in history:
+        if _normalize_for_match(event.evidence_quote) not in history_norm:
+            logger.warning(
+                "writing boundary evidence not found in history (chapter_id=%s): quote=%r",
+                chapter_id, event.evidence_quote,
+            )
             raise AppError(
                 "BOUNDARY_EVIDENCE_MISMATCH", "章节衔接检查的证据与前文不匹配，请重试；原正文未改动。",
                 status_code=502,
