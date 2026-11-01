@@ -58,11 +58,8 @@ def normalize_for_quote_match(text: str) -> str:
 
 # category key -> (sub-schema, quote field name, require_verbatim_quote)
 #
-# The five memory categories carry a factual source_quote that MUST appear
-# verbatim in the chapter (hallucination guard). constraint_checks is different:
-# its evidence_quote backs a judgement about the text and is often a cross-sentence
-# paraphrase; dropping a verdict just because its evidence isn't a contiguous span
-# would lose important author-facing flags, so we only require it to be non-empty.
+# Resolution evidence must match literally, not just after punctuation folding.
+# Violation judgments retain the previous non-empty-evidence policy.
 _CATEGORY_SPECS: list[tuple[str, type[BaseModel], str, bool]] = [
     ("facts", LlmExtractedFact, "source_quote", True),
     ("state_changes", LlmExtractedStateChange, "source_quote", True),
@@ -155,6 +152,17 @@ def parse_extraction_items(
                     f"{key}[{idx}]: {quote_field} not found verbatim in chapter"
                 )
                 continue
+
+            if key == "constraint_checks" and obj.verdict == "resolved":
+                if quote not in chapter_text:
+                    result.dropped_quote += 1
+                    result.drop_log.append(f"{key}[{idx}]: resolution quote not literally in chapter")
+                    continue
+                if (re.search(r"未涉及|未违反|没有违反|不涉及", obj.description)
+                        and not re.search(r"正式解除|已解除|已正式解除|已撤销|已废止", obj.description)):
+                    result.dropped_invalid += 1
+                    result.drop_log.append(f"{key}[{idx}]: non-involvement is not resolution")
+                    continue
 
             validated.append(obj)
             result.kept += 1

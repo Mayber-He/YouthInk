@@ -56,9 +56,11 @@ MEMORY_EXTRACTION_SCHEMA_GUIDE = (
     '   {"description": "伏笔描述", "status": "planted|hinted|recovered", '
     '"plan_recover_start": 章号或null, "plan_recover_end": 章号或null, '
     '"source_quote": "正文原句（逐字）"}\n'
-    "6) constraint_checks（对下方硬约束逐条判定，只输出 violated/resolved）：\n"
+    "6) constraint_checks（只输出确有违反或剧情正式解除的约束，violated/resolved）：\n"
     '   {"constraint_id": 约束编号, "verdict": "violated|resolved", '
     '"evidence_quote": "正文原句（逐字）", "description": "判定说明"}\n'
+    "resolved 只表示剧情已正式解除该约束，且原文有证据；本章未涉及/未违反一律不要输出。"
+    "没有违反也没有解除的约束不用出现在 constraint_checks 里，禁止用 resolved 表示未违反。\n"
     "规则：source_quote / evidence_quote 必须是正文中真实存在的连续原句，不得改写、拼接或省略；"
     "无法给出原句证据的条目一律不要输出；无相应内容的数组请给空数组 []。\n"
     "示例（仅示意字段形态，不要照抄内容）：\n"
@@ -252,7 +254,7 @@ class ChapterFinalizerService:
         self, title: str, content: str, char_names: list[str], constraint_lines: str
     ) -> str:
         constraint_section = (
-            f"\n\n本章生效中的硬约束清单（必须逐条判定，写入 constraint_checks）：\n{constraint_lines}\n"
+            f"\n\n本章生效中的硬约束清单（仅报告真实违反或剧情正式解除，其余不输出）：\n{constraint_lines}\n"
             if constraint_lines
             else ""
         )

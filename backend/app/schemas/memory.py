@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Literal
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 MemoryItemCategory = Literal[
     "fact", "char_state", "cognitive", "relationship", "foreshadowing",
@@ -159,7 +159,7 @@ class LlmConstraintCheck(BaseModel):
 
     constraint_id: int
     verdict: Literal["violated", "resolved"]
-    evidence_quote: str = ""
+    evidence_quote: str = Field(default="", validation_alias=AliasChoices("evidence_quote", "source_quote"))
     description: str = ""
 
 

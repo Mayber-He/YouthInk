@@ -426,6 +426,9 @@ def test_confirm_resolution_retires_constraint(
     checks = [i for i in pq if i["item_type"] == "constraint_check"]
     assert len(checks) == 1
     assert "约束疑似解除" in checks[0]["summary_text"]
+    before = client.get(f"/api/v1/novels/{novel_uid}/constraints").json()
+    assert next(c for c in before if c["id"] == con_id)["status"] == "active"
+    assert checks[0]["status"] == "pending"
 
     r = client.put(
         f"/api/v1/novels/{novel_uid}/memory/pending-queue/constraint_check/{checks[0]['id']}",

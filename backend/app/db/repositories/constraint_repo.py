@@ -114,6 +114,13 @@ class ConstraintRepository:
     ) -> int:
         """Record an LLM verdict on a constraint; always enters pending queue."""
         self.get_constraint(constraint_id)  # validate target exists
+        if verdict == "resolved":
+            row = self.conn.execute(
+                "SELECT content FROM chapter_versions WHERE chapter_id = ? "
+                "ORDER BY version DESC, id DESC LIMIT 1", (chapter_id,),
+            ).fetchone()
+            if not evidence_quote.strip() or not row or evidence_quote not in str(row["content"] or ""):
+                raise AppError("INVALID_RESOLUTION_EVIDENCE", "解除约束的证据必须逐字存在于本章正文中", status_code=422)
         cur = self.conn.execute(
             """
             INSERT INTO constraint_checks (
