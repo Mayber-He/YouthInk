@@ -52,8 +52,10 @@ def mock_completion(monkeypatch, result):
     monkeypatch.setattr(httpx.AsyncClient, 'post', post)
 
 
-@pytest.mark.parametrize('quote,expected', [('宿舍在四楼。', 200), ('宿舍在五楼。', 502)])
-def test_prewrite_boundary_evidence(client, setup_chapter, monkeypatch, quote, expected):
+# 衔接检查不再因证据对不上前文而中止（502）：证据逐条校验，对不上的丢弃；全丢则降级并照常生成。
+# 这里两种输入都应 200；区别在于编造证据不会被注入，且 next_step 仍在。
+@pytest.mark.parametrize('quote,verbatim', [('宿舍在四楼。', True), ('宿舍在五楼。', False)])
+def test_prewrite_boundary_evidence_never_aborts(client, setup_chapter, monkeypatch, quote, verbatim):
     from contextlib import asynccontextmanager
     uid, chapter, _ = setup_chapter
     mock_completion(monkeypatch, {
@@ -69,13 +71,12 @@ def test_prewrite_boundary_evidence(client, setup_chapter, monkeypatch, quote, e
     r = client.post(f'/api/stream/novels/{uid}/write', json={
         'chapter_id': chapter, 'existing_content': '宿舍在四楼。', 'mode': 'scene',
     })
-    assert r.status_code == expected
-    if expected == 200:
-        assert '接续搬家后的交流' in str(captured)
-        prompt = captured[0][-1]['content']
-        assert prompt.index('生成前章节衔接检查') < prompt.index('【⑥ 输出格式要求】')
-    else:
-        assert not captured
+    assert r.status_code == 200  # writing is never blocked by the continuity check
+    assert captured, '正文必须照常流式生成'
+    # next_step 永远不带 evidence_quote，两种输入都应注入
+    assert '接续搬家后的交流' in str(captured)
+    prompt = captured[0][-1]['content']
+    assert prompt.index('生成前章节衔接检查') < prompt.index('【⑥ 输出格式要求】')
 
 
 def test_apply_review_preserves_original_and_rejects_stale(client, setup_chapter, monkeypatch):

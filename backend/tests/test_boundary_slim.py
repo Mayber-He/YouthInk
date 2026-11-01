@@ -24,7 +24,9 @@ from app.services.writing_boundary import (
     BOUNDARY_HEADER,
     MAX_REPEAT_PHRASES,
     WritingBoundary,
+    _normalize_for_match,
     boundary_slim_enabled,
+    evidence_in_history,
     format_boundary_for_prompt,
     is_safe_to_phrase,
     is_usable_phrase,
@@ -272,23 +274,57 @@ def test_upstream_error_is_also_visible(client: TestClient, two_chapters, monkey
     assert status == "failed" and "衔接检查未生效" in note
 
 
-def test_fabricated_evidence_still_aborts(client: TestClient, two_chapters, monkeypatch) -> None:
-    """Hallucination guard unchanged: made-up evidence_quote -> hard error, nothing injected."""
+def test_all_fabricated_evidence_degrades_not_aborts(client: TestClient, two_chapters, monkeypatch) -> None:
+    """Every evidence_quote is invented -> retry once -> still bad -> degrade (never abort).
+
+    The write is NOT blocked: status 'failed' with a visible note, and the model's own
+    next_step/avoid (which carry no evidence to verify) are still injected.
+    """
     uid, _c1, c2 = two_chapters
     bad = {"established": [{"statement": "宿舍在五楼", "evidence_quote": "宿舍在五楼。"}],
-           "repeated_events": [], "next_step": "接着写。", "avoid": []}
+           "repeated_events": [], "next_step": "从搬完箱子之后接。", "avoid": ["住五楼"]}
+    calls = []
 
     async def fake_post(self, url, **kw):
+        calls.append(kw["json"]["messages"][-1]["content"])
         return httpx.Response(200, json=_chat(json.dumps(bad, ensure_ascii=False)),
                               request=httpx.Request("POST", url))
 
     monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
-    from app.core.exceptions import AppError
     with get_novel_db(uid) as n, get_global_db() as g:
         svc = WritingService(uid, n, SettingsRepository(g))
-        with pytest.raises(AppError) as ei:
-            asyncio.run(svc.check_write_boundary_ex(StreamWriteRequest(chapter_id=c2)))
-    assert ei.value.code == "BOUNDARY_EVIDENCE_MISMATCH"
+        text, status, note = asyncio.run(svc.check_write_boundary_ex(StreamWriteRequest(chapter_id=c2)))
+    assert len(calls) == 2  # original + one retry with feedback
+    assert "一字不改" in calls[1] or "整段复制" in calls[1]  # retry prompt tells the model how to fix it
+    assert status == "failed" and note.startswith("衔接检查未生效")
+    assert "本场景从这里接：从搬完箱子之后接" in text  # evidence-free guidance survives
+    assert "住五楼" in text
+    assert "宿舍在五楼" not in text  # the invented evidence is gone
+
+
+def test_mixed_evidence_drops_bad_keeps_good_no_retry(client: TestClient, two_chapters, monkeypatch) -> None:
+    """One good + one invented evidence item -> drop the bad, keep the good, status ok, no retry."""
+    uid, _c1, c2 = two_chapters
+    mixed = {
+        "established": [
+            {"statement": "宿舍在四楼", "evidence_quote": "宿舍在四楼。"},   # verbatim in history
+            {"statement": "宿舍在五楼", "evidence_quote": "宿舍在五楼。"},   # invented
+        ],
+        "repeated_events": [{"statement": "计划中搬箱子已发生", "evidence_quote": "她把箱子搬上去。"}],
+        "next_step": "从搬完箱子之后接。", "avoid": [],
+    }
+    calls = []
+
+    async def fake_post(self, url, **kw):
+        calls.append(1)
+        return httpx.Response(200, json=_chat(json.dumps(mixed, ensure_ascii=False)),
+                              request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    with get_novel_db(uid) as n, get_global_db() as g:
+        svc = WritingService(uid, n, SettingsRepository(g))
+        text, status, note = asyncio.run(svc.check_write_boundary_ex(StreamWriteRequest(chapter_id=c2)))
+    assert len(calls) == 1 and status == "ok" and note == ""  # kept items -> no retry, not a failure
 
 
 def test_sse_meta_frame_carries_boundary_failure_notice(client: TestClient, two_chapters, monkeypatch) -> None:
@@ -336,3 +372,95 @@ def test_sse_meta_for_opening_chapter_reports_skipped(client: TestClient, two_ch
 def test_unavailable_notice_text() -> None:
     n = unavailable_notice("timeout")
     assert n.startswith("衔接检查未生效（timeout）")
+
+
+# ---- normalize & evidence_in_history --------------------------------------------------------
+
+def test_normalize_keeps_only_letters_and_digits() -> None:
+    """_normalize_for_match strips ALL punctuation, spaces, and control characters."""
+    assert _normalize_for_match("他，好吗？") == "他好吗"
+    assert _normalize_for_match("  宿舍在四楼。 \n") == "宿舍在四楼"
+    assert _normalize_for_match("走读的。") == "走读的"
+    assert _normalize_for_match('"走读的"。') == "走读的"  # smart quotes gone
+    # empty / pure punctuation normalizes to empty string
+    assert _normalize_for_match("…——，") == ""
+
+
+def test_evidence_in_history_rejects_empty_normalized_quote() -> None:
+    # A quote that normalizes to '' must not match ('' in any_string is always True).
+    assert not evidence_in_history("…——", "任何前文都不算")
+    assert not evidence_in_history("", "任何前文")
+
+
+def test_normalize_handles_full_to_half_width_and_dash_variants() -> None:
+    # em-dash, en-dash, full-width dash all normalize away; only letters remain.
+    hist = "开学那天你要是没事的话——"  # em-dash pair
+    # quote from model with single ——: both sides normalize to same letters
+    assert evidence_in_history("开学那天你要是没事的话——", hist)
+    # model omits the leading word "对了，" (the real category-a failure)
+    hist2 = "对了，开学那天你要是没事的话——"
+    assert evidence_in_history("开学那天你要是没事的话——", hist2)
+
+
+def test_normalize_handles_quote_position_drift() -> None:
+    # Real failure bak#65: history has '走读的。"' but model quoted '"走读的"。'
+    # (sentence-final punctuation drifted from inside the closing quote to outside)
+    hist = '重新打"本地"，顿了一下，又补了三个字，"走读的。"'
+    quote_model = '"走读的"。'  # closing punc OUTSIDE the quote
+    # both normalize to '走读的' (or the surrounding letters)
+    hn = _normalize_for_match(hist)
+    assert evidence_in_history(quote_model, hn)
+
+
+def test_normalize_handles_pronoun_replacement() -> None:
+    # Real failure LIVE#86: history has '他用两指…' model quoted '她用两指…'
+    hist = "他用两指把画面撑大，慢慢挪到她提过的船尾浪花"
+    quote_model = "她用两指把画面撑大，慢慢挪到她提过的船尾浪花"
+    # normalized: both reduce to pure Chinese letters, the 他/她 difference is preserved
+    # so this SHOULD NOT match (pronoun swap is semantic)
+    hn = _normalize_for_match(hist)
+    assert not evidence_in_history(quote_model, hn)
+
+
+def test_normalize_handles_name_to_pronoun_replacement() -> None:
+    # Real failure LIVE#87: history has '他在聊天里' model gave '江澈在聊天里'
+    hist = "他在聊天里长按那张图，点了保存"
+    quote_model = "江澈在聊天里长按那张图，点了保存"
+    hn = _normalize_for_match(hist)
+    assert not evidence_in_history(quote_model, hn)
+
+
+def test_normalize_handles_word_order_swap() -> None:
+    # Real failure LIVE#83: history '第二天我提前查了' model '我第二天提前查了'
+    hist = "第二天我提前查了轮渡时刻表"
+    quote_model = "我第二天提前查了轮渡时刻表"
+    hn = _normalize_for_match(hist)
+    assert not evidence_in_history(quote_model, hn)
+
+
+# ---- real-sample regression (quotes that actually failed in generation_logs) -----------------
+
+def test_real_failed_quotes_classified_correctly() -> None:
+    """The four real LIVE#* failures are genuine semantic edits, not format drift: they must still
+    be rejected. The two real class-(a) failures (punctuation position / omitted lead word) must now
+    pass thanks to the stricter normalization.
+    """
+    # (a) format-only drift -> must now MATCH
+    assert evidence_in_history(
+        '"走读的"。',
+        _normalize_for_match('重新打"本地"，顿了一下，又补了三个字，"走读的。"'),
+    )
+    assert evidence_in_history(
+        "开学那天你要是没事的话——",
+        _normalize_for_match("“对了，开学那天你要是没事的话——”\n\n停在那儿"),
+    )
+    # (d) semantic edits (pronoun/name swap, word-order swap) -> must still be REJECTED
+    assert not evidence_in_history(
+        "她用两指把画面撑大", _normalize_for_match("他用两指把画面撑大")
+    )
+    assert not evidence_in_history(
+        "江澈在聊天里长按那张图", _normalize_for_match("他在聊天里长按那张图")
+    )
+    assert not evidence_in_history(
+        "我第二天提前查了轮渡时刻表", _normalize_for_match("第二天我提前查了轮渡时刻表")
+    )

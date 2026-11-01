@@ -1,7 +1,9 @@
 """Check a writing plan against actual preceding prose before streaming a draft."""
+from dataclasses import dataclass
 import logging
 import os
 import re
+import unicodedata
 
 from pydantic import BaseModel, Field
 
@@ -19,20 +21,27 @@ class EvidencedEvent(BaseModel):
 
 
 # 模型复述原句时极少逐字节一致：标点、引号样式、空白常漂移，但语义是对的。
-# 我们要拦的是“编造了前文没有的内容”，而不是格式差异。因此比对前先归一化：
-# 去掉所有空白，并把常见中英标点/引号变体折叠成统一形式。归一化后仍找不到才判幻觉。
-_PUNCT_FOLD = {
-    ord("“"): '"', ord("”"): '"', ord("‘"): "'", ord("’"): "'",
-    ord("「"): '"', ord("」"): '"', ord("『"): '"', ord("』"): '"',
-    ord("，"): ",", ord("。"): ".", ord("！"): "!", ord("？"): "?",
-    ord("；"): ";", ord("："): ":", ord("、"): ",",
-    ord("（"): "(", ord("）"): ")", ord("—"): "-", ord("…"): ".",
-}
+# 我们要拦的是“编造了前文没有的内容”，而不是格式差异。因此比对前两边做同样的归一化：
+# NFKC（全角/半角、省略号等兼容形式统一）+ 忽略大小写 + **只保留字母和数字**，
+# 即去掉全部空白和全部标点/引号/破折号/省略号。
+# 之所以不止“折叠标点样式”：真实失败里有两种折叠解决不了——句号在引号内外的位置不同
+# （“走读的。” / “走读的”。），以及开引号落在被省掉的“对了，”之后。这两种都是标点“位置”漂移。
+_KEEP_CATEGORIES = frozenset("LN")  # Unicode 类别首字母：Letter（含汉字）、Number
 
 
 def _normalize_for_match(text: str) -> str:
-    folded = text.translate(_PUNCT_FOLD)
-    return re.sub(r"\s+", "", folded)
+    folded = unicodedata.normalize("NFKC", text or "").casefold()
+    return "".join(ch for ch in folded if unicodedata.category(ch)[0] in _KEEP_CATEGORIES)
+
+
+def evidence_in_history(quote: str, history_norm: str) -> bool:
+    """True when ``quote`` occurs in the (already normalized) history.
+
+    A quote that normalizes to nothing (only punctuation / symbols / emoji) proves nothing and
+    would otherwise match everywhere (``'' in s`` is True), so it is never accepted.
+    """
+    q = _normalize_for_match(quote)
+    return bool(q) and q in history_norm
 
 
 class WritingBoundary(BaseModel):
@@ -277,53 +286,143 @@ def unavailable_notice(reason: str) -> str:
     return f"衔接检查未生效（{reason}）。本次生成未获得“从哪里接/已写过哪些”的提示，请留意是否重复前文。"
 
 
-async def check_writing_boundary(
-    *, novel_uid: str, chapter_id: int, settings: SettingsRepository,
-    history: str, plan: str,
-) -> str:
-    if not history.strip():
-        return ""
-    _, base_url, model, api_key = settings.get_credentials_for_task("planning")
-    result = await complete_chat(
-        base_url=base_url, api_key=api_key, model=model, temperature=0.2,
-        system_prompt=(
-            "你是小说章节衔接编辑。仅依据已写正文检查本次写作计划，不生成正文。"
-            "提取与本次计划有关的已发生事件、人物实际所知、关系、时间地点和物品最终状态；"
-            "不要把叙述者知识分给所有角色。发现计划重演前文时，指出已发生的部分，"
-            "建议从事件后果继续推进；如果本章目标已写完，建议简短收束，不凑字数、不另造事件。"
-            "前文若为草稿，只作衔接参考，不宣称已经定稿。"
-        ),
-        user_prompt=(
-            f"【已写正文】\n{history}\n\n【本次写作计划】\n{plan}\n\n"
-            '返回严格 JSON：{"established":[{"statement":"已确立状态",'
-            '"evidence_quote":"已写正文的连续原句"}],'
-            '"repeated_events":[{"statement":"计划中已经发生、应跳过的事件",'
-            '"evidence_quote":"已写正文的连续原句"}],'
-            '"next_step":"第一句话只写“从已写正文的哪个落点接着写”，之后再写本次新增推进及结束边界，不改变既定剧情方向",'
-            '"avoid":["已写过、不要再写的素材，每条是不超过20字的名词性短语，如“修打印机”“她抱怨冰棍化手”，'
-            '不要写评语、理由或建议"]}。'
-            "没有证据的项目不要输出，列表可以为空。证据不得拼接、改写或使用省略号。"
-        ),
-        novel_uid=novel_uid, chapter_id=chapter_id, task_type="writing_boundary",
-        timeout_sec=90.0,
-    )
-    boundary = await parse_and_validate_json(result.content, WritingBoundary)
-    history_norm = _normalize_for_match(history)
-    for event in boundary.established + boundary.repeated_events:
-        if _normalize_for_match(event.evidence_quote) not in history_norm:
-            logger.warning(
-                "writing boundary evidence not found in history (chapter_id=%s): quote=%r",
-                chapter_id, event.evidence_quote,
-            )
-            raise AppError(
-                "BOUNDARY_EVIDENCE_MISMATCH", "章节衔接检查的证据与前文不匹配，请重试；原正文未改动。",
-                status_code=502,
-            )
-    # 证据已校验通过；注入正文请求的只留“从哪里接 + 已写过不要再写的短语”，
-    # 不再把 evidence_quote 原文和长长的 established 清单整段塞给写作模型。
+_SYSTEM_PROMPT = (
+    "你是小说章节衔接编辑。仅依据已写正文检查本次写作计划，不生成正文。"
+    "提取与本次计划有关的已发生事件、人物实际所知、关系、时间地点和物品最终状态；"
+    "不要把叙述者知识分给所有角色。发现计划重演前文时，指出已发生的部分，"
+    "建议从事件后果继续推进；如果本章目标已写完，建议简短收束，不凑字数、不另造事件。"
+    "前文若为草稿，只作衔接参考，不宣称已经定稿。"
+)
+_USER_SCHEMA = (
+    '返回严格 JSON：{"established":[{"statement":"已确立状态",'
+    '"evidence_quote":"已写正文的连续原句"}],'
+    '"repeated_events":[{"statement":"计划中已经发生、应跳过的事件",'
+    '"evidence_quote":"已写正文的连续原句"}],'
+    '"next_step":"第一句话只写“从已写正文的哪个落点接着写”，之后再写本次新增推进及结束边界，不改变既定剧情方向",'
+    '"avoid":["已写过、不要再写的素材，每条是不超过20字的名词性短语，如“修打印机”“她抱怨冰棍化手”，'
+    '不要写评语、理由或建议"]}。'
+)
+# evidence_quote 的硬性要求。放在 schema 之后，重试时再追加“具体错在哪”。
+_EVIDENCE_RULE = (
+    "没有证据的项目不要输出，列表可以为空。"
+    "evidence_quote 必须是【已写正文】中**连续的一段原文**，可以原样复制粘贴："
+    "不要改写、不要替换人称（他/她/名字）、不要跨句拼接、不要用省略号省略中间、不要补标点。"
+    "宁可不输出该项，也不要给出对不上原文的证据。"
+)
+
+
+@dataclass
+class BoundaryResult:
+    """Outcome of the continuity check.
+
+    * ``text``   – lean injection (may be '' when nothing usable survived).
+    * ``dropped``– number of evidence items dropped because they weren't verbatim in the history.
+    * ``note``   – '' on success; a short human reason when every item was dropped even after a retry
+                   (the caller degrades to '衔接检查未生效' and keeps writing).
+    """
+
+    text: str
+    dropped: int = 0
+    note: str = ""
+
+
+def _filter_verbatim(boundary: "WritingBoundary", history_norm: str) -> tuple["WritingBoundary", int, int]:
+    """Drop ``established``/``repeated_events`` whose evidence is not verbatim in the history.
+
+    Returns (filtered_boundary, kept_evidence_items, dropped_items). ``avoid`` and ``next_step``
+    are kept as-is: they carry no evidence_quote and are the model's own short guidance.
+    """
+    kept_est, kept_rep, dropped = [], [], 0
+    for ev in boundary.established:
+        if evidence_in_history(ev.evidence_quote, history_norm):
+            kept_est.append(ev)
+        else:
+            dropped += 1
+            logger.info("writing boundary: dropped established evidence not in history: %r", ev.evidence_quote)
+    for ev in boundary.repeated_events:
+        if evidence_in_history(ev.evidence_quote, history_norm):
+            kept_rep.append(ev)
+        else:
+            dropped += 1
+            logger.info("writing boundary: dropped repeated_event evidence not in history: %r", ev.evidence_quote)
+    filtered = boundary.model_copy(update={"established": kept_est, "repeated_events": kept_rep})
+    return filtered, len(kept_est) + len(kept_rep), dropped
+
+
+def _render(boundary: "WritingBoundary") -> str:
     if not boundary_slim_enabled():
         return (
             "【生成前章节衔接检查】以下是基于原文证据的写作边界；与梗概重复时从已发生事件之后推进。\n"
             + boundary.model_dump_json()
         )
     return format_boundary_for_prompt(boundary)
+
+
+async def check_writing_boundary_result(
+    *, novel_uid: str, chapter_id: int, settings: SettingsRepository,
+    history: str, plan: str,
+) -> BoundaryResult:
+    """Run the continuity check; never abort on mismatched evidence.
+
+    Per-item handling: each evidence_quote is validated independently against the (normalized)
+    history. Items that aren't verbatim are dropped; the rest are kept. If *every* evidenced item
+    is dropped, the model is retried once with explicit feedback. If the retry still yields nothing
+    verbatim, we degrade (return a ``note``) rather than block the write — but we still inject the
+    model's ``next_step``/``avoid`` guidance, which carries no evidence to verify.
+    """
+    if not history.strip():
+        return BoundaryResult("")
+    _, base_url, model, api_key = settings.get_credentials_for_task("planning")
+    history_norm = _normalize_for_match(history)
+
+    async def _call(extra_rule: str) -> "WritingBoundary":
+        result = await complete_chat(
+            base_url=base_url, api_key=api_key, model=model, temperature=0.2,
+            system_prompt=_SYSTEM_PROMPT,
+            user_prompt=f"【已写正文】\n{history}\n\n【本次写作计划】\n{plan}\n\n{_USER_SCHEMA}{_EVIDENCE_RULE}{extra_rule}",
+            novel_uid=novel_uid, chapter_id=chapter_id, task_type="writing_boundary",
+            timeout_sec=90.0,
+        )
+        return await parse_and_validate_json(result.content, WritingBoundary)
+
+    boundary = await _call("")
+    filtered, kept, dropped = _filter_verbatim(boundary, history_norm)
+    had_evidence = bool(boundary.established or boundary.repeated_events)
+
+    # 全部证据项都被丢弃（且模型本来给了证据项）：带着“为什么被丢”的反馈重试一次。
+    if had_evidence and kept == 0:
+        logger.warning(
+            "writing boundary: all %d evidence items failed verbatim check (chapter_id=%s), retrying once",
+            dropped, chapter_id,
+        )
+        retry_rule = (
+            "\n【上一次尝试被拒】你给出的 evidence_quote 在【已写正文】里都找不到原文（多半是改了人称、"
+            "跨句拼接或补了标点）。请重来：每条 evidence_quote 直接从【已写正文】里**整段复制**，一字不改；"
+            "不确定能否逐字复制的条目就不要放进 established / repeated_events。"
+        )
+        try:
+            boundary2 = await _call(retry_rule)
+            filtered2, kept2, dropped2 = _filter_verbatim(boundary2, history_norm)
+            if kept2 > 0:
+                return BoundaryResult(_render(filtered2), dropped=dropped2)
+            # 重试仍无合格证据：降级，但仍注入无需证据的 next_step / avoid。
+            logger.warning("writing boundary: retry still produced no verbatim evidence (chapter_id=%s)", chapter_id)
+            text = _render(boundary2.model_copy(update={"established": [], "repeated_events": []}))
+            return BoundaryResult(text, dropped=dropped2, note="衔接检查的引用都对不上前文，已跳过“已写过”清单")
+        except AppError:
+            # 重试本身技术性失败（解析/网络）：用第一次的 next_step / avoid 兜底，不阻断。
+            text = _render(filtered)
+            return BoundaryResult(text, dropped=dropped, note="衔接检查重试失败，已跳过“已写过”清单")
+
+    return BoundaryResult(_render(filtered), dropped=dropped)
+
+
+async def check_writing_boundary(
+    *, novel_uid: str, chapter_id: int, settings: SettingsRepository,
+    history: str, plan: str,
+) -> str:
+    """Back-compat wrapper: returns just the injection text (see ``check_writing_boundary_result``)."""
+    r = await check_writing_boundary_result(
+        novel_uid=novel_uid, chapter_id=chapter_id, settings=settings, history=history, plan=plan,
+    )
+    return r.text

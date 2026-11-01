@@ -13,9 +13,10 @@
 | T4 提示词精简重排 | 完成* | 25d7d5f | 铁律 -62.6%；**整条 prompt 仅 -16.9%（未达 30%）** |
 | T5 重复检测+重写 | 完成 | 2f69a69 | 新表 `repetition_checks`；阈值是小样本标定，有已知误报 |
 | T6 衔接检查瘦身 | 完成 | f264fd7 | 注入体量 -95%；检查失败可见；回退路径只保住约 1/3 条目 |
-| T7 日志与结束判定 | 完成 | （本次） | 新增 2 列；`length` 截断前端不当成功；前端无自动化测试 |
+| T7 日志与结束判定 | 完成 | 53dfcc7 | 新增 2 列；`length` 截断前端不当成功；前端无自动化测试 |
+| 修复 衔接证据不匹配中止 | 完成 | （本次） | 归一化放宽 + 逐条丢弃 + 重试一次 + 降级；**不再 502 中止**（真实回放 6→0） |
 
-**全量测试**：基线 36 passed / 5 failed → 现在 **146 passed / 5 failed**（新增 110 个测试；那 5 个是改动前就存在的失败，无新增）。
+**全量测试**：基线 36 passed / 5 failed → T1–T7 完成时 **146 passed** → 本次修复后 **155 passed / 5 failed**（新增 9 个测试；那 5 个是改动前就存在的失败，无新增）。
 **真实库**：始终只读；已逐表比对，内容与改动前快照一致。三次备份在 `backend/data/_loop_backups/`（已被 .gitignore 忽略）。
 
 ### 需要你人工确认 / 处理的事项（按重要性）
@@ -229,7 +230,9 @@ foreshadowing 用 `content` 而非 `description`。
 - [x] 注入正文请求的内容改为两样：**“本场景从这里接”**（`next_step` 的第一句，≤80 字，引号内的句号不算句末）
       + **“已写过、不要再写”**（短语清单，≤8 条、每条 ≤24 字、去重）。不再注入 `evidence_quote`
       原文、不再注入 `established` 清单、不再注入 `next_step` 后面那段“下一段可写…”的具体剧本。
-      `evidence_quote` 仍只用于**幻觉校验**（`BOUNDARY_EVIDENCE_MISMATCH` 照旧中止），校验完不再注入。
+      `evidence_quote` 仍只用于**幻觉校验**，校验完不再注入。
+      （注：T6 当时仍沿用“一条对不上就 `BOUNDARY_EVIDENCE_MISMATCH` 中止”的旧行为；该行为已在后续
+      “衔接检查 BOUNDARY_EVIDENCE_MISMATCH 频繁中止生成”修复中改为逐条丢弃 + 重试 + 降级，不再中止，见文末。）
 - [x] **短语由检查模型直接给**：检查提示词新增 `avoid` 字段（≤20 字名词性短语，不写评语）。
       schema 里 `avoid` 默认空，旧输出/模型没给时走**保守回退**（见下“重要发现”）。
 - [x] **检查失败不再静默**：`check_write_boundary_ex` 返回 `(text, status, note)`，状态 `ok / skipped / failed`。
@@ -298,3 +301,54 @@ foreshadowing 用 `content` 而非 `description`。
     **没有改变行为**（不抛错、不重试）。被 length 截断的 JSON 仍会在解析层失败，但现在日志里能直接看到原因。
   - 暂无读取 `generation_logs` 的接口/界面，`temperature`/`finish_reason` 目前只能查库看到。
   - 内容过滤（`content_filter`）我也按“截断”处理了，任务只要求 `length`，这是顺手加的，需要你确认是否接受。
+
+---
+
+### 修复 · 衔接检查 BOUNDARY_EVIDENCE_MISMATCH 频繁中止生成 [完成]
+
+**背景**：生成正文时常报 `BOUNDARY_EVIDENCE_MISMATCH`，整次生成被 502 中止。这是 T6 之前就存在的行为
+（`evidence_quote` 一条对不上前文就 `raise AppError`），与任务要求“衔接检查只是参考、不应阻断生成”相悖。
+
+**调查（只读，脚本在临时目录，未写项目）**：回放真实库 + 三个备份里全部 22 次 `writing_boundary` 调用、共 361 条
+证据。结论：
+- 原逻辑会让 **22 次里的 6 次整体 502**（真实库最近 4 次写作里 3 次中止，集中在第 2 章）。
+- 10 条对不上的引用分两类：
+  - **(a) 纯格式漂移 2 条**：句末标点在引号内外位置不同（`走读的。"` vs `"走读的"。`）、
+    开引号前省了“对了，”。旧归一化（只折叠标点样式、去空白）仍判不匹配。
+  - **(d) 语义改写 8 条**：人称替换（他→她）、人名/代词互换（他→江澈）、语序调换（第二天我→我第二天）、
+    跨句拼接并省略中间叙述。这些是模型**真的改了原文**，应当拒绝。
+  - 没有一类属于“引用来自前文以外（b）”或“整次全是坏引用”。
+
+**修复**：
+- `_normalize_for_match` 改为 **NFKC + casefold + 只保留字母/数字**（去掉全部标点、空白、破折号、省略号）。
+  两类 (a) 的格式漂移现在能匹配；(d) 的语义改写仍不匹配（人称/语序差异被保留）。新增
+  `evidence_in_history()`：归一化后为空的引用（纯标点/表情）一律不认（避免 `'' in s` 恒真）。
+- 校验由“一条不匹配就整体中止”改为**逐条**：对不上的 `evidence_quote` 丢弃并记 `logger.info`，其余保留。
+- **全部证据项都被丢弃**（且模型本来给了证据）时：带“具体错在哪、如何修”的反馈**重试一次**；
+  重试仍无合格证据则**降级**为“衔接检查未生效”，但仍注入无需证据的 `next_step`/`avoid`，**不中止生成**。
+- 新增 `check_writing_boundary_result()` 返回 `BoundaryResult(text, dropped, note)`；
+  `check_writing_boundary()` 保留为只返回文本的兼容包装。`BOUNDARY_EVIDENCE_MISMATCH` 这个错误码与
+  `raise` 已彻底移除——证据问题不再抛错。
+- `writing_service.check_write_boundary_ex`：丢弃个别证据仍算 `ok`（只记 info）；整体降级才返回 `failed` +
+  “衔接检查未生效”提示（前端已有的琥珀色提示条会显示，无需改前端）。
+
+**改动文件**：
+- `backend/app/services/writing_boundary.py`（归一化、逐条过滤、重试、`BoundaryResult`、移除硬中止）
+- `backend/app/services/writing_service.py`（`check_write_boundary_ex` 改用新结果，不再 re-raise）
+- `backend/tests/test_boundary_slim.py`（新增归一化/逐条丢弃/降级/真实样本回归测试）
+- `backend/tests/test_writing_quality.py`（原 `test_prewrite_boundary_evidence` 断言 502，改为断言两种输入都 200、
+  编造证据不被注入）
+
+**验证**：
+- 真实数据回放（22 次调用）：**0 次中止**（原先 6 次）；8/361 条证据按条丢弃（2.2%），无一次整体降级。
+  两条 (a) 现在能匹配（丢弃数从 10 降到 8）。
+- 新增/改写测试：全量 `pytest tests` **155 passed / 5 failed**（5 个为基线既有失败，无新增）；前端 `tsc` 通过。
+- 真实库全程只读，size/mtime 未变。
+
+**需你知晓 / 确认**：
+- 原来被 `BOUNDARY_EVIDENCE_MISMATCH` 当作“幻觉警报”而中止的行为**不再存在**。按任务要求，证据问题只丢弃该条、
+  必要时降级提示，绝不阻断生成。若你更希望某些情况仍然中止，请告诉我判定标准。
+- 归一化放宽后，理论上**不同标点造成的语义差异**可能被当成同一句（如把问号陈述句都抹成一样）。
+  但 `evidence_quote` 只用于“这句是不是前文写过”的存在性判断、不参与语义推理，这个放宽是安全的。
+- 真实模型是否会因为重试提示而稳定给出可逐字复制的证据，**无法在不调真实 LLM 的前提下验证**，需你跑几章后看
+  `writing_boundary` 日志确认重试与降级的实际频率。
