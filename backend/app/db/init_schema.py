@@ -297,8 +297,6 @@ CREATE TABLE IF NOT EXISTS facts (
 
 CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
     content,
-    content='facts',
-    content_rowid='id',
     tokenize='unicode61'
 );
 
@@ -334,8 +332,6 @@ CREATE TABLE IF NOT EXISTS summaries (
 
 CREATE VIRTUAL TABLE IF NOT EXISTS chapters_fts USING fts5(
     content,
-    content='chapter_versions',
-    content_rowid='id',
     tokenize='unicode61'
 );
 
@@ -458,7 +454,52 @@ def init_global_db(conn: sqlite3.Connection) -> None:
 def init_novel_db(conn: sqlite3.Connection) -> None:
     """Create all tables, FTS5 virtual tables, indexes, and triggers in a novel.db."""
     conn.executescript(NOVEL_DB_SCHEMA)
+    _migrate_external_content_fts(conn)
     _migrate_novel_memory_revision_columns(conn)
+
+
+def _migrate_external_content_fts(conn: sqlite3.Connection) -> None:
+    """Replace incompatible external-content indexes with tokenized internal FTS tables."""
+    fts_tables = (
+        ("chapters_fts", "chapter_versions"),
+        ("facts_fts", "facts"),
+    )
+    legacy_tables = []
+    for fts_table, content_table in fts_tables:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (fts_table,),
+        ).fetchone()
+        sql = "".join(str(row[0] or "").split()).lower() if row else ""
+        if f"content='{content_table}'" in sql or f'content="{content_table}"' in sql:
+            legacy_tables.append((fts_table, content_table))
+
+    if not legacy_tables:
+        return
+
+    from app.db.repositories.memory_repo import tokenize_for_fts
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for fts_table, content_table in legacy_tables:
+            rows = conn.execute(
+                f'SELECT id, content FROM "{content_table}" ORDER BY id'
+            ).fetchall()
+            conn.execute(f'DROP TABLE "{fts_table}"')
+            conn.execute(
+                f"CREATE VIRTUAL TABLE \"{fts_table}\" USING fts5(content, tokenize='unicode61')"
+            )
+            for row in rows:
+                segmented = tokenize_for_fts(str(row[1] or ""))
+                if segmented:
+                    conn.execute(
+                        f'INSERT INTO "{fts_table}"(rowid, content) VALUES (?, ?)',
+                        (int(row[0]), segmented),
+                    )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def _migrate_novel_memory_revision_columns(conn: sqlite3.Connection) -> None:
