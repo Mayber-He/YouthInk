@@ -12,6 +12,7 @@ import {
   useAiSmellScan,
   useChapterWorkspace,
   useContextPreview,
+  useGenerateScenes,
   useRestoreChapterVersion,
   useSaveChapterContent,
   useCritiqueSelection,
@@ -47,6 +48,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
 
   const { data: workspace, isLoading } = useChapterWorkspace(novelUid, effectiveChapterId);
   const saveMut = useSaveChapterContent(novelUid, effectiveChapterId ?? 0);
+  const generateScenesMut = useGenerateScenes(novelUid, effectiveChapterId ?? 0);
   const restoreMut = useRestoreChapterVersion(novelUid, effectiveChapterId ?? 0);
   const smellMut = useAiSmellScan(novelUid, effectiveChapterId);
 
@@ -160,70 +162,149 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
     }
   };
 
-  const executeStreamWrite = (mode: "scene" | "chapter", sceneId: number | null) => {
+  // 流式生成单个场景（或整章兜底）；基于 baseContent 续写，resolve 生成的正文，中断/失败 resolve null。
+  // 不在此处保存或审查，交由调用方在整段完成后统一处理。
+  const runSceneStream = (
+    mode: "scene" | "chapter",
+    sceneId: number | null,
+    baseContent: string
+  ): Promise<string | null> =>
+    new Promise((resolve) => {
+      if (!effectiveChapterId) {
+        resolve(null);
+        return;
+      }
+      const prefix = baseContent.trim() ? `${baseContent.trim()}\n\n` : "";
+      let generated = "";
+      startWriteStream(
+        {
+          chapter_id: effectiveChapterId,
+          scene_id: sceneId,
+          mode,
+          existing_content: baseContent,
+          disabled_context_keys: disabledContextKeys,
+          custom_context: customContext,
+          instruction: "",
+        },
+        (delta) => {
+          if (currentChapterRef.current !== effectiveChapterId) return;
+          setPipelineStep((prev) => (prev === "generating" ? prev : "generating"));
+          setGeneratedWordsCount((c) => c + delta.replace(/\s+/g, "").length);
+          generated += delta;
+          setContent(prefix + generated);
+        },
+        (fullGenerated) => {
+          if (currentChapterRef.current !== effectiveChapterId) {
+            resolve(null);
+            return;
+          }
+          resolve(fullGenerated);
+        },
+        (meta) => {
+          if (currentChapterRef.current !== effectiveChapterId) return;
+          setStreamModelName(meta.model);
+          setPipelineStep("connecting");
+        },
+        () => resolve(null)
+      );
+    });
+
+  // 逐场景顺序生成整章：每个场景基于已生成正文续写，减少长文本中的前后矛盾与重复。
+  const runWholeChapter = async () => {
     if (!effectiveChapterId) return;
-    if (sceneId) setActiveSceneId(sceneId);
-    const isChapterRewrite = mode === "chapter";
-    const prefix = !isChapterRewrite && content.trim() ? `${content.trim()}\n\n` : "";
-    const originalContent = content;
-    let generated = "";
     setGeneratedWordsCount(0);
     setReviewResult(null);
     setReviewError(null);
     setPipelineStep("assembling");
+    const chapterId = effectiveChapterId;
+    const originalContent = content;
 
-    startWriteStream(
-      {
-        chapter_id: effectiveChapterId,
-        scene_id: sceneId,
-        mode,
-        existing_content: isChapterRewrite ? "" : content,
-        disabled_context_keys: disabledContextKeys,
-        custom_context: customContext,
-        instruction: "",
-      },
-      (delta) => {
-        if (currentChapterRef.current !== effectiveChapterId) return;
-        setPipelineStep((prev) => (prev === "generating" ? prev : "generating"));
-        setGeneratedWordsCount((c) => c + delta.replace(/\s+/g, "").length);
-        generated += delta;
-        setContent(prefix + generated);
-      },
-      async (fullGenerated) => {
-        if (currentChapterRef.current !== effectiveChapterId) return;
-        const fullContent = `${prefix}${fullGenerated}`;
-        try {
-          await saveMut.mutateAsync({ content: fullContent, source: "ai", create_new_version: true });
-        } catch (error) {
-          if (currentChapterRef.current !== effectiveChapterId) return;
-          setContent(originalContent);
-          setReviewError(error instanceof Error ? error.message : "正文保存失败，尚未审查，请先保存正文。");
-          setPipelineStep("completed");
-          return;
-        }
-
-        // 正文生成完毕，自动进行常理与一致性检查
-        if (currentChapterRef.current !== effectiveChapterId) return;
-        await runAutoReview();
-      },
-      (meta) => {
-        if (currentChapterRef.current !== effectiveChapterId) return;
-        setStreamModelName(meta.model);
-        setPipelineStep("connecting");
-      },
-      () => {
-        if (currentChapterRef.current !== effectiveChapterId) return;
-        setContent(originalContent);
-        setPipelineStep("idle");
+    let scenes = workspace?.scenes ?? [];
+    if (scenes.length === 0) {
+      try {
+        scenes = await generateScenesMut.mutateAsync({});
+      } catch (error) {
+        if (currentChapterRef.current !== chapterId) return;
+        setReviewError(error instanceof Error ? error.message : "拆解场景节拍失败，请重试。");
+        setPipelineStep("completed");
+        return;
       }
-    );
+      if (currentChapterRef.current !== chapterId) return;
+    }
+
+    // 无场景可用（拆解返回空）时，回退到整章一次生成，避免卡死。
+    const plan: Array<{ mode: "scene" | "chapter"; sceneId: number | null }> =
+      scenes.length > 0
+        ? scenes.map((s) => ({ mode: "scene" as const, sceneId: s.id }))
+        : [{ mode: "chapter", sceneId: null }];
+
+    let chapterText = "";
+    for (const step of plan) {
+      if (step.sceneId) setActiveSceneId(step.sceneId);
+      const generated = await runSceneStream(step.mode, step.sceneId, chapterText);
+      // 任一场景中断/失败/切章：停止循环，保留已生成部分不覆盖原稿。
+      if (generated === null) {
+        if (currentChapterRef.current === chapterId && !chapterText) setContent(originalContent);
+        setPipelineStep("idle");
+        return;
+      }
+      chapterText = chapterText.trim() ? `${chapterText.trim()}\n\n${generated}` : generated;
+      if (currentChapterRef.current === chapterId) setContent(chapterText);
+    }
+
+    if (currentChapterRef.current !== chapterId) return;
+    try {
+      await saveMut.mutateAsync({ content: chapterText, source: "ai", create_new_version: true });
+    } catch (error) {
+      if (currentChapterRef.current !== chapterId) return;
+      setContent(originalContent);
+      setReviewError(error instanceof Error ? error.message : "正文保存失败，尚未审查，请先保存正文。");
+      setPipelineStep("completed");
+      return;
+    }
+    if (currentChapterRef.current !== chapterId) return;
+    await runAutoReview();
+  };
+
+  // 单场景续写：生成后单独保存并审查。
+  const executeSceneWrite = async (sceneId: number) => {
+    if (!effectiveChapterId) return;
+    setActiveSceneId(sceneId);
+    setGeneratedWordsCount(0);
+    setReviewResult(null);
+    setReviewError(null);
+    setPipelineStep("assembling");
+    const chapterId = effectiveChapterId;
+    const originalContent = content;
+    const base = content;
+
+    const generated = await runSceneStream("scene", sceneId, base);
+    if (generated === null) {
+      if (currentChapterRef.current === chapterId) setContent(originalContent);
+      setPipelineStep("idle");
+      return;
+    }
+    const fullContent = base.trim() ? `${base.trim()}\n\n${generated}` : generated;
+    if (currentChapterRef.current !== chapterId) return;
+    setContent(fullContent);
+    try {
+      await saveMut.mutateAsync({ content: fullContent, source: "ai", create_new_version: true });
+    } catch (error) {
+      if (currentChapterRef.current !== chapterId) return;
+      setContent(originalContent);
+      setReviewError(error instanceof Error ? error.message : "正文保存失败，尚未审查，请先保存正文。");
+      setPipelineStep("completed");
+      return;
+    }
+    if (currentChapterRef.current !== chapterId) return;
+    await runAutoReview();
   };
 
   const handleWriteWholeChapter = () => {
     if (content.trim()) {
       setConfirmOverwriteOpen(true);
     } else {
-      executeStreamWrite("chapter", null);
+      void runWholeChapter();
     }
   };
 
@@ -639,7 +720,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
                 activeSceneId={activeSceneId}
                 isStreaming={isStreaming}
                 onSelectScene={setActiveSceneId}
-                onWriteScene={(s: SceneItem) => executeStreamWrite("scene", s.id)}
+                onWriteScene={(s: SceneItem) => void executeSceneWrite(s.id)}
               />
             )}
             {rightTab === "context" && (
@@ -686,7 +767,10 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
       <ConfirmModal
         open={confirmOverwriteOpen}
         onClose={() => setConfirmOverwriteOpen(false)}
-        onConfirm={() => executeStreamWrite("chapter", null)}
+        onConfirm={() => {
+          setConfirmOverwriteOpen(false);
+          void runWholeChapter();
+        }}
         title="替换正文确认"
         description="将用全新生成的正文替换本章当前内容（旧内容可在「版本历史」中恢复），是否继续？"
         confirmText="确认替换并生成"
