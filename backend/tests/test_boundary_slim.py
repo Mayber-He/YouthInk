@@ -26,6 +26,7 @@ from app.services.writing_boundary import (
     WritingBoundary,
     _normalize_for_match,
     boundary_slim_enabled,
+    boundary_timeout_sec,
     evidence_in_history,
     format_boundary_for_prompt,
     is_safe_to_phrase,
@@ -511,6 +512,40 @@ def test_sse_meta_for_opening_chapter_reports_skipped(client: TestClient, two_ch
 def test_unavailable_notice_text() -> None:
     n = unavailable_notice("timeout")
     assert n.startswith("衔接检查未生效（timeout）")
+
+
+def test_boundary_timeout_defaults_to_40_and_is_configurable(monkeypatch) -> None:
+    monkeypatch.delenv("YOUTHINK_BOUNDARY_TIMEOUT_SEC", raising=False)
+    assert boundary_timeout_sec() == 40.0
+    monkeypatch.setenv("YOUTHINK_BOUNDARY_TIMEOUT_SEC", "30")
+    assert boundary_timeout_sec() == 30.0
+    monkeypatch.setenv("YOUTHINK_BOUNDARY_TIMEOUT_SEC", "45")
+    assert boundary_timeout_sec() == 45.0
+    monkeypatch.setenv("YOUTHINK_BOUNDARY_TIMEOUT_SEC", "not-a-number")
+    assert boundary_timeout_sec() == 40.0
+    monkeypatch.setenv("YOUTHINK_BOUNDARY_TIMEOUT_SEC", "1")
+    assert boundary_timeout_sec() == 5.0  # clamped to the sane lower bound
+    monkeypatch.setenv("YOUTHINK_BOUNDARY_TIMEOUT_SEC", "999")
+    assert boundary_timeout_sec() == 120.0  # clamped upper bound
+
+
+def test_boundary_call_passes_the_configured_timeout(client, two_chapters, monkeypatch) -> None:
+    """The 30–45 s setting must reach complete_chat; worst case is two attempts."""
+    from types import SimpleNamespace
+    import app.services.writing_boundary as wb
+
+    uid, _c1, c2 = two_chapters
+    monkeypatch.setenv("YOUTHINK_BOUNDARY_TIMEOUT_SEC", "30")
+    seen: dict = {}
+
+    async def fake_complete_chat(**kw):
+        seen.update(kw)
+        return SimpleNamespace(content=_payload(repeated_events=GOOD_REP))
+
+    monkeypatch.setattr(wb, "complete_chat", fake_complete_chat)
+    text, status, note = _ex(uid, c2)
+    assert status == "ok" and note == "" and "本场景从这里接" in text
+    assert seen["timeout_sec"] == 30.0
 
 
 # ---- normalize & evidence_in_history --------------------------------------------------------

@@ -1,6 +1,7 @@
 """Check a writing plan against actual preceding prose before streaming a draft."""
 from dataclasses import dataclass
 import logging
+import math
 import os
 import re
 import unicodedata
@@ -281,6 +282,38 @@ def boundary_slim_enabled() -> bool:
     return os.environ.get("YOUTHINK_BOUNDARY_SLIM", "1").strip().lower() not in ("0", "false", "no", "")
 
 
+# 每轮衔接检查的超时。检查只返回一小段 JSON，旧的硬编码 90 秒在“重试一次”时最坏要等 3 分钟。
+# 默认 40 秒 → 最坏 2×40=80 秒；可用 ``YOUTHINK_BOUNDARY_TIMEOUT_SEC`` 覆盖（限制在 5–120 秒）。
+BOUNDARY_TIMEOUT_DEFAULT_SEC = 40.0
+BOUNDARY_TIMEOUT_MIN_SEC = 5.0
+BOUNDARY_TIMEOUT_MAX_SEC = 120.0
+
+
+def boundary_timeout_sec() -> float:
+    """Per-attempt timeout for the continuity check (configurable, default 40 s)."""
+    raw = os.environ.get("YOUTHINK_BOUNDARY_TIMEOUT_SEC", "").strip()
+    if not raw:
+        return BOUNDARY_TIMEOUT_DEFAULT_SEC
+    try:
+        value = float(raw)
+    except ValueError:
+        value = math.nan
+    if not math.isfinite(value):
+        logger.warning(
+            "writing boundary: invalid YOUTHINK_BOUNDARY_TIMEOUT_SEC=%r, using %.0fs",
+            raw, BOUNDARY_TIMEOUT_DEFAULT_SEC,
+        )
+        return BOUNDARY_TIMEOUT_DEFAULT_SEC
+    if not (BOUNDARY_TIMEOUT_MIN_SEC <= value <= BOUNDARY_TIMEOUT_MAX_SEC):
+        clamped = min(max(value, BOUNDARY_TIMEOUT_MIN_SEC), BOUNDARY_TIMEOUT_MAX_SEC)
+        logger.warning(
+            "writing boundary: YOUTHINK_BOUNDARY_TIMEOUT_SEC=%r out of range, clamped to %.0fs",
+            raw, clamped,
+        )
+        return clamped
+    return value
+
+
 def unavailable_notice(reason: str) -> str:
     """User-visible text for 'the continuity check did not run'."""
     return f"衔接检查未生效（{reason}）。本次生成未获得“从哪里接/已写过哪些”的提示，请留意是否重复前文。"
@@ -420,7 +453,7 @@ async def check_writing_boundary_result(
             system_prompt=_SYSTEM_PROMPT,
             user_prompt=f"【已写正文】\n{history}\n\n【本次写作计划】\n{plan}\n\n{_USER_SCHEMA}{_EVIDENCE_RULE}{feedback}",
             novel_uid=novel_uid, chapter_id=chapter_id, task_type="writing_boundary",
-            timeout_sec=90.0,
+            timeout_sec=boundary_timeout_sec(),
         )
         return await parse_and_validate_json(result.content, WritingBoundary)
 
