@@ -52,10 +52,10 @@ def mock_completion(monkeypatch, result):
     monkeypatch.setattr(httpx.AsyncClient, 'post', post)
 
 
-# 衔接检查不再因证据对不上前文而中止（502）：证据逐条校验，对不上的丢弃；全丢则降级并照常生成。
-# 这里两种输入都应 200；区别在于编造证据不会被注入，且 next_step 仍在。
-@pytest.mark.parametrize('quote,verbatim', [('宿舍在四楼。', True), ('宿舍在五楼。', False)])
-def test_prewrite_boundary_evidence_never_aborts(client, setup_chapter, monkeypatch, quote, verbatim):
+# 衔接检查不再因证据对不上前文而中止（原先编造的 '宿舍在五楼。' 会让整次生成 502）。
+# 两种引用都必须 200 且正文照常流式生成；next_step 不带 evidence_quote，所以两种情况都注入。
+@pytest.mark.parametrize('quote', ['宿舍在四楼。', '宿舍在五楼。'])
+def test_prewrite_boundary_evidence_never_aborts(client, setup_chapter, monkeypatch, quote):
     from contextlib import asynccontextmanager
     uid, chapter, _ = setup_chapter
     mock_completion(monkeypatch, {

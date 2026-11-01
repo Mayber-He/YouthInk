@@ -274,57 +274,196 @@ def test_upstream_error_is_also_visible(client: TestClient, two_chapters, monkey
     assert status == "failed" and "衔接检查未生效" in note
 
 
-def test_all_fabricated_evidence_degrades_not_aborts(client: TestClient, two_chapters, monkeypatch) -> None:
-    """Every evidence_quote is invented -> retry once -> still bad -> degrade (never abort).
+RETRY_SENTENCE = "引用必须是前文中连续的原文片段，不要改动标点，不确定就不引用"
 
-    The write is NOT blocked: status 'failed' with a visible note, and the model's own
-    next_step/avoid (which carry no evidence to verify) are still injected.
-    """
-    uid, _c1, c2 = two_chapters
-    bad = {"established": [{"statement": "宿舍在五楼", "evidence_quote": "宿舍在五楼。"}],
-           "repeated_events": [], "next_step": "从搬完箱子之后接。", "avoid": ["住五楼"]}
-    calls = []
+
+def _mock_model(monkeypatch, *replies: str) -> list[str]:
+    """Reply with ``replies`` in order (the last one repeats). Returns the user prompts it received."""
+    prompts: list[str] = []
 
     async def fake_post(self, url, **kw):
-        calls.append(kw["json"]["messages"][-1]["content"])
-        return httpx.Response(200, json=_chat(json.dumps(bad, ensure_ascii=False)),
-                              request=httpx.Request("POST", url))
+        prompts.append(kw["json"]["messages"][-1]["content"])
+        body = replies[min(len(prompts), len(replies)) - 1]
+        return httpx.Response(200, json=_chat(body), request=httpx.Request("POST", url))
 
     monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    return prompts
+
+
+def _ex(uid: str, chapter_id: int):
     with get_novel_db(uid) as n, get_global_db() as g:
         svc = WritingService(uid, n, SettingsRepository(g))
-        text, status, note = asyncio.run(svc.check_write_boundary_ex(StreamWriteRequest(chapter_id=c2)))
-    assert len(calls) == 2  # original + one retry with feedback
-    assert "一字不改" in calls[1] or "整段复制" in calls[1]  # retry prompt tells the model how to fix it
+        return asyncio.run(svc.check_write_boundary_ex(StreamWriteRequest(chapter_id=chapter_id)))
+
+
+def _payload(**kw) -> str:
+    base = {"established": [], "repeated_events": [], "next_step": "从搬完箱子之后接。", "avoid": []}
+    return json.dumps({**base, **kw}, ensure_ascii=False)
+
+
+BAD_REP = [{"statement": "计划中她住五楼已发生", "evidence_quote": "宿舍在五楼。"}]  # invented quote
+GOOD_REP = [{"statement": "计划中搬箱子已发生", "evidence_quote": "她把箱子搬上去。"}]  # verbatim
+
+
+def test_all_injectable_evidence_invented_retries_once_then_degrades(client, two_chapters, monkeypatch) -> None:
+    """repeated_events is what the fallback path injects (no `avoid`). All of it invented ->
+    retry once with the fix-it prompt -> still invented -> degrade: nothing injected, never an error."""
+    uid, _c1, c2 = two_chapters
+    prompts = _mock_model(monkeypatch, _payload(repeated_events=BAD_REP))
+    text, status, note = _ex(uid, c2)
+    assert len(prompts) == 2 and RETRY_SENTENCE not in prompts[0] and RETRY_SENTENCE in prompts[1]
     assert status == "failed" and note.startswith("衔接检查未生效")
-    assert "本场景从这里接：从搬完箱子之后接" in text  # evidence-free guidance survives
-    assert "住五楼" in text
-    assert "宿舍在五楼" not in text  # the invented evidence is gone
+    assert text == ""  # degraded means it really did not take effect: no half-trusted injection
 
 
-def test_mixed_evidence_drops_bad_keeps_good_no_retry(client: TestClient, two_chapters, monkeypatch) -> None:
-    """One good + one invented evidence item -> drop the bad, keep the good, status ok, no retry."""
+def test_one_bad_item_is_dropped_the_good_one_survives_without_retry(client, two_chapters, monkeypatch, caplog) -> None:
+    """Per-item handling: a mismatched quote used to abort everything; now only that item goes."""
     uid, _c1, c2 = two_chapters
-    mixed = {
-        "established": [
-            {"statement": "宿舍在四楼", "evidence_quote": "宿舍在四楼。"},   # verbatim in history
-            {"statement": "宿舍在五楼", "evidence_quote": "宿舍在五楼。"},   # invented
-        ],
-        "repeated_events": [{"statement": "计划中搬箱子已发生", "evidence_quote": "她把箱子搬上去。"}],
-        "next_step": "从搬完箱子之后接。", "avoid": [],
-    }
-    calls = []
+    prompts = _mock_model(monkeypatch, _payload(repeated_events=GOOD_REP + BAD_REP))
+    with caplog.at_level(logging.WARNING):
+        text, status, note = _ex(uid, c2)
+    assert len(prompts) == 1 and status == "ok" and note == ""  # something survived -> no retry, no failure
+    assert "本场景从这里接：从搬完箱子之后接" in text
+    assert any("dropped 1/2 evidence" in r.getMessage() for r in caplog.records)  # visible at default level
 
-    async def fake_post(self, url, **kw):
-        calls.append(1)
-        return httpx.Response(200, json=_chat(json.dumps(mixed, ensure_ascii=False)),
-                              request=httpx.Request("POST", url))
 
-    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
-    with get_novel_db(uid) as n, get_global_db() as g:
-        svc = WritingService(uid, n, SettingsRepository(g))
-        text, status, note = asyncio.run(svc.check_write_boundary_ex(StreamWriteRequest(chapter_id=c2)))
-    assert len(calls) == 1 and status == "ok" and note == ""  # kept items -> no retry, not a failure
+def test_good_item_is_what_feeds_the_fallback_phrase(client, two_chapters, monkeypatch) -> None:
+    """The surviving repeated_event is the one that becomes the '已写过' phrase; the invented one is not."""
+    uid, _c1, c2 = two_chapters
+    # Both statements reduce to a usable phrase (>= 4 chars): "她把箱子搬上楼" and "她住五楼".
+    rep = [{"statement": "计划中她把箱子搬上楼已发生，不必再写。", "evidence_quote": "她把箱子搬上去。"},
+           {"statement": "计划中她住五楼已发生，不必再写。", "evidence_quote": "宿舍在五楼。"}]
+    # Control: with both evidence items trusted, the invented one WOULD have been injected.
+    assert to_phrase(rep[1]["statement"]) == "她住五楼" and is_usable_phrase("她住五楼")
+    text, status, _ = _ex_with(monkeypatch, client, two_chapters, _payload(repeated_events=rep))
+    assert status == "ok"
+    assert "已写过、不要再写：她把箱子搬上楼" in text and "五楼" not in text
+
+
+def _ex_with(monkeypatch, client, two_chapters, body: str):
+    uid, _c1, c2 = two_chapters
+    _mock_model(monkeypatch, body)
+    return _ex(uid, c2)
+
+
+def test_model_avoid_means_evidence_fields_are_not_in_use(client, two_chapters, monkeypatch) -> None:
+    """With the T6 `avoid` list only next_step + avoid reach the prompt; neither carries a quote.
+    So even a fully invented established/repeated_events must neither retry nor mark the check failed."""
+    uid, _c1, c2 = two_chapters
+    body = _payload(established=[{"statement": "宿舍在五楼", "evidence_quote": "宿舍在五楼。"}],
+                    repeated_events=BAD_REP, avoid=["搬箱子上楼"])
+    prompts = _mock_model(monkeypatch, body)
+    text, status, note = _ex(uid, c2)
+    assert len(prompts) == 1 and status == "ok" and note == ""
+    assert "已写过、不要再写：搬箱子上楼" in text and "五楼" not in text
+
+
+def test_established_never_triggers_a_retry_in_slim_mode(client, two_chapters, monkeypatch) -> None:
+    """`established` is not injected in slim mode, so a bad one there is irrelevant."""
+    uid, _c1, c2 = two_chapters
+    body = _payload(established=[{"statement": "宿舍在五楼", "evidence_quote": "宿舍在五楼。"}], repeated_events=GOOD_REP)
+    prompts = _mock_model(monkeypatch, body)
+    _text, status, _note = _ex(uid, c2)
+    assert len(prompts) == 1 and status == "ok"
+
+
+def test_legacy_mode_validates_both_evidence_fields(client, two_chapters, monkeypatch) -> None:
+    """YOUTHINK_BOUNDARY_SLIM=0 injects the whole JSON, so established IS in use and is filtered too."""
+    monkeypatch.setenv("YOUTHINK_BOUNDARY_SLIM", "0")
+    uid, _c1, c2 = two_chapters
+    est = [{"statement": "宿舍在四楼", "evidence_quote": "宿舍在四楼。"},
+           {"statement": "宿舍在五楼", "evidence_quote": "宿舍在五楼。"}]
+    prompts = _mock_model(monkeypatch, _payload(established=est, repeated_events=GOOD_REP))
+    text, status, _ = _ex(uid, c2)
+    assert len(prompts) == 1 and status == "ok"
+    assert "宿舍在四楼" in text and "宿舍在五楼" not in text  # bad one removed from the injected JSON
+
+
+def test_retry_that_succeeds_uses_the_second_answer(client, two_chapters, monkeypatch) -> None:
+    uid, _c1, c2 = two_chapters
+    prompts = _mock_model(monkeypatch, _payload(repeated_events=BAD_REP, next_step="第一次的落点。"),
+                          _payload(repeated_events=GOOD_REP, next_step="第二次的落点。"))
+    text, status, note = _ex(uid, c2)
+    assert len(prompts) == 2 and RETRY_SENTENCE in prompts[1]
+    assert status == "ok" and note == "" and "第二次的落点" in text and "第一次" not in text
+
+
+def test_whole_call_failure_is_retried_once_then_degrades(client, two_chapters, monkeypatch) -> None:
+    """Unparseable reply both times: one retry (with the fix-it prompt), then '衔接检查未生效', no raise."""
+    uid, _c1, c2 = two_chapters
+    prompts = _mock_model(monkeypatch, "对不起，我无法按要求输出 JSON。")
+    text, status, note = _ex(uid, c2)
+    assert len(prompts) == 2 and RETRY_SENTENCE in prompts[1] and RETRY_SENTENCE not in prompts[0]
+    assert (text, status) == ("", "failed") and note.startswith("衔接检查未生效")
+
+
+def test_whole_call_failure_then_success_on_retry(client, two_chapters, monkeypatch) -> None:
+    uid, _c1, c2 = two_chapters
+    prompts = _mock_model(monkeypatch, "不是JSON", _payload(repeated_events=GOOD_REP))
+    text, status, note = _ex(uid, c2)
+    assert len(prompts) == 2 and status == "ok" and note == "" and "本场景从这里接" in text
+
+
+def _direct(uid: str, chapter_id: int, fn_name: str):
+    """Call writing_boundary.<fn_name> directly (below the service layer, which would mask its result)."""
+    import app.services.writing_boundary as wb
+    with get_global_db() as g:
+        return asyncio.run(getattr(wb, fn_name)(
+            novel_uid=uid, chapter_id=chapter_id, settings=SettingsRepository(g),
+            history="宿舍在四楼。她把箱子搬上去。", plan="本次计划",
+        ))
+
+
+def test_degraded_result_injects_nothing_at_every_layer(client, two_chapters, monkeypatch) -> None:
+    """'衔接检查未生效' must be literally true: BoundaryResult.text is '' and so is what the
+    back-compat wrapper returns. (The service layer drops `text` on failure, so only a direct call sees it.)"""
+    uid, _c1, c2 = two_chapters
+    _mock_model(monkeypatch, _payload(repeated_events=BAD_REP, next_step="不该被注入的落点"))
+    res = _direct(uid, c2, "check_writing_boundary_result")
+    assert res.text == "" and res.note.endswith("已重试一次") and res.dropped == 0
+    assert _direct(uid, c2, "check_writing_boundary") == ""  # wrapper returns r.text
+
+
+def test_boundary_result_reports_how_many_items_were_dropped(client, two_chapters, monkeypatch) -> None:
+    uid, _c1, c2 = two_chapters
+    _mock_model(monkeypatch, _payload(repeated_events=GOOD_REP + BAD_REP + BAD_REP))
+    res = _direct(uid, c2, "check_writing_boundary_result")
+    assert res.note == "" and res.dropped == 2 and res.text.startswith(BOUNDARY_HEADER)
+
+
+def test_retry_never_happens_more_than_once(client, two_chapters, monkeypatch) -> None:
+    uid, _c1, c2 = two_chapters
+    prompts = _mock_model(monkeypatch, _payload(repeated_events=BAD_REP))
+    _ex(uid, c2)
+    assert len(prompts) == 2  # exactly one retry, never a third call
+
+
+def test_nothing_offered_is_not_a_retry_trigger(client, two_chapters, monkeypatch) -> None:
+    """The model legitimately returned no evidence at all: that is a valid (empty) answer, not a failure."""
+    uid, _c1, c2 = two_chapters
+    prompts = _mock_model(monkeypatch, _payload())
+    _text, status, _note = _ex(uid, c2)
+    assert len(prompts) == 1 and status == "ok"
+
+
+def test_sse_write_is_not_aborted_when_every_quote_is_invented(client, two_chapters, monkeypatch) -> None:
+    """End to end through the real route: no 502, the first SSE frame carries the failure notice,
+    and the prose still streams (this is the bug the user hit)."""
+    from contextlib import asynccontextmanager
+    uid, _c1, c2 = two_chapters
+    _mock_model(monkeypatch, _payload(repeated_events=BAD_REP))
+
+    @asynccontextmanager
+    async def fake_stream(self, method, url, **kw):
+        yield httpx.Response(200, text='data: {"choices":[{"delta":{"content":"正文"}}]}\n\ndata: [DONE]\n\n',
+                             request=httpx.Request(method, url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "stream", fake_stream)
+    r = client.post(f"/api/stream/novels/{uid}/write", json={"chapter_id": c2, "existing_content": "", "mode": "scene"})
+    assert r.status_code == 200
+    meta = json.loads(r.text.split("\n\n", 1)[0].split("data: ", 1)[1])
+    assert meta["boundary_status"] == "failed" and meta["boundary_note"].startswith("衔接检查未生效")
+    assert "event: delta" in r.text and "正文" in r.text and "event: error" not in r.text
 
 
 def test_sse_meta_frame_carries_boundary_failure_notice(client: TestClient, two_chapters, monkeypatch) -> None:
@@ -392,75 +531,87 @@ def test_evidence_in_history_rejects_empty_normalized_quote() -> None:
     assert not evidence_in_history("", "任何前文")
 
 
-def test_normalize_handles_full_to_half_width_and_dash_variants() -> None:
-    # em-dash, en-dash, full-width dash all normalize away; only letters remain.
-    hist = "开学那天你要是没事的话——"  # em-dash pair
-    # quote from model with single ——: both sides normalize to same letters
-    assert evidence_in_history("开学那天你要是没事的话——", hist)
-    # model omits the leading word "对了，" (the real category-a failure)
-    hist2 = "对了，开学那天你要是没事的话——"
-    assert evidence_in_history("开学那天你要是没事的话——", hist2)
+# ---- real failures from generation_logs (tests/fixtures/boundary_evidence_failures.json) -----
+# Every quote below was returned by the real model and rejected by the pre-fix check. Categories:
+# a = punctuation/quote/line-break only, c = stitched from several places, d = words changed.
+
+FAILS = json.loads(
+    (Path(__file__).parent / "fixtures" / "boundary_evidence_failures.json").read_text(encoding="utf-8")
+)
+FCASES = FAILS["cases"]
+FCALLS = FAILS["calls"]
+_A = [c for c in FCASES if c["category"] == "a"]
+_NOT_A = [c for c in FCASES if c["category"] != "a"]
 
 
-def test_normalize_handles_quote_position_drift() -> None:
-    # Real failure bak#65: history has '走读的。"' but model quoted '"走读的"。'
-    # (sentence-final punctuation drifted from inside the closing quote to outside)
-    hist = '重新打"本地"，顿了一下，又补了三个字，"走读的。"'
-    quote_model = '"走读的"。'  # closing punc OUTSIDE the quote
-    # both normalize to '走读的' (or the surrounding letters)
-    hn = _normalize_for_match(hist)
-    assert evidence_in_history(quote_model, hn)
+def _in_history(case: dict) -> bool:
+    return evidence_in_history(case["quote"], _normalize_for_match(FCALLS[case["call"]]["history"]))
 
 
-def test_normalize_handles_pronoun_replacement() -> None:
-    # Real failure LIVE#86: history has '他用两指…' model quoted '她用两指…'
-    hist = "他用两指把画面撑大，慢慢挪到她提过的船尾浪花"
-    quote_model = "她用两指把画面撑大，慢慢挪到她提过的船尾浪花"
-    # normalized: both reduce to pure Chinese letters, the 他/她 difference is preserved
-    # so this SHOULD NOT match (pronoun swap is semantic)
-    hn = _normalize_for_match(hist)
-    assert not evidence_in_history(quote_model, hn)
+def test_fixture_is_the_real_data_we_investigated() -> None:
+    cats = sorted(c["category"] for c in FCASES)
+    assert cats == ["a", "a", "c", "c", "d", "d", "d", "d", "d", "d"]  # 10 rejected quotes in 22 real calls
+    assert {"LIVE#83", "LIVE#86", "LIVE#87"} <= set(FCALLS)  # the three failures in the live database
+    assert all(c["call"].startswith(("LIVE", "bak")) for c in FCASES)
 
 
-def test_normalize_handles_name_to_pronoun_replacement() -> None:
-    # Real failure LIVE#87: history has '他在聊天里' model gave '江澈在聊天里'
-    hist = "他在聊天里长按那张图，点了保存"
-    quote_model = "江澈在聊天里长按那张图，点了保存"
-    hn = _normalize_for_match(hist)
-    assert not evidence_in_history(quote_model, hn)
+@pytest.mark.parametrize("case", _A, ids=lambda c: f"{c['call']}-{c['field']}[{c['index']}]")
+def test_real_format_only_drift_now_matches(case) -> None:
+    """(a) The model moved the full stop across a closing quote / dropped a lead-in word. Same text."""
+    assert _in_history(case)
 
 
-def test_normalize_handles_word_order_swap() -> None:
-    # Real failure LIVE#83: history '第二天我提前查了' model '我第二天提前查了'
-    hist = "第二天我提前查了轮渡时刻表"
-    quote_model = "我第二天提前查了轮渡时刻表"
-    hn = _normalize_for_match(hist)
-    assert not evidence_in_history(quote_model, hn)
+@pytest.mark.parametrize("case", _NOT_A, ids=lambda c: f"{c['call']}-{c['field']}[{c['index']}]-{c['category']}")
+def test_real_altered_or_stitched_quotes_are_still_rejected(case) -> None:
+    """(c)/(d) The model swapped 他/她/名字, reordered words, or stitched sentences with text it invented.
+    Looser normalization must not turn these into matches."""
+    assert not _in_history(case)
 
 
-# ---- real-sample regression (quotes that actually failed in generation_logs) -----------------
+def test_the_stitched_quote_skips_a_clause_that_sits_between_its_real_pieces() -> None:
+    """(c) Every piece of the quote is real text, but the model dropped the clause that separates them in
+    the chapter, so the whole is not one continuous passage and must not be accepted."""
+    c = next(c for c in FCASES if c["category"] == "c")
+    hn = _normalize_for_match(FCALLS[c["call"]]["history"])
+    pieces = [p for p in c["quote"].split("\n\n") if p.strip()]
+    skipped = "江澈的手指停在屏幕上方，还没落下去"
+    assert len(pieces) == 3
+    assert all(evidence_in_history(p, hn) for p in pieces)  # each piece exists on its own
+    assert not evidence_in_history(c["quote"], hn)  # ...but not as the contiguous passage claimed
+    assert evidence_in_history(pieces[0] + skipped + pieces[1], hn)  # the skipped clause is what separates them
 
-def test_real_failed_quotes_classified_correctly() -> None:
-    """The four real LIVE#* failures are genuine semantic edits, not format drift: they must still
-    be rejected. The two real class-(a) failures (punctuation position / omitted lead word) must now
-    pass thanks to the stricter normalization.
-    """
-    # (a) format-only drift -> must now MATCH
-    assert evidence_in_history(
-        '"走读的"。',
-        _normalize_for_match('重新打"本地"，顿了一下，又补了三个字，"走读的。"'),
-    )
-    assert evidence_in_history(
-        "开学那天你要是没事的话——",
-        _normalize_for_match("“对了，开学那天你要是没事的话——”\n\n停在那儿"),
-    )
-    # (d) semantic edits (pronoun/name swap, word-order swap) -> must still be REJECTED
-    assert not evidence_in_history(
-        "她用两指把画面撑大", _normalize_for_match("他用两指把画面撑大")
-    )
-    assert not evidence_in_history(
-        "江澈在聊天里长按那张图", _normalize_for_match("他在聊天里长按那张图")
-    )
-    assert not evidence_in_history(
-        "我第二天提前查了轮渡时刻表", _normalize_for_match("第二天我提前查了轮渡时刻表")
-    )
+
+def test_normalization_keeps_pronoun_and_word_order_differences() -> None:
+    """The looser normalization only ignores punctuation/whitespace/width/case, never words."""
+    hn = _normalize_for_match("他用两指把画面撑大。第二天我提前查了轮渡时刻表。")
+    assert not evidence_in_history("她用两指把画面撑大", hn)  # 他 -> 她
+    assert not evidence_in_history("我第二天提前查了轮渡时刻表", hn)  # word order
+    assert evidence_in_history("“他用两指，把画面撑大！”", hn)  # punctuation only -> fine
+
+
+def test_normalize_is_symmetric_and_width_insensitive() -> None:
+    assert _normalize_for_match("ＡＢＣ１２３，Ｄ！") == _normalize_for_match("abc123 d?") == "abc123d"
+    assert _normalize_for_match("走读的。”") == _normalize_for_match("“走读的”。") == "走读的"
+    assert _normalize_for_match("") == "" and _normalize_for_match("……——「」") == ""
+    assert not evidence_in_history("……——", _normalize_for_match("任何前文"))  # '' must never match everything
+
+
+def test_real_calls_that_used_to_abort_now_keep_their_good_items(client, two_chapters, monkeypatch) -> None:
+    """Replay each real model output through check_writing_boundary_result with the real history.
+    Before the fix 6 of these 9 calls raised BOUNDARY_EVIDENCE_MISMATCH (the other 3 are controls that
+    passed); now none raises and none needs a retry."""
+    from app.services.writing_boundary import check_writing_boundary_result
+    uid, _c1, _c2 = two_chapters
+    results = {}
+    for name, call in FCALLS.items():
+        prompts = _mock_model(monkeypatch, json.dumps(call["output"], ensure_ascii=False))
+        with get_global_db() as g:
+            res = asyncio.run(check_writing_boundary_result(
+                novel_uid=uid, chapter_id=1, settings=SettingsRepository(g),
+                history=call["history"], plan="本次计划",
+            ))
+        assert len(prompts) == 1, f"{name}: should not need a retry"
+        assert res.note == "" and res.text.startswith(BOUNDARY_HEADER), name
+        results[name] = res
+    # LIVE#86/#87 used to abort on a repeated_event; they have `avoid`, so those quotes are not injected
+    assert "已写过、不要再写：" in results["LIVE#87"].text

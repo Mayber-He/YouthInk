@@ -302,23 +302,29 @@ _USER_SCHEMA = (
     '"avoid":["已写过、不要再写的素材，每条是不超过20字的名词性短语，如“修打印机”“她抱怨冰棍化手”，'
     '不要写评语、理由或建议"]}。'
 )
-# evidence_quote 的硬性要求。放在 schema 之后，重试时再追加“具体错在哪”。
-_EVIDENCE_RULE = (
-    "没有证据的项目不要输出，列表可以为空。"
-    "evidence_quote 必须是【已写正文】中**连续的一段原文**，可以原样复制粘贴："
-    "不要改写、不要替换人称（他/她/名字）、不要跨句拼接、不要用省略号省略中间、不要补标点。"
-    "宁可不输出该项，也不要给出对不上原文的证据。"
+# 首次调用的证据要求保持原文不变：无法用真实模型验证，不在这里顺手改动首次提示词的行为。
+_EVIDENCE_RULE = "没有证据的项目不要输出，列表可以为空。证据不得拼接、改写或使用省略号。"
+# 重试时追加的纠错提示，两种重试原因都带上这句固定要求。
+_RETRY_QUOTE_RULE = "引用必须是前文中连续的原文片段，不要改动标点，不确定就不引用。"
+_RETRY_EVIDENCE = (
+    "\n【上一次返回被拒】你给出的 evidence_quote 在【已写正文】里都找不到。" + _RETRY_QUOTE_RULE
+    + "请直接从【已写正文】整段复制，不要替换人称或人名，不要跨句拼接。"
 )
+_RETRY_FAILED = (
+    "\n【上一次返回不可用】没有得到可解析的结果。请只返回上述格式的严格 JSON，不要加说明文字。" + _RETRY_QUOTE_RULE
+)
+MAX_ATTEMPTS = 2  # 首次 + 最多重试一次；“整体失败”与“可用证据被全部丢弃”共用这一次重试额度
 
 
 @dataclass
 class BoundaryResult:
     """Outcome of the continuity check.
 
-    * ``text``   – lean injection (may be '' when nothing usable survived).
-    * ``dropped``– number of evidence items dropped because they weren't verbatim in the history.
-    * ``note``   – '' on success; a short human reason when every item was dropped even after a retry
-                   (the caller degrades to '衔接检查未生效' and keeps writing).
+    * ``text``    – the lean injection. ``''`` whenever the check degraded (``note`` set): a degraded
+                    check injects NOTHING, so the UI message '衔接检查未生效' is literally true.
+    * ``dropped`` – evidence items (in fields that reach the prompt) dropped for not being verbatim.
+    * ``note``    – ``''`` normally. Non-empty = degraded after the one retry: the caller reports
+                    '衔接检查未生效' and keeps writing.
     """
 
     text: str
@@ -326,31 +332,61 @@ class BoundaryResult:
     note: str = ""
 
 
-def _filter_verbatim(boundary: "WritingBoundary", history_norm: str) -> tuple["WritingBoundary", int, int]:
-    """Drop ``established``/``repeated_events`` whose evidence is not verbatim in the history.
+def _has_model_avoid(boundary: "WritingBoundary") -> bool:
+    """True when ``format_boundary_for_prompt`` will use the model's own ``avoid`` phrases."""
+    return any(_clean_model_phrase(a) for a in boundary.avoid)
 
-    Returns (filtered_boundary, kept_evidence_items, dropped_items). ``avoid`` and ``next_step``
-    are kept as-is: they carry no evidence_quote and are the model's own short guidance.
+
+def _partition(items: list[EvidencedEvent], history_norm: str) -> tuple[list[EvidencedEvent], list[EvidencedEvent]]:
+    good: list[EvidencedEvent] = []
+    bad: list[EvidencedEvent] = []
+    for ev in items:
+        (good if evidence_in_history(ev.evidence_quote, history_norm) else bad).append(ev)
+    return good, bad
+
+
+def _filter_verbatim(
+    boundary: "WritingBoundary", history_norm: str, *, slim: bool,
+) -> tuple["WritingBoundary", int, int]:
+    """Validate, item by item, the evidence fields that actually reach the prompt.
+
+    Fields in use (audit of T6, see docs/loop/PROGRESS.md):
+      * legacy format (slim off): ``established`` + ``repeated_events`` – the whole JSON is injected.
+      * slim, model gave ``avoid``: none. Only ``next_step`` + ``avoid`` are injected; neither
+        carries an evidence_quote.
+      * slim, no ``avoid``: ``repeated_events`` – its ``statement`` is shortened into the
+        "已写过" list and its evidence_quote is what vouches for that statement.
+    ``established`` is never injected in slim mode. A field that is not in use is dropped from the
+    result and cannot affect anything; its mismatches are only logged at INFO.
+
+    Returns ``(filtered, offered, kept)`` counted over the in-use fields only.
     """
-    kept_est, kept_rep, dropped = [], [], 0
-    for ev in boundary.established:
-        if evidence_in_history(ev.evidence_quote, history_norm):
-            kept_est.append(ev)
-        else:
-            dropped += 1
-            logger.info("writing boundary: dropped established evidence not in history: %r", ev.evidence_quote)
-    for ev in boundary.repeated_events:
-        if evidence_in_history(ev.evidence_quote, history_norm):
-            kept_rep.append(ev)
-        else:
-            dropped += 1
-            logger.info("writing boundary: dropped repeated_event evidence not in history: %r", ev.evidence_quote)
-    filtered = boundary.model_copy(update={"established": kept_est, "repeated_events": kept_rep})
-    return filtered, len(kept_est) + len(kept_rep), dropped
+    est_good, est_bad = _partition(boundary.established, history_norm)
+    rep_good, rep_bad = _partition(boundary.repeated_events, history_norm)
+    use_est = not slim
+    use_rep = (not slim) or not _has_model_avoid(boundary)
+
+    ignored = (0 if use_est else len(est_bad)) + (0 if use_rep else len(rep_bad))
+    if ignored:
+        logger.info("writing boundary: %d evidence quote(s) not in history, ignored (field not injected)", ignored)
+    used_bad = (est_bad if use_est else []) + (rep_bad if use_rep else [])
+    offered = (len(boundary.established) if use_est else 0) + (len(boundary.repeated_events) if use_rep else 0)
+    kept = (len(est_good) if use_est else 0) + (len(rep_good) if use_rep else 0)
+    if used_bad:
+        # WARNING（不是 INFO）：默认日志级别下也要能看到“模型引用对不上前文”，否则无从排查。
+        logger.warning(
+            "writing boundary: dropped %d/%d evidence item(s) not found in history, e.g. %s",
+            len(used_bad), offered, " | ".join(repr(e.evidence_quote[:60]) for e in used_bad[:3]),
+        )
+    filtered = boundary.model_copy(update={
+        "established": est_good if use_est else [],
+        "repeated_events": rep_good if use_rep else [],
+    })
+    return filtered, offered, kept
 
 
-def _render(boundary: "WritingBoundary") -> str:
-    if not boundary_slim_enabled():
+def _render(boundary: "WritingBoundary", slim: bool) -> str:
+    if not slim:
         return (
             "【生成前章节衔接检查】以下是基于原文证据的写作边界；与梗概重复时从已发生事件之后推进。\n"
             + boundary.model_dump_json()
@@ -362,59 +398,54 @@ async def check_writing_boundary_result(
     *, novel_uid: str, chapter_id: int, settings: SettingsRepository,
     history: str, plan: str,
 ) -> BoundaryResult:
-    """Run the continuity check; never abort on mismatched evidence.
+    """Run the continuity check; mismatched evidence never aborts the write.
 
-    Per-item handling: each evidence_quote is validated independently against the (normalized)
-    history. Items that aren't verbatim are dropped; the rest are kept. If *every* evidenced item
-    is dropped, the model is retried once with explicit feedback. If the retry still yields nothing
-    verbatim, we degrade (return a ``note``) rather than block the write — but we still inject the
-    model's ``next_step``/``avoid`` guidance, which carries no evidence to verify.
+    * Each evidence_quote is validated on its own (see ``_filter_verbatim``); bad ones are dropped,
+      good ones kept.
+    * "Nothing usable" = the evidence fields that reach the prompt were offered but ALL dropped.
+      "Overall failure" = the call or its JSON parse raised. Either way: retry ONCE, telling the
+      model how to fix it.
+    * Still failing after the retry -> degrade: empty ``text`` + a ``note``. The caller shows
+      '衔接检查未生效' and keeps writing.
     """
     if not history.strip():
         return BoundaryResult("")
     _, base_url, model, api_key = settings.get_credentials_for_task("planning")
     history_norm = _normalize_for_match(history)
+    slim = boundary_slim_enabled()
 
-    async def _call(extra_rule: str) -> "WritingBoundary":
+    async def _call(feedback: str) -> "WritingBoundary":
         result = await complete_chat(
             base_url=base_url, api_key=api_key, model=model, temperature=0.2,
             system_prompt=_SYSTEM_PROMPT,
-            user_prompt=f"【已写正文】\n{history}\n\n【本次写作计划】\n{plan}\n\n{_USER_SCHEMA}{_EVIDENCE_RULE}{extra_rule}",
+            user_prompt=f"【已写正文】\n{history}\n\n【本次写作计划】\n{plan}\n\n{_USER_SCHEMA}{_EVIDENCE_RULE}{feedback}",
             novel_uid=novel_uid, chapter_id=chapter_id, task_type="writing_boundary",
             timeout_sec=90.0,
         )
         return await parse_and_validate_json(result.content, WritingBoundary)
 
-    boundary = await _call("")
-    filtered, kept, dropped = _filter_verbatim(boundary, history_norm)
-    had_evidence = bool(boundary.established or boundary.repeated_events)
-
-    # 全部证据项都被丢弃（且模型本来给了证据项）：带着“为什么被丢”的反馈重试一次。
-    if had_evidence and kept == 0:
-        logger.warning(
-            "writing boundary: all %d evidence items failed verbatim check (chapter_id=%s), retrying once",
-            dropped, chapter_id,
-        )
-        retry_rule = (
-            "\n【上一次尝试被拒】你给出的 evidence_quote 在【已写正文】里都找不到原文（多半是改了人称、"
-            "跨句拼接或补了标点）。请重来：每条 evidence_quote 直接从【已写正文】里**整段复制**，一字不改；"
-            "不确定能否逐字复制的条目就不要放进 established / repeated_events。"
-        )
+    feedback = ""
+    problem = ""
+    for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            boundary2 = await _call(retry_rule)
-            filtered2, kept2, dropped2 = _filter_verbatim(boundary2, history_norm)
-            if kept2 > 0:
-                return BoundaryResult(_render(filtered2), dropped=dropped2)
-            # 重试仍无合格证据：降级，但仍注入无需证据的 next_step / avoid。
-            logger.warning("writing boundary: retry still produced no verbatim evidence (chapter_id=%s)", chapter_id)
-            text = _render(boundary2.model_copy(update={"established": [], "repeated_events": []}))
-            return BoundaryResult(text, dropped=dropped2, note="衔接检查的引用都对不上前文，已跳过“已写过”清单")
-        except AppError:
-            # 重试本身技术性失败（解析/网络）：用第一次的 next_step / avoid 兜底，不阻断。
-            text = _render(filtered)
-            return BoundaryResult(text, dropped=dropped, note="衔接检查重试失败，已跳过“已写过”清单")
-
-    return BoundaryResult(_render(filtered), dropped=dropped)
+            boundary = await _call(feedback)
+        except Exception as exc:  # noqa: BLE001 - CancelledError is BaseException and still propagates
+            problem = f"{exc.code}: {exc.message}" if isinstance(exc, AppError) else f"{type(exc).__name__}: {exc}"
+            feedback = _RETRY_FAILED  # 整体失败的重试同样带上“引用必须是连续原文”的固定要求
+            logger.warning(
+                "writing boundary: attempt %d/%d failed (chapter_id=%s): %s", attempt, MAX_ATTEMPTS, chapter_id, problem,
+            )
+            continue
+        filtered, offered, kept = _filter_verbatim(boundary, history_norm, slim=slim)
+        if offered and not kept:
+            problem = "模型给出的引用与前文对不上"
+            feedback = _RETRY_EVIDENCE
+            logger.warning(
+                "writing boundary: attempt %d/%d had no verbatim evidence (chapter_id=%s)", attempt, MAX_ATTEMPTS, chapter_id,
+            )
+            continue
+        return BoundaryResult(_render(filtered, slim), dropped=offered - kept)
+    return BoundaryResult("", note=f"{problem}，已重试一次")
 
 
 async def check_writing_boundary(

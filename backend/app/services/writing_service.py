@@ -496,9 +496,10 @@ class WritingService:
           * ``ok``      – check ran; ``text`` is the lean injection (possibly after dropping some
                           non-verbatim evidence items — that is not a failure).
           * ``skipped`` – nothing to check against (opening chapter / no prior prose). Not an error.
-          * ``failed``  – the check could NOT run (timeout, unparseable reply, no credentials …),
-                          OR every evidence item was non-verbatim even after one retry. ``note`` is
-                          the user-visible "衔接检查未生效" message.
+          * ``failed``  – the check could NOT produce anything usable (timeout, unparseable reply, no
+                          credentials …, or every injectable evidence item was non-verbatim), still
+                          failing after one retry. ``text`` is ``''`` and ``note`` is the
+                          user-visible "衔接检查未生效" message.
 
         Mismatched evidence no longer aborts: bad items are dropped per-item (see
         ``check_writing_boundary_result``). Writing is never blocked by the continuity check.
@@ -520,9 +521,9 @@ class WritingService:
             + author_style_prompt(self._novel_repo.get_novel_detail())
         )
         # 衔接检查只是生成前的参考，任何情况都不阻断正文生成：
-        #  - 技术性故障（解析失败/超时/无凭据）→ failed，降级并提示；
         #  - 个别证据对不上前文 → 逐条丢弃，保留其余（仍算 ok，只记日志）；
-        #  - 所有证据项都对不上（重试后仍然）→ failed，仍注入 next_step/avoid，但提示“已跳过已写过清单”。
+        #  - 整体失败（解析失败/超时/上游错误）或“会被注入的证据全被丢弃” → 带纠错提示重试一次；
+        #  - 重试后仍不行 → failed：不注入任何衔接内容，界面提示“衔接检查未生效”，正文照常生成。
         from app.core.exceptions import AppError
 
         if not history.strip():
@@ -537,17 +538,11 @@ class WritingService:
         except Exception as e:  # noqa: BLE001 - any technical failure degrades, never blocks writing
             reason = f"{type(e).__name__}: {e}"
         else:
-            if res.dropped:
-                _scene_logger.info(
-                    "衔接检查丢弃了 %d 条对不上前文的证据 (chapter_id=%s scene_id=%s)",
-                    res.dropped, req.chapter_id, req.scene_id,
-                )
-            if res.note:  # 证据整体不可用（已重试），降级为可见提示，但正文照常生成
-                _scene_logger.warning(
-                    "衔接检查未生效 (chapter_id=%s scene_id=%s): %s", req.chapter_id, req.scene_id, res.note
-                )
-                return res.text, "failed", unavailable_notice(res.note)
-            return res.text, "ok", ""
+            # 个别证据被丢弃时 writing_boundary 已按条记了 WARNING（含引文样例），这里不重复记。
+            if res.note:  # 重试后仍不可用：降级为可见提示，不注入任何衔接内容，正文照常生成
+                reason = res.note
+            else:
+                return res.text, "ok", ""
         _scene_logger.warning(
             "衔接检查未生效 (chapter_id=%s scene_id=%s): %s", req.chapter_id, req.scene_id, reason
         )
