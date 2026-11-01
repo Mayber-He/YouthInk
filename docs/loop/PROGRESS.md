@@ -88,7 +88,35 @@ foreshadowing 用 `content` 而非 `description`。
   - 现有约束 21 条 valid_from/until 均为空（全程生效），与当前仅 5 章、全在报到阶段一致；
     如需按阶段收窄某条约束，请在约束管理里设置生效范围，assembler 会自动按章过滤。
 
-### T3 场景拆分改为事件清单 [待做]
+### T3 场景拆分改为事件清单 [完成]
+- [x] `generate_chapter_scenes` 提示词 + 输出 schema 改为事件清单：goal / entry_state /
+      must_happen（≤3 条、每条 ≤25 字）/ exit_state / must_not_include / target_words；
+      提示词明确禁止写台词、分镜级动作细节、结尾意象。
+- [x] **DB 兼容方案选“拼接进现有 `scenes.beat`”（零迁移）**，不新增列。理由：`beat` 已被
+      assembler、writing_boundary、write_scene 模板等多处直接内联，拼成稳定可读文本
+      （目标/起点状态/必须发生/终点状态/本场禁止出现）后，下游零改动；新增列则要改 SceneResponse、
+      前端类型、所有读取点，改动面更大。
+- [x] 相邻场景 must_happen 字符 3-gram Jaccard 相似度校验（阈值 0.6）；超阈值带重复处让模型
+      重拆一次；仍重复则保留结果并写 warning 日志（最多 1 次重拆，不循环）。
+- [x] 章梗概生成（setting_generator 的 generate_outline_chapters 提示词）加入：
+      只写“发生了什么事件、从哪个状态起、到哪个状态止”，不写对白/分镜动作细节/结尾意象。
+- 改动文件：
+  - 新增 `backend/app/services/scene_planning.py`（格式化 beat、n-gram 相似度、相邻重复检测）
+  - 改 `backend/app/services/writing_service.py`（提示词、重拆流程、事件清单→beat）
+  - 改 `backend/app/schemas/writing.py`（LlmSceneItem 增事件清单字段；保留 beat 等旧字段兼容）
+  - 改 `backend/app/services/setting_generator.py`（章梗概提示词）
+  - 改 `backend/app/builtin/prompt_templates.py`（generate_scenes 模板 v2.0）
+  - 新增 `backend/tests/test_scene_event_checklist.py`
+- 验证结果：
+  - 新增 7 测试全过（纯函数 4 + 集成 3：解析→beat、触发一次重拆并采用干净版、重拆后仍重复则保留且不再重试）。
+  - 全量 `pytest tests`：57 passed / 5 failed，5 个为基线既有失败，无新增。
+  - 旧的 m3 `scenes/generate` 测试（只给 `beat` 字段）仍通过——schema 向后兼容。
+- 遗留问题 / 需人工确认：
+  - **已存在的 global.db 里的 `generate_scenes` 模板不会自动刷新**（种子用 INSERT OR IGNORE，
+    库里仍是 v1.1 文案）。但事件清单的完整要求已在代码里追加到 instruction，行为不依赖模板刷新。
+    如希望界面“提示词模板”页也显示 v2.0，需在设置里手动重置该模板（我没有改 global.db）。
+  - 3-gram Jaccard 阈值 0.6 为经验值；短句（<10 字）相似度对个别字敏感，真实使用后可调。
+  - 已有场景的 beat 仍是旧散文式文本，未做迁移（按规则不改现有小说数据）；只有重新“AI 拆场景”才会写入新格式。
 
 ### T4 精简并重排写作提示词 [待做]
 

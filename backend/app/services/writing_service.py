@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 
 from app.db.repositories.entity_repo import EntityRepository
@@ -23,6 +24,8 @@ from app.services.context.assembler import ContextAssembler
 from app.services.llm.client import complete_chat
 from app.services.llm.json_parser import parse_and_validate_json
 from app.services.prompt.renderer import assemble_six_layer_prompt, render_template
+
+_scene_logger = logging.getLogger(__name__)
 
 
 def _word_count_range(target: int) -> str:
@@ -109,43 +112,91 @@ class WritingService:
                 "target_words": novel.words_per_chapter,
             },
         )
-        inst += f"\n请拆解为 {scene_count} 个场景节拍。节拍描述中可用 @人物名 和 @地点名 标注关联实体。"
+        inst += (
+            f"\n请拆解为 {scene_count} 个场景，每个场景以【事件清单】形式给出，"
+            "不要写成散文式节拍。节拍里可用 @人物名 和 @地点名 标注关联实体。\n"
+            "每个场景必须输出以下字段：\n"
+            "- goal：本场景要达成的叙事目的（一句话）\n"
+            "- entry_state：进入本场景时的起点状态（人物位置/关系/情绪的简短快照）\n"
+            "- must_happen：本场必须发生的事件，最多 3 条，每条不超过 25 字，只写事件不写细节\n"
+            "- exit_state：本场结束时的终点状态（为下一场留下的钩子）\n"
+            "- must_not_include：本场禁止出现的素材（留给后续场景的事件、不该提前的信息）\n"
+            "- target_words：预估字数\n"
+            "【严禁】不要写具体台词或对白、不要写分镜级的具体动作细节、不要写结尾意象或景物升华；"
+            "这些留给正文生成阶段。must_happen 用“谁做了什么、发生了什么结果”的事件句，不要展开过程。\n"
+            "相邻场景的 must_happen 不得重复同一事件；每个场景都要带来新的事件或状态推进。"
+        )
         inst += (
             "人物卡中的既有经历和关系是必须遵守的故事事实；不得把已经认识或持续联系的人物安排成初次相识、首次加好友。"
-            "人物卡不代表 POV 自动知晓他人的私密信息，但不能因此改写人物既有经历。若章节梗概与人物卡冲突，调整场景节拍以遵守人物卡与前文事实。"
+            "人物卡不代表 POV 自动知晓他人的私密信息，但不能因此改写人物既有经历。若章节梗概与人物卡冲突，调整场景以遵守人物卡与前文事实。"
         )
         if instruction:
             inst += f"\n作者附加要求：{instruction}"
 
         fmt = (
             '请输出纯 JSON 对象，格式示例：\n'
-            '{"scenes": [{"beat": "场景节拍具体推进（含@林夏 @实验楼天台）", '
-            '"pov_character_name": "林夏", "location_name": "实验楼天台", '
-            '"character_names": ["林夏", "陆川"], "story_time": "午休时分", "target_words": 850}]}'
-        )
-        sys_msg, user_msg = assemble_six_layer_prompt(
-            layer1_system_role=layer1,
-            layer2_style_template=layer2,
-            layer3_core_setting=layer3,
-            layer4_dynamic_context=context,
-            layer5_task_instruction=inst,
-            layer6_output_format=fmt,
+            '{"scenes": [{"goal": "两人第一次正式照面并交换联系方式", '
+            '"entry_state": "江澈刚到报到处，裴南栀在发放材料", '
+            '"must_happen": ["江澈找到报到处", "裴南栀帮他办手续", "两人加了联系方式"], '
+            '"exit_state": "江澈拿到材料，心里记住了这个学姐", '
+            '"must_not_include": ["江澈认出她是网友", "表白或暧昧"], '
+            '"pov_character_name": "江澈", "location_name": "报到处", '
+            '"character_names": ["江澈", "裴南栀"], "story_time": "报到日上午", "target_words": 850}]}'
         )
 
         _, base_url, model, api_key = self._settings_repo.get_credentials_for_task("planning")
-        res = await complete_chat(
-            base_url=base_url,
-            api_key=api_key,
-            model=model,
-            system_prompt=sys_msg,
-            user_prompt=user_msg,
-            temperature=0.7,
-            novel_uid=self._novel_uid,
-            task_type="generate_scenes",
-            chapter_id=chapter_id,
+
+        async def _request_scenes(extra_hint: str = "") -> LlmSceneBatchOutput:
+            sys_msg, user_msg = assemble_six_layer_prompt(
+                layer1_system_role=layer1,
+                layer2_style_template=layer2,
+                layer3_core_setting=layer3,
+                layer4_dynamic_context=context,
+                layer5_task_instruction=inst + extra_hint,
+                layer6_output_format=fmt,
+            )
+            res = await complete_chat(
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                system_prompt=sys_msg,
+                user_prompt=user_msg,
+                temperature=0.7,
+                novel_uid=self._novel_uid,
+                task_type="generate_scenes",
+                chapter_id=chapter_id,
+            )
+            return await parse_and_validate_json(res.content, LlmSceneBatchOutput)
+
+        parsed = await _request_scenes()
+
+        # 相邻场景 must_happen 重复校验：超阈值则带着重复处让模型重拆一次；
+        # 仍重复则保留结果并写警告日志（不无限循环）。
+        from app.services.scene_planning import (
+            describe_duplicates,
+            find_adjacent_duplicates,
+            format_scene_beat,
         )
 
-        parsed = await parse_and_validate_json(res.content, LlmSceneBatchOutput)
+        def _mh(batch: LlmSceneBatchOutput) -> list[list[str]]:
+            return [list(s.must_happen) for s in batch.scenes]
+
+        dups = find_adjacent_duplicates(_mh(parsed))
+        if dups:
+            retry = await _request_scenes(
+                "\n\n上一次拆分存在相邻场景事件重复，请重新拆分。"
+                + describe_duplicates(dups)
+            )
+            if len(find_adjacent_duplicates(_mh(retry))) <= len(dups):
+                parsed = retry
+            remaining = find_adjacent_duplicates(_mh(parsed))
+            if remaining:
+                _scene_logger.warning(
+                    "generate_chapter_scenes: adjacent must_happen still overlaps after one re-split "
+                    "(chapter_id=%s, pairs=%d)",
+                    chapter_id, len(remaining),
+                )
+
         char_by_name = {c.name: c.id for c in chars}
         loc_by_name = {l.name: l.id for l in locs}
 
@@ -154,9 +205,17 @@ class WritingService:
             pov_id = char_by_name.get(item.pov_character_name)
             loc_id = loc_by_name.get(item.location_name)
             c_ids = [char_by_name[n] for n in item.character_names if n in char_by_name]
+            # 事件清单序列化进现有 beat 列（零迁移）；老模型只给 beat 时原样沿用。
+            if item.has_event_checklist():
+                beat_text = format_scene_beat(
+                    item.goal, item.entry_state, item.must_happen,
+                    item.exit_state, item.must_not_include,
+                )
+            else:
+                beat_text = item.beat
             scenes_to_create.append(
                 SceneCreate(
-                    beat=item.beat,
+                    beat=beat_text or item.beat or item.goal or "（场景待细化）",
                     pov_character=pov_id,
                     location_id=loc_id,
                     character_ids=c_ids,

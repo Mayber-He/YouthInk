@@ -50,12 +50,23 @@ class AiGenerateScenesRequest(BaseModel):
 
 
 class LlmSceneItem(BaseModel):
-    beat: str
+    # 事件清单字段（T3 新结构）。goal/entry_state/exit_state 为短语，
+    # must_happen 最多 3 条、每条尽量 ≤25 字，must_not_include 为本场禁止出现的素材。
+    goal: str = ""
+    entry_state: str = ""
+    must_happen: list[str] = Field(default_factory=list)
+    exit_state: str = ""
+    must_not_include: list[str] = Field(default_factory=list)
+    # 旧字段：仍兼容老模型输出 / 老测试；若新字段为空则回退到 beat 原文。
+    beat: str = ""
     pov_character_name: str = ""
     location_name: str = ""
     character_names: list[str] = Field(default_factory=list)
     story_time: str = ""
     target_words: int = 800
+
+    def has_event_checklist(self) -> bool:
+        return bool(self.goal or self.entry_state or self.must_happen or self.exit_state)
 
 
 class LlmSceneBatchOutput(BaseModel):
