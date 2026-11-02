@@ -954,6 +954,7 @@ T6 之后哪些 evidence 字段真正进提示词，随开关/模型输出而变
 - `cd frontend && npm run typecheck`：通过。
 - `cd frontend && node --test tests/*.test.mjs`：**11 passed**。
 - `cd backend && python -m pytest tests/test_repetition_guard.py tests/test_story_time.py tests/test_t17_beat_quotes.py tests/test_t18_scene_seam.py tests/test_t19_appearance_media.py -q`：**105 passed**。
+- `cd backend && python -m pytest tests -q`：**456 passed / 5 failed**，5 项与既有基线逐项一致（M2 时序/滚动 3 项、M3 流式 1 项、M5 长书 1 项），无新增失败；T21 补写测试改为显式传 `auto_rewrite=True`。
 - 未调用真实 LLM；未修改小说数据。
 
 ### 局限
