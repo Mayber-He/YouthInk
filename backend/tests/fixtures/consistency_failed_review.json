@@ -1,0 +1,48 @@
+{
+  "issues": [
+    {
+      "check_type": "common_sense",
+      "ref_id": null,
+      "ref_label": "情境D·场景3",
+      "verdict": "suspicious",
+      "evidence_quote": "这种话他听过。上周屏幕另一端也发来过差不多的意思，他当时偏不顺着接，那边立刻连珠炮似的甩回一串，好像非逼他认账不可。",
+      "historical_evidence": "",
+      "description": "场景3要求电话里的措辞语气与聊天框原句一致，但正文只写“差不多的意思”，且上一章聊天中并无与“别等她吃午饭”对应的原句，江澈确认身份主要靠壁纸，电话证据偏弱。",
+      "suggestion": "让电话内容与上一章聊天中的具体措辞对应，或明确江澈是从壁纸锁定、电话只是加重怀疑。",
+      "suggested_rewrite": "这种语气他听过。上周屏幕另一端也发来过差不多的意思——先解释，再补一句软话，他当时偏不顺着接，那边立刻连珠炮似的甩回一串，好像非逼他认账不可。"
+    },
+    {
+      "check_type": "common_sense",
+      "ref_id": null,
+      "ref_label": "内部物品逻辑·设备连接",
+      "verdict": "suspicious",
+      "evidence_quote": "桌上并排摆着两根白色数据线，一根接扫码枪，一根接那台认不出设备的笔记本",
+      "historical_evidence": "",
+      "description": "后文江澈让学姐拔扫码枪线来解决扩展坞供电不足，但此处未说明扫码枪线接在扩展坞上，读者难以理解拔扫码枪为何能让扩展坞蓝灯稳住。",
+      "suggestion": "明确扫码枪插在扩展坞上，使修理逻辑成立。",
+      "suggested_rewrite": "桌上并排摆着两根白色数据线，一根从扩展坞接到扫码枪，一根接那台认不出设备的笔记本"
+    },
+    {
+      "check_type": "common_sense",
+      "ref_id": "#905",
+      "ref_label": "常理#905/身份常识",
+      "verdict": "suspicious",
+      "evidence_quote": "目光从他脸上下到胸口的校徽，又收回去。",
+      "historical_evidence": "",
+      "description": "新生报到当天通常尚未发放或佩戴校徽，江澈作为刚入校的新生穿着带校徽的衣服不合常理。",
+      "suggestion": "改为报到牌、流程单等新生当场持有的物品。",
+      "suggested_rewrite": "目光从他脸上下到胸前的报到牌，又收回去。"
+    },
+    {
+      "check_type": "prose",
+      "ref_id": null,
+      "ref_label": null,
+      "verdict": "suspicious",
+      "evidence_quote": "江澈把侧袋里那瓶水抽出来放在脚边，半蹲下身",
+      "historical_evidence": "",
+      "description": "前文已多次描写江澈喝水、拧盖、塞回侧袋，此处再写抽水放脚边，动作琐碎重复，无叙事推进。",
+      "suggestion": "删去抽水放脚边的动作，直接写他半蹲查看。",
+      "suggested_rewrite": "江澈半蹲下身"
+    }
+  ]
+}

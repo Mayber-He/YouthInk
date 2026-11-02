@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -12,6 +14,11 @@ from fastapi.testclient import TestClient
 from app.core.config import reset_config_for_testing
 from app.db.manager import ensure_global_db_initialized
 from app.main import create_app
+
+FIX = Path(__file__).parent / "fixtures"
+FAILED_REVIEW_SAMPLE = json.loads(
+    (FIX / "consistency_failed_review.json").read_text(encoding="utf-8")
+)
 
 
 @pytest.fixture()
@@ -338,3 +345,104 @@ def test_cross_chapter_continuity_guards(
     assert "【检查表E：跨章连贯】" in captured[0]
     assert "学校的事明天再说" in captured[0]
     assert r.json()["issues"][0]["check_type"] == "continuity"
+
+
+# ---------------------------------------------------------------- T14 tolerance
+
+def test_failed_review_sample_keeps_all_four_issues(
+    client: TestClient, novel_uid: str, monkeypatch: pytest.MonkeyPatch, character_id: int
+) -> None:
+    """Real 422 sample: issues[3].ref_label is null; every issue must survive."""
+    _setup_llm_profile(client)
+    ch = _make_chapter_with_content(
+        client, novel_uid, character_id, "江澈把侧袋里那瓶水抽出来放在脚边，半蹲下身。"
+    )
+    _mock_review_response(monkeypatch, FAILED_REVIEW_SAMPLE["issues"])
+
+    r = client.post(f"/api/v1/novels/{novel_uid}/chapters/{ch}/consistency-review")
+    assert r.status_code == 201, r.text
+    data = r.json()
+    assert data["issue_count"] == 4
+    assert [i["check_type"] for i in data["issues"]] == [
+        "common_sense", "common_sense", "common_sense", "prose",
+    ]
+    # None is normalized to "" so the issue is kept and the frontend type still holds.
+    assert data["issues"][3]["ref_label"] == ""
+    assert data["issues"][3]["evidence_quote"].startswith("江澈把侧袋里那瓶水")
+
+
+def test_invalid_issues_are_dropped_individually_with_log(
+    client: TestClient, novel_uid: str, monkeypatch: pytest.MonkeyPatch,
+    character_id: int, caplog: pytest.LogCaptureFixture
+) -> None:
+    _setup_llm_profile(client)
+    ch = _make_chapter_with_content(
+        client, novel_uid, character_id, "林夏拿着新生手册，在校园里转了三圈才找到宿舍楼。"
+    )
+    valid = {
+        "check_type": "common_sense", "ref_id": 901, "ref_label": "常理#901",
+        "verdict": "suspicious", "evidence_quote": "林夏拿着新生手册",
+        "description": "d", "suggestion": "s",
+    }
+    invalid_type = {**valid, "check_type": "not_a_type"}
+    missing_required = {"ref_label": "缺字段"}
+    _mock_review_response(monkeypatch, [valid, invalid_type, missing_required, {**valid, "ref_id": 902}])
+
+    with caplog.at_level(logging.WARNING, logger="app.services.memory.consistency"):
+        r = client.post(f"/api/v1/novels/{novel_uid}/chapters/{ch}/consistency-review")
+    assert r.status_code == 201, r.text
+    assert r.json()["issue_count"] == 2
+    assert "dropped 2 invalid issue(s)" in caplog.text
+
+
+def test_consistency_timeout_env_and_retry_share_budget(
+    client: TestClient, novel_uid: str, monkeypatch: pytest.MonkeyPatch, character_id: int
+) -> None:
+    _setup_llm_profile(client)
+    ch = _make_chapter_with_content(
+        client, novel_uid, character_id, "林夏拿着新生手册，在校园里转了三圈才找到宿舍楼。"
+    )
+    monkeypatch.setenv("YOUTHINK_CONSISTENCY_TIMEOUT_SEC", "120")
+    clock = {"t": 1000.0}
+    monkeypatch.setattr("app.services.llm.timeout_budget.time.monotonic", lambda: clock["t"])
+
+    calls: list[dict] = []
+
+    async def fake_complete_chat(**kwargs):
+        calls.append(kwargs)
+        clock["t"] += 200  # the first attempt consumed 200 of the 240 s shared budget
+        if len(calls) == 1:
+            return SimpleNamespace(content="这不是 JSON")
+        return SimpleNamespace(content=json.dumps({"issues": []}))
+
+    monkeypatch.setattr("app.services.memory.consistency.complete_chat", fake_complete_chat)
+    r = client.post(f"/api/v1/novels/{novel_uid}/chapters/{ch}/consistency-review")
+    assert r.status_code == 201, r.text
+    assert len(calls) == 2
+    assert calls[0]["timeout_sec"] == 120
+    assert calls[1]["timeout_sec"] == 40  # 2*120 - 200 consumed
+    assert "重新输出" in calls[1]["user_prompt"]
+
+
+def test_timeout_env_default_range_and_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services.llm.timeout_budget import RetryBudget, env_timeout_sec
+
+    monkeypatch.delenv("YOUTHINK_TEST_TIMEOUT", raising=False)
+    assert env_timeout_sec("YOUTHINK_TEST_TIMEOUT") == 150
+    monkeypatch.setenv("YOUTHINK_TEST_TIMEOUT", "45")
+    assert env_timeout_sec("YOUTHINK_TEST_TIMEOUT") == 45
+    monkeypatch.setenv("YOUTHINK_TEST_TIMEOUT", "10")
+    assert env_timeout_sec("YOUTHINK_TEST_TIMEOUT") == 30
+    monkeypatch.setenv("YOUTHINK_TEST_TIMEOUT", "999")
+    assert env_timeout_sec("YOUTHINK_TEST_TIMEOUT") == 300
+    monkeypatch.setenv("YOUTHINK_TEST_TIMEOUT", "abc")
+    assert env_timeout_sec("YOUTHINK_TEST_TIMEOUT") == 150
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr("app.services.llm.timeout_budget.time.monotonic", lambda: clock["t"])
+    budget = RetryBudget(150)
+    assert budget.total_sec == 300 and budget.next_timeout() == 150
+    clock["t"] = 200
+    assert budget.next_timeout() == 100
+    clock["t"] = 300
+    assert budget.exhausted() and budget.next_timeout() == 0

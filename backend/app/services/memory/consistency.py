@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 
 from app.core.exceptions import AppError
@@ -20,11 +21,18 @@ from app.schemas.consistency import (
     ConsistencyIssue,
     ConsistencyReviewResponse,
     ConsistencyReviewSummary,
-    LlmConsistencyOutput,
 )
 from app.services.llm.client import complete_chat
 from app.schemas.writing import ChapterWorkspaceResponse
-from app.services.llm.json_parser import parse_and_validate_json
+from app.services.llm.timeout_budget import (
+    RetryBudget,
+    call_with_budget,
+    env_timeout_sec,
+)
+from app.services.memory.consistency_parse import (
+    ConsistencyParseResult,
+    parse_consistency_issues,
+)
 from app.services.prompt.author_style import author_style_prompt
 from app.services.embedding.encoder import encode_text_sync
 from app.services.memory.finalizer import split_text_chunks
@@ -34,6 +42,8 @@ _HISTORY_QUERY_TOP_K = 5
 _HISTORY_MAX_QUERY_CHUNKS = 12
 _HISTORY_SNIPPET_CHARS = 420
 _HISTORY_MIN_SIMILARITY = 0.18
+
+logger = logging.getLogger(__name__)
 
 
 class ConsistencyReviewService:
@@ -74,20 +84,80 @@ class ConsistencyReviewService:
         prompt = self._build_prompt(ch, content, checklist)
 
         _pid, base_url, model, api_key = self._settings_repo.get_credentials_for_task("extract")
-        res = await complete_chat(
-            base_url=base_url,
-            api_key=api_key,
-            model=model,
-            system_prompt="你是小说一致性与常理逻辑审查员，只输出严格 JSON，不做任何解释。",
-            user_prompt=prompt,
-            novel_uid=self._novel_uid,
-            task_type="consistency_review",
-            chapter_id=chapter_id,
-            timeout_sec=90.0,
-        )
-        parsed = await parse_and_validate_json(res.content, LlmConsistencyOutput)
+        budget = RetryBudget(env_timeout_sec("YOUTHINK_CONSISTENCY_TIMEOUT_SEC"))
+        last_raw = ""
+        last_exc: Exception | None = None
+
+        async def _call_and_parse(
+            extra: str, attempt_timeout: float
+        ) -> ConsistencyParseResult:
+            nonlocal last_raw
+            res = await complete_chat(
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                system_prompt="你是小说一致性与常理逻辑审查员，只输出严格 JSON，不做任何解释。",
+                user_prompt=prompt + extra,
+                novel_uid=self._novel_uid,
+                task_type="consistency_review",
+                chapter_id=chapter_id,
+                timeout_sec=attempt_timeout,
+            )
+            last_raw = res.content
+            return parse_consistency_issues(res.content)
+
+        async def _attempt(extra: str = "") -> ConsistencyParseResult:
+            return await call_with_budget(
+                lambda attempt_timeout: _call_and_parse(extra, attempt_timeout),
+                budget,
+            )
+
+        # Attempt 1: per-issue tolerant parsing; one bad issue never fails the review.
+        result: ConsistencyParseResult | None = None
+        try:
+            result = await _attempt()
+        except Exception as exc:  # outer JSON failure, timeout, upstream error
+            last_exc = exc
+            logger.warning(
+                "consistency review attempt 1 failed (chapter_id=%s): %s", chapter_id, exc
+            )
+
+        # One retry when nothing usable came back; both attempts share ``budget``.
+        if result is None or (result.raw_items > 0 and not result.issues):
+            retry_hint = (
+                "\n\n上一次输出无法解析或没有任何合法条目。"
+                f"错误信息：{last_exc or '所有 issues 字段不符合要求'}。"
+                "请严格按上面的字段名与 JSON 结构重新输出，不要加解释文字。"
+            )
+            try:
+                retry_result = await _attempt(retry_hint)
+                if result is None or len(retry_result.issues) >= len(result.issues):
+                    result = retry_result
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "consistency review retry failed (chapter_id=%s): %s", chapter_id, exc
+                )
+
+        if result is None:
+            if isinstance(last_exc, ValueError):
+                raise AppError(
+                    code="LLM_JSON_PARSE_FAILED",
+                    message="模型返回格式解析失败，请重试或手动修改",
+                    detail={"error": str(last_exc), "raw_output": last_raw},
+                    status_code=422,
+                )
+            assert last_exc is not None
+            raise last_exc
+
+        if result.dropped_invalid:
+            logger.warning(
+                "consistency review dropped %d invalid issue(s) (chapter_id=%s): %s",
+                result.dropped_invalid, chapter_id, "; ".join(result.drop_log[:10]),
+            )
+
         content_hash = text_sha256(raw_content)
-        issues = [i for i in parsed.issues if i.verdict in ("violation", "suspicious")]
+        issues = [i for i in result.issues if i.verdict in ("violation", "suspicious")]
         for issue in issues:
             if issue.check_type == "prose":
                 issue.verdict = "suspicious"

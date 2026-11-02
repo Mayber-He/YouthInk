@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -301,3 +302,33 @@ def test_finalize_unparseable_output_falls_back_pending(
     assert "待人工确认" in fallback[0]["summary_text"]
     # A retry was attempted (extract called at least twice after the summary call).
     assert calls["n"] >= 3
+
+
+def test_memory_extract_timeout_env_and_retry_share_budget(
+    client: TestClient, monkeypatch
+) -> None:
+    """T14: extraction timeout is configurable and the retry uses what is left."""
+    chapter_text = "江澈把打印机搬上餐桌，底下垫了两层报纸。"
+    uid, ch = _mk_novel_with_chapter(client, chapter_text)
+    monkeypatch.setenv("YOUTHINK_MEMORY_EXTRACT_TIMEOUT_SEC", "100")
+    clock = {"t": 1000.0}
+    monkeypatch.setattr("app.services.llm.timeout_budget.time.monotonic", lambda: clock["t"])
+
+    calls: list[dict] = []
+
+    async def fake_complete_chat(**kwargs):
+        calls.append(kwargs)
+        if kwargs["task_type"] == "summary_extract":
+            return SimpleNamespace(content="摘要。")
+        clock["t"] += 150  # the first extract used 150 of the 200 s shared budget
+        return SimpleNamespace(content="这不是 JSON")
+
+    monkeypatch.setattr("app.services.memory.finalizer.complete_chat", fake_complete_chat)
+
+    res = client.post(f"/api/v1/novels/{uid}/chapters/{ch}/finalize")
+    assert res.status_code == 200
+    extract_calls = [c for c in calls if c["task_type"] == "memory_extract"]
+    assert len(extract_calls) == 2  # exactly one retry
+    assert extract_calls[0]["timeout_sec"] == 100
+    assert extract_calls[1]["timeout_sec"] == 50  # 2*100 - 150 consumed
+    assert "重新输出" in extract_calls[1]["user_prompt"]

@@ -24,6 +24,11 @@ from app.schemas.memory import (
 from app.services.backup_service import create_novel_backup
 from app.services.embedding.encoder import encode_text_sync
 from app.services.llm.client import complete_chat
+from app.services.llm.timeout_budget import (
+    RetryBudget,
+    call_with_budget,
+    env_timeout_sec,
+)
 from app.services.memory.extraction_parse import (
     ExtractionParseResult,
     normalize_for_quote_match,
@@ -319,7 +324,9 @@ class ChapterFinalizerService:
             logger.warning("memory extract: no LLM credentials; using fallback (chapter_id=%s)", chapter_id)
             return self._fallback_extraction(title, content, char_names), "failed"
 
-        async def _call(user_prompt: str) -> str:
+        budget = RetryBudget(env_timeout_sec("YOUTHINK_MEMORY_EXTRACT_TIMEOUT_SEC"))
+
+        async def _call(user_prompt: str, attempt_timeout: float) -> str:
             res = await complete_chat(
                 base_url=base_url,
                 api_key=api_key,
@@ -329,14 +336,20 @@ class ChapterFinalizerService:
                 novel_uid=self.novel_uid,
                 task_type="memory_extract",
                 chapter_id=chapter_id,
+                timeout_sec=attempt_timeout,
             )
             return res.content
+
+        async def _call_with_budget(user_prompt: str) -> str:
+            return await call_with_budget(
+                lambda attempt_timeout: _call(user_prompt, attempt_timeout), budget
+            )
 
         # Attempt 1: normal call + per-item tolerant parse.
         parse_result: ExtractionParseResult | None = None
         last_error = ""
         try:
-            raw = await _call(base_prompt)
+            raw = await _call_with_budget(base_prompt)
             parse_result = parse_extraction_items(raw, content)
         except Exception as exc:  # outer-JSON failure or network error
             last_error = str(exc)
@@ -350,7 +363,7 @@ class ChapterFinalizerService:
                 "请严格按上面的字段名与 JSON 结构重新输出，不要加解释文字。"
             )
             try:
-                raw2 = await _call(base_prompt + retry_hint)
+                raw2 = await _call_with_budget(base_prompt + retry_hint)
                 retry_result = parse_extraction_items(raw2, content)
                 if parse_result is None or retry_result.kept >= parse_result.kept:
                     parse_result = retry_result

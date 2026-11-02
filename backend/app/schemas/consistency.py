@@ -36,6 +36,16 @@ class ConsistencyIssue(BaseModel):
                 return int(cleaned)
         return None
 
+    @field_validator(
+        "ref_label", "evidence_quote", "historical_evidence",
+        "description", "suggestion", "suggested_rewrite",
+        mode="before",
+    )
+    @classmethod
+    def none_to_empty(cls, v: Any) -> Any:
+        """T14: models often emit null for optional text fields; keep the issue."""
+        return "" if v is None else v
+
 
 class LlmConsistencyOutput(BaseModel):
     issues: list[ConsistencyIssue] = Field(default_factory=list)

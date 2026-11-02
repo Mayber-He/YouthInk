@@ -564,3 +564,15 @@ T6 之后哪些 evidence 字段真正进提示词，随开关/模型输出而变
 - 改动文件：`backend/app/services/repetition_guard.py`、`repetition_service.py`、`writing_service.py`；测试 `tests/test_story_time.py`、`tests/test_repetition_guard.py`、新 fixture。
 - 验证：T13 专项 `test_story_time.py` + `test_repetition_guard.py` **72 passed**；全量 `python -m pytest tests -q` **374 passed / 5 failed**（214.33 秒），5 项与既有基线逐项一致，无新增失败。全部模型调用为 mock/固定样本，未调真实 LLM；测试使用临时库，未写入小说数据。
 - 局限 / 人工确认：① 时间词仍按词面触发，“前一天/隔夜”等可能并非指称上一章（例如“隔夜的茶”），需抽查警告；② 相隔 1 天时不做时间词检查（刻意保持旧行为）；③ 重写能否真正遵守“只改重复片段、保留时间表述”只能实际跑几章后看 `rewrite_repetition` 日志与 `repetition_checks` 记录，mock 通过不代表真实模型效果；④ 未清洗既有 `repetition_checks` 或正文数据。
+
+
+## T14 完成：一致性审查逐条容错与可配置超时（2026-11-02）
+
+- `ConsistencyIssue` 的可选文本字段（`ref_label`、`evidence_quote`、`historical_evidence`、`description`、`suggestion`、`suggested_rewrite`）现在接受 `None` 并归一化为空字符串；`ref_id` 原有的 `None`/`#905` 解析保持。前端 `ref_label: string` 类型不变。
+- 新增纯函数 `app/services/memory/consistency_parse.py`：外层 JSON 仍整体解析（失败可重试），但 `issues` **逐条** `model_validate`；不合格条目丢弃并记录 `issues[i]: 字段/原因`，合法条目全部保留。`run_review` 记录 warning `consistency review dropped N invalid issue(s)`。
+- 新增 `app/services/llm/timeout_budget.py`：`env_timeout_sec()` 读取环境变量，默认 **150 秒**，范围 **30–300**（非法值回退默认、越界夹紧并 warning）；`RetryBudget` 让首次与一次重试共享 `2 × 单次超时` 的总预算，每次尝试取 `min(单次超时, 剩余预算)`，并用 `asyncio.wait_for` 兜底取消。
+- 环境变量：`YOUTHINK_CONSISTENCY_TIMEOUT_SEC`、`YOUTHINK_MEMORY_EXTRACT_TIMEOUT_SEC`。一致性审查在“外层解析失败或没有任何合法条目”时重试一次；记忆抽取沿用原有“整批不可用才重试”条件，但两次调用现在共享预算。
+- 失败样本 `tests/fixtures/consistency_failed_review.json` 为 `live_test_log.md:189` 的真实 4 条意见（`issues[3].ref_label=null`），断言 4 条全部保留、返回 201。
+- 改动文件：`app/schemas/consistency.py`、`app/services/memory/consistency.py`、新 `consistency_parse.py`、`app/services/memory/finalizer.py`、新 `app/services/llm/timeout_budget.py`；测试 `tests/test_consistency_review.py`、`tests/test_memory_extraction.py`。
+- 验证：一致性/记忆抽取专项 **19 passed**；全量 `python -m pytest tests -q` **379 passed / 5 failed**（209.83 秒），5 项与既有基线逐项一致，无新增失败。全部模型调用为 mock/固定样本，未调真实 LLM；测试使用临时库，未写入小说数据。
+- 局限 / 人工确认：① “两次共享总预算”实现为合计 `2 × 单次超时`（默认 300 秒），若你的本意是合计等于单次 150 秒，需要再调；② 逐条丢弃只记日志，未在审查响应里返回丢弃数量；③ 真实模型是否还会输出其他不可空字段异常，需上线后抽查 `consistency_review` 日志；④ 记忆抽取默认超时由原 60 秒变为 150 秒，长时间章节省略前应先观察实际耗时与成本。
