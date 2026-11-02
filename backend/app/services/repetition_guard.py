@@ -38,6 +38,41 @@ DEFAULT_ACTION_PHRASES: tuple[str, ...] = (
     "风扇", "屏幕暗下去", "暗下去", "指节敲", "喉结动",
 )
 
+# T13: relative time words and the number of days they correctly describe.
+# Longest first so "大前天" is not also counted as "前天" after masking.
+_TIME_WORDS: tuple[tuple[str, int], ...] = (
+    ("大前天", 3),
+    ("前一晚", 1), ("前一天", 1), ("前天", 2),
+    ("前晚", 1), ("头天", 1), ("隔夜", 1),
+    ("昨晚", 1), ("昨天", 1), ("昨夜", 1),
+)
+
+# Public view for prompt building (word -> days the word correctly describes).
+TIME_WORD_DAYS: dict[str, int] = dict(_TIME_WORDS)
+
+
+def find_time_mismatches(scene_text: str, gap_days: int | None) -> list[str]:
+    """Relative time words that contradict the known chapter gap.
+
+    Only checked when the gap is known and > 1 day (adjacent chapters keep the old behaviour).
+    ``昨晚/昨天/昨夜/前一晚/前晚/前一天/头天/隔夜`` describe the immediately preceding day,
+    ``前天`` two days before and ``大前天`` three. A word that matches the actual gap is not
+    reported (e.g. ``前天`` with a 2-day gap), so the rule follows the calendar instead of a
+    fixed word list.
+    """
+    if gap_days is None or gap_days <= 1 or not (scene_text or "").strip():
+        return []
+    remaining = scene_text
+    hits: list[str] = []
+    for word, days in _TIME_WORDS:
+        if word not in remaining:
+            continue
+        if days != gap_days:
+            hits.append(word)
+        # Mask every occurrence so a longer word is not re-reported by a shorter substring.
+        remaining = remaining.replace(word, "　" * len(word))
+    return hits
+
 
 @dataclass
 class RepetitionConfig:
@@ -314,10 +349,11 @@ def analyze_scene_repetition(
         return report
 
     report.story_time_gap_days = story_time_gap_days
-    if story_time_gap_days is not None and story_time_gap_days > 1:
-        report.time_hits = [word for word in ('昨晚', '昨天', '昨夜') if word in scene_text]
-        if report.time_hits:
-            report.reasons.append(f'与上一章相隔 {story_time_gap_days} 天，疑似相对时间错位：' + '、'.join(report.time_hits))
+    report.time_hits = find_time_mismatches(scene_text, story_time_gap_days)
+    if report.time_hits:
+        report.reasons.append(
+            f'与上一章相隔 {story_time_gap_days} 天，疑似相对时间错位：' + '、'.join(report.time_hits)
+        )
 
     cov_prev, spans_prev = find_reused_spans(scene_text, previous_chapter, cfg.ngram, "previous_chapter")
     cov_here, spans_here = find_reused_spans(scene_text, chapter_so_far, cfg.ngram, "chapter_so_far")

@@ -19,6 +19,7 @@ from app.db.manager import ensure_global_db_initialized
 from app.main import create_app
 from app.services.repetition_guard import (
     RepetitionConfig,
+    RepetitionReport,
     analyze_scene_repetition,
     count_action_phrases,
     find_reused_dialogues,
@@ -26,7 +27,11 @@ from app.services.repetition_guard import (
     forbidden_overlap,
     split_must_not_include,
 )
-from app.services.repetition_service import run_repetition_pipeline
+from app.services.repetition_service import (
+    build_rewrite_instruction,
+    build_time_hint,
+    run_repetition_pipeline,
+)
 
 FIX = Path(__file__).parent / "fixtures"
 CH2 = (FIX / "repeat_chapter2.txt").read_text(encoding="utf-8")
@@ -305,6 +310,44 @@ def test_pipeline_survives_a_failing_recorder() -> None:
     assert out["action"] == "rewritten"
 
 
+# ----------------------------------------------------------- T13 conservative rewrite prompt
+
+def test_rewrite_instruction_only_touches_flagged_spans_and_keeps_time_words() -> None:
+    report = RepetitionReport(time_hits=["前一晚"], story_time_gap_days=7)
+    report.reasons.append("与上一章相隔 7 天，疑似相对时间错位：前一晚")
+    hint = build_time_hint("八月二十五日", "九月一日", 7)
+    text = build_rewrite_instruction(report, time_hint=hint)
+
+    assert "只改写下列被标出的重复片段" in text
+    assert "必须原样保留" in text and "不得新增、删除或调换任何情节" in text
+    assert "那天晚上" in text  # explicitly protected by the instruction
+    assert "上一章发生时间：八月二十五日" in text
+    assert "本章发生时间：九月一日" in text
+    assert "相隔天数：7 天" in text
+    assert "禁止使用与实际相隔天数不符的相对时间词" in text
+    assert "前一晚" in text and "昨天" in text
+    # the old "rewrite the whole scene with completely new wording" instruction is gone
+    assert "换用全新的措辞" not in text
+
+
+def test_time_hint_does_not_ban_qiantian_when_gap_is_two_days() -> None:
+    hint = build_time_hint("8月30日", "9月1日", 2)
+    banned = next(line for line in hint.splitlines() if line.startswith("禁止使用"))
+    body = banned.split("：", 1)[1].split("（", 1)[0].strip("。")
+    banned_words = body.split("/")
+    assert "前天" not in banned_words  # exactly two days: 前天 is correct
+    assert "大前天" in banned_words
+    assert "昨晚" in banned_words and "前一晚" in banned_words
+    assert "“前天”与相隔天数一致" in hint
+
+
+def test_time_hint_states_unknown_gap_without_guessing() -> None:
+    hint = build_time_hint("", "", None)
+    assert "上一章发生时间：未指定" in hint
+    assert "本章发生时间：未指定" in hint
+    assert "无法确定" in hint and "不得猜补日期" in hint
+
+
 # ----------------------------------------------------------- HTTP integration
 
 @pytest.fixture()
@@ -375,6 +418,38 @@ def test_endpoint_detects_chapter2_repetition_rewrites_once_and_persists(
     assert [(r["stage"], r["action_taken"]) for r in rows] == [("initial", "none"), ("after_rewrite", "rewritten")]
     assert rows[0]["triggered"] == 1 and rows[1]["triggered"] == 0
     assert json.loads(rows[0]["thresholds_json"])["ngram"] == 8
+
+
+def test_rewrite_prompt_carries_dates_gap_and_conservative_rules(
+    client: TestClient, two_chapters, monkeypatch
+) -> None:
+    uid, c2, c3, scene = two_chapters
+    from app.db.manager import get_novel_db
+    with get_novel_db(uid) as conn:
+        conn.execute("UPDATE chapters SET story_time = ? WHERE id = ?", ("八月二十五日", c2))
+        conn.execute("UPDATE chapters SET story_time = ? WHERE id = ?", ("九月一日", c3))
+        conn.commit()
+
+    prompts: list[list[dict]] = []
+
+    async def fake_post(self, url, **kw):
+        prompts.append(kw["json"]["messages"])
+        return httpx.Response(200, json=_chat_body("夜里他把聊天记录翻到底，什么也没回。"),
+                              request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    res = client.post(
+        f"/api/v1/novels/{uid}/chapters/{c3}/scenes/{scene}/repetition-check",
+        json={"scene_text": _split_scenes(CH3)[0], "chapter_so_far": ""},
+    )
+    assert res.status_code == 200 and res.json()["action"] == "rewritten"
+    user_msg = next(m["content"] for m in prompts[0] if m["role"] == "user")
+    assert "上一章发生时间：八月二十五日" in user_msg
+    assert "本章发生时间：九月一日" in user_msg
+    assert "相隔天数：7 天" in user_msg
+    assert "禁止使用与实际相隔天数不符的相对时间词" in user_msg
+    assert "只改写下列被标出的重复片段" in user_msg
+    assert "那天晚上" in user_msg and "必须原样保留" in user_msg
 
 
 def test_endpoint_must_not_include_comes_from_scene_beat(

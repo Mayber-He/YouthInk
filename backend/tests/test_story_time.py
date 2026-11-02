@@ -1,10 +1,14 @@
 import asyncio
+import json
+from pathlib import Path
 
 import pytest
 
 from app.services.repetition_guard import RepetitionConfig, analyze_scene_repetition
 from app.services.repetition_service import run_repetition_pipeline
 from test_repetition_guard import client, two_chapters
+
+FIX = Path(__file__).parent / "fixtures"
 
 
 @pytest.mark.parametrize(('previous', 'current', 'gap'), [
@@ -54,6 +58,41 @@ def test_relative_time_rewrite_once_or_warn(auto_rewrite):
 def test_relative_time_rule_respects_disabled_guard():
     assert not analyze_scene_repetition('昨天他经过河边。', story_time_gap_days=7,
                                         config=RepetitionConfig(enabled=False)).triggered
+
+
+@pytest.mark.parametrize('word', ['前一晚', '前晚', '前一天', '头天', '隔夜'])
+@pytest.mark.parametrize('gap', [2, 7])
+def test_synonym_time_words_flagged_when_gap_over_one(word, gap):
+    report = analyze_scene_repetition(f'{word}他独自经过河边。', story_time_gap_days=gap)
+    assert report.triggered is True
+    assert word in report.time_hits
+
+
+@pytest.mark.parametrize(('word', 'gap', 'flagged'), [
+    ('前天', 1, False),   # gap 1 keeps the old "no time check" behaviour
+    ('前天', 2, False),   # 前天 correctly describes a two-day gap
+    ('前天', 3, True),
+    ('大前天', 2, True),
+    ('大前天', 3, False),
+])
+def test_qiantian_follows_the_actual_day_count(word, gap, flagged):
+    report = analyze_scene_repetition(f'{word}他独自经过河边。', story_time_gap_days=gap)
+    assert (word in report.time_hits) is flagged
+
+
+def test_scene3_sample_flags_previous_night_but_not_that_evening():
+    """Real draft/rewrite of scene 3: the rewrite introduced 前一晚 for a 7-day-old event."""
+    sample = json.loads((FIX / 'scene3_time_rewrite.json').read_text(encoding='utf-8'))
+    gap = sample['gap_days']
+    draft = analyze_scene_repetition(sample['draft'], story_time_gap_days=gap)
+    rewrite = analyze_scene_repetition(sample['rewrite'], story_time_gap_days=gap)
+    # 那天晚上 is a legitimate reference to the event and must not be reported.
+    assert draft.time_hits == []
+    assert '那天晚上' not in draft.reasons
+    # The rewritten 前一晚 is exactly the semantic drift T13 must catch.
+    assert '前一晚' in rewrite.time_hits
+    assert rewrite.triggered is True
+    assert '7 天' in rewrite.describe_for_model()
 
 
 @pytest.mark.parametrize('current,gap', [('九月一日', 7), ('翌晨', None)])

@@ -24,6 +24,7 @@ from dataclasses import asdict
 from typing import Awaitable, Callable
 
 from app.services.repetition_guard import (
+    TIME_WORD_DAYS,
     RepetitionConfig,
     RepetitionReport,
     analyze_scene_repetition,
@@ -46,14 +47,58 @@ def _severity(report: RepetitionReport) -> int:
     )
 
 
-def build_rewrite_instruction(report: RepetitionReport) -> str:
-    return (
-        "下面这一场景正文存在与前文重复的问题，请只重写这一个场景，保持原有剧情事件、人物关系与"
-        "信息量不变，但换用全新的措辞、句式与细节来表达。必须避开以下具体重复项：\n"
-        f"{report.describe_for_model()}\n"
-        "要求：不要照抄上列任何原句；已在前文出现过的台词不要再说一遍，改为推进新的信息或用动作带过；"
-        "最后一句用对话、动作或决定结束。只输出重写后的场景正文，不要解释。"
+def build_time_hint(
+    previous_time: str, current_time: str, gap_days: int | None
+) -> str:
+    """T13: concrete time anchor for the rewrite prompt; never guesses a missing date."""
+    previous = (previous_time or "").strip() or "未指定"
+    current = (current_time or "").strip() or "未指定"
+    lines = [
+        "【时间锚点】",
+        f"上一章发生时间：{previous}",
+        f"本章发生时间：{current}",
+        f"相隔天数：{gap_days} 天" if gap_days is not None else "相隔天数：无法确定",
+    ]
+    if gap_days is None:
+        lines.append("时间无法确定：不得猜补日期；正文原有的时间表述一律原样保留。")
+    else:
+        allowed = [w for w, days in TIME_WORD_DAYS.items() if days == gap_days]
+        banned = [w for w, days in TIME_WORD_DAYS.items() if days != gap_days]
+        if banned:
+            lines.append(
+                "禁止使用与实际相隔天数不符的相对时间词："
+                + "/".join(banned)
+                + ("。" if gap_days <= 1 else f"（相隔 {gap_days} 天时，这些词指称的时间不对）。")
+            )
+        if allowed:
+            lines.append(
+                "其中“" + "/".join(allowed) + "”与相隔天数一致，但仍应优先使用具体日期或准确间隔。"
+            )
+        lines.append(
+            "正文原有的时间表述（如“那天晚上”）必须原样保留，不得替换成“前一晚/前晚/昨天/前天”等相对词。"
+        )
+    return "\n".join(lines)
+
+
+def build_rewrite_instruction(report: RepetitionReport, *, time_hint: str = "") -> str:
+    """T13: conservative rewrite — only the flagged spans change, everything else is kept."""
+    parts = [
+        "下面这一场景正文存在与前文重复的问题。请做最小改动：只改写下列被标出的重复片段，"
+        "其余字词、语序、人物动作和剧情必须原样保留；不得新增、删除或调换任何情节。",
+        "尤其是时间表述（如“那天晚上”“上周”“隔了几天”等）必须原样保留，不得改成"
+        "“前一晚/前晚/昨天/前天”等其他说法。",
+    ]
+    if time_hint:
+        parts.append(time_hint)
+    described = report.describe_for_model().strip()
+    if described:
+        parts.append("需要改写的具体重复项：\n" + described)
+    parts.append(
+        "改写要求：只替换被标出的重复片段本身，同一句里未被标出的字词不得改动；"
+        "不要照抄上列任何原句；已在前文出现过的台词不要再说一遍，改为推进新的信息或用动作带过；"
+        "保留原文最后一句的收尾方式，不要另加结尾。只输出修改后的完整场景正文，不要解释。"
     )
+    return "\n".join(parts)
 
 
 async def run_repetition_pipeline(

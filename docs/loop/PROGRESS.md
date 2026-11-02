@@ -553,3 +553,14 @@ T6 之后哪些 evidence 字段真正进提示词，随开关/模型输出而变
 - T16 上一章结尾片段：评估缩短末 1500 字或优先保留对话/动作、避开景物描写，给出利弊；实现为配置项并补测试，默认行为变化需在 `PROGRESS.md` 说明。
 - 样本位置已核对：场景 3 初稿/重写 prompt 与输出见 `docs/loop/live_eval_export.md`（散见 `live_scene_3.json`、`live_calls.json`）；失败一致性审查原始 JSON 见 `docs/loop/live_test_log.md:189`。这些现场材料按既有约定不纳入提交。
 - 本轮仅改文档，未运行应用测试、未访问/写入小说数据库、未调用 LLM；T13–T16 均无实现或验收结果。下一轮从 T13 开始。
+
+
+## T13 完成：自动重写保守化与时间同义词（2026-11-02）
+
+- 重写提示词（`rewrite_repetition`）新增时间锚点：上一章/本章 `story_time`、相隔天数；日期缺失时写“未指定”，不猜补。按实际天数列出禁止的相对时间词（`大前天`=3 天、`前天`=2 天，其余=1 天），并明确要求正文原有时间表述（如“那天晚上”）原样保留。
+- 重写指令由“整场换用全新措辞”改为**最小改动**：只改写被标出的重复片段，其余字词、语序、人物动作和剧情原样保留；不得新增、删除或调换情节；保留原文最后一句收尾。system prompt 同步强调只改重复片段、时间表述不动。
+- 时间检测新增同义词：`前一晚/前晚/前一天/头天/隔夜`，以及按实际天数判断的 `前天`(2 天)、`大前天`(3 天)。仍只在相隔 **>1 天**时检查；相隔 1 天保持原行为，不检查“前天”。长词先匹配并遮蔽，避免“大前天”被“前天”重复计为错误。
+- 固定样本 `backend/tests/fixtures/scene3_time_rewrite.json`：场景 3 初稿含“那天晚上”、重写稿含“前一晚”，相隔 7 天。断言重写稿“前一晚”被检出、初稿“那天晚上”不误报。
+- 改动文件：`backend/app/services/repetition_guard.py`、`repetition_service.py`、`writing_service.py`；测试 `tests/test_story_time.py`、`tests/test_repetition_guard.py`、新 fixture。
+- 验证：T13 专项 `test_story_time.py` + `test_repetition_guard.py` **72 passed**；全量 `python -m pytest tests -q` **374 passed / 5 failed**（214.33 秒），5 项与既有基线逐项一致，无新增失败。全部模型调用为 mock/固定样本，未调真实 LLM；测试使用临时库，未写入小说数据。
+- 局限 / 人工确认：① 时间词仍按词面触发，“前一天/隔夜”等可能并非指称上一章（例如“隔夜的茶”），需抽查警告；② 相隔 1 天时不做时间词检查（刻意保持旧行为）；③ 重写能否真正遵守“只改重复片段、保留时间表述”只能实际跑几章后看 `rewrite_repetition` 日志与 `repetition_checks` 记录，mock 通过不代表真实模型效果；④ 未清洗既有 `repetition_checks` 或正文数据。

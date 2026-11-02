@@ -422,6 +422,7 @@ class WritingService:
         from app.services.repetition_guard import RepetitionConfig, split_must_not_include
         from app.services.repetition_service import (
             build_rewrite_instruction,
+            build_time_hint,
             run_repetition_pipeline,
         )
 
@@ -449,11 +450,18 @@ class WritingService:
 
         async def _rewrite(text: str, report) -> str:
             sys_msg = (
-                "你是青春小说的资深编辑。按要求重写给定的一个场景，保持剧情事件不变，"
+                "你是青春小说的资深编辑。按要求对给定的场景做最小改动重写：只改被标出的重复片段，"
+                "其余内容（尤其是时间表述）保持原样，剧情事件不变；"
                 "只输出重写后的场景正文，不加标题、说明或前后缀。"
             )
+            time_hint = build_time_hint(
+                previous_time=str(prev_time["story_time"] or "") if prev_time else "",
+                current_time=ch.story_time or "",
+                gap_days=gap,
+            )
             user_msg = (
-                f"{build_rewrite_instruction(report)}\n\n【待重写的场景正文】\n{text}"
+                f"{build_rewrite_instruction(report, time_hint=time_hint)}\n\n"
+                f"【待重写的场景正文】\n{text}"
             )
             res = await complete_chat(
                 base_url=base_url, api_key=api_key, model=model,
