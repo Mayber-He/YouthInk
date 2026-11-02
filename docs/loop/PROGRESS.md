@@ -760,3 +760,43 @@ T6 之后哪些 evidence 字段真正进提示词，随开关/模型输出而变
 - “神态”仍依赖关键词（神情/神色/神态/表情/目光/眼神等）；没有这些词的含蓄神态描写可能漏检。
 - T20-b 只是规划提示词约束，不能确定性验证模型是否沿用上一章称谓；真实续写时需抽查“行李箱/行李袋”等是否统一。
 - 未回填或改写既有场景、正文或模板记录；不改写已保存的 `repetition_checks`。
+
+
+## T21 完成：规划结果的确定性校验：关键选择必须有判断（2026-11-02）
+
+### 改动
+
+- 新增 `backend/app/services/key_choice.py`（纯函数 + 配置）：
+  - `is_key_choice_text` / `is_key_choice_beat`：`goal` 或 `exit_state` 含“确认/决定/选择/不揭穿/不点破/压在心里/暂不”即视为关键选择场景；无标签的旧式节拍回退到全文匹配。
+  - `find_planning_issues`：关键选择场景的 `must_happen` 没有任何“判断/决定/选择/不揭穿/不点破/压在心里/暂不/打定主意/心想/暗想/暗下决心/没说出口/压了下去/咽了回去”等表述时，返回问题场景；`describe_planning_issues` 生成带场景号与具体原因的改拆分提示。
+  - `lacks_inner_decision`：正文没有判断或决定类表述时返回 `True`。刻意不把“确认”算作判断，避免“确认没有漏填的格”这类外部核对误判。
+  - `KeyChoiceConfig`：`YOUTHINK_KEY_CHOICE_CHECK` 默认 `true`（生成后提示），`YOUTHINK_KEY_CHOICE_REWRITE` 默认 `false`（只警告，不补写）。
+  - `KEY_CHOICE_WRITE_RULE`：写作指令原句“【关键选择收束】本场必须以一句明确的内心判断收束，不要只写动作。”
+- `backend/app/services/writing_service.py`：
+  - `generate_chapter_scenes` 把关键选择缺失并入 T3 的一次重拆：与相邻重复、场景边界一起生成具体提示；重拆后仍缺失则保留结果并写 WARNING，不无限重试。
+  - `prepare_stream_write_prompts` 在场景模式命中关键选择节拍时追加 `KEY_CHOICE_WRITE_RULE`。
+  - `check_scene_repetition` 在重复检测之外追加 `advisories` 与 `warnings`；开关打开且允许自动重写时，最多调用一次 `rewrite_key_choice` 补写内心判断，成功则 `action=supplemented` 并采用补写文本，未检出或失败则保留原文并警告。
+- `backend/app/schemas/writing.py`：`RepetitionCheckResponse.action` 增加 `supplemented`，新增 `advisories` 字段（默认空列表，向后兼容）。
+- 前端 `types.ts` / `WritingWorkbench.tsx`：识别 `supplemented`，采用补写文本并提示；`action=none` 但有 `advisories` 时单独显示“本场是关键选择场景，但未检出明确的内心判断”。
+
+### 改动文件
+
+- 新增 `backend/app/services/key_choice.py`、`backend/tests/test_t21_key_choice.py`、`backend/tests/fixtures/t21_scene3_beat.txt`、`backend/tests/fixtures/t21_scene3_final.txt`
+- `backend/app/services/writing_service.py`、`backend/app/schemas/writing.py`
+- `frontend/src/features/editor/WritingWorkbench.tsx`、`frontend/src/features/editor/types.ts`
+- `docs/loop/PLAN.md`、`docs/loop/PROGRESS.md`
+
+### 验证
+
+- T21 专项 `python -m pytest tests/test_t21_key_choice.py -q`：**10 passed**。
+- 相关回归（T21 + 场景清单 + T18 + T20 + 提示词 + 重复检测 + T17 + T19 + 上一章口癖 + 写作质量）：**108 passed**。
+- 全量 `cd backend && python -m pytest tests -q`：**436 passed / 5 failed**（250.22 秒），5 项与既有基线逐项一致（M2 时序/滚动 3 项、M3 流式 1 项、M5 长书 1 项），无新增失败。
+- 前端 `cd frontend && npm run typecheck`：通过。
+- 模型调用全部 mock/固定样本，未调真实 LLM；测试使用临时库，未写入或修改小说数据。
+
+### 局限 / 人工确认
+
+- 关键选择判定是词面规则：`确认` 既可能指内心确认，也可能指核对表格；`选择` 也可能指选课/选专业。真实规划输出是否误触发重拆需抽查。
+- 生成后检查默认只警告（`YOUTHINK_KEY_CHOICE_CHECK=true`、`YOUTHINK_KEY_CHOICE_REWRITE=false`）；打开补写开关后会多一次 LLM 调用，且 `action=supplemented` 的前端提示样式需要实际走查。
+- 补写只检查是否出现判断/决定类词，不能保证语义正确；补写后仍不含关键词时保留原文并警告，不循环重试。
+- 规划校验与 T3 的重拆共用一次机会：若同一次输出还同时存在相邻重复或边界问题，三者一起提示，只重拆一次。

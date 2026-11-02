@@ -219,12 +219,15 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
                 resolve(null);
                 return;
               }
-              if (check.action === "rewritten") {
+              if (check.action === "rewritten" || check.action === "supplemented") {
                 setContent(prefix + check.final_text);
                 setRepetitionNotice({
                   tone: "info",
-                  text: "检测到与前文重复，已自动重写该场景一次。",
-                  details: [],
+                  text:
+                    check.action === "rewritten"
+                      ? "检测到与前文重复，已自动重写该场景一次。"
+                      : "关键选择场景缺少内心判断，已自动补写一句。",
+                  details: check.action === "supplemented" ? check.advisories ?? [] : [],
                 });
                 resolve(check.final_text);
                 return;
@@ -241,6 +244,14 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
                 setContent(prefix + check.final_text);
                 resolve(check.final_text);
                 return;
+              }
+              // T21：重复检测未命中，但关键选择场景缺少内心判断时单独提示。
+              if (check.advisories?.length) {
+                setRepetitionNotice({
+                  tone: "warn",
+                  text: "本场是关键选择场景，但未检出明确的内心判断。",
+                  details: check.advisories,
+                });
               }
             } catch {
               // fail-open：检测不可用时按原文继续

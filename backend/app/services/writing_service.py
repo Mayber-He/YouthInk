@@ -250,6 +250,10 @@ class WritingService:
 
         # 相邻场景 must_happen 重复校验：超阈值则带着重复处让模型重拆一次；
         # 仍重复则保留结果并写警告日志（不无限循环）。
+        from app.services.key_choice import (
+            describe_planning_issues,
+            find_planning_issues,
+        )
         from app.services.scene_planning import (
             describe_boundary_issues,
             describe_duplicates,
@@ -272,9 +276,15 @@ class WritingService:
                 _entries(batch), _exits(batch), _mh(batch)
             )
 
+        def _key_choice(batch: LlmSceneBatchOutput):
+            return find_planning_issues(
+                [s.goal for s in batch.scenes], _exits(batch), _mh(batch)
+            )
+
         dups = find_adjacent_duplicates(_mh(parsed))
         boundary = _boundary(parsed)
-        if dups or boundary:
+        key_choice = _key_choice(parsed)
+        if dups or boundary or key_choice:
             hints: list[str] = []
             if dups:
                 hints.append(
@@ -286,12 +296,22 @@ class WritingService:
                     "上一次拆分的场景终点状态越过了场景边界，请重新拆分。"
                     + describe_boundary_issues(boundary)
                 )
+            if key_choice:
+                hints.append(
+                    "上一次拆分的关键选择场景缺少内心判断，请重新拆分。"
+                    + describe_planning_issues(key_choice)
+                )
             retry = await _request_scenes("\n\n" + "\n\n".join(hints))
-            retry_issues = len(find_adjacent_duplicates(_mh(retry))) + len(_boundary(retry))
-            if retry_issues <= len(dups) + len(boundary):
+            retry_issues = (
+                len(find_adjacent_duplicates(_mh(retry)))
+                + len(_boundary(retry))
+                + len(_key_choice(retry))
+            )
+            if retry_issues <= len(dups) + len(boundary) + len(key_choice):
                 parsed = retry
             remaining_dups = find_adjacent_duplicates(_mh(parsed))
             remaining_boundary = _boundary(parsed)
+            remaining_key_choice = _key_choice(parsed)
             if remaining_dups:
                 _scene_logger.warning(
                     "generate_chapter_scenes: adjacent must_happen still overlaps after one re-split "
@@ -303,6 +323,12 @@ class WritingService:
                     "generate_chapter_scenes: scene boundary still invalid after one re-split "
                     "(chapter_id=%s, issues=%d)",
                     chapter_id, len(remaining_boundary),
+                )
+            if remaining_key_choice:
+                _scene_logger.warning(
+                    "generate_chapter_scenes: key-choice scene still lacks an inner decision after "
+                    "one re-split (chapter_id=%s, scenes=%d)",
+                    chapter_id, len(remaining_key_choice),
                 )
 
         char_by_name = {c.name: c.id for c in chars}
@@ -353,6 +379,7 @@ class WritingService:
         comparison script). Default is the T4 layout, switchable off globally with
         ``YOUTHINK_PROSE_PROMPT_V2=0``.
         """
+        from app.services.key_choice import KEY_CHOICE_WRITE_RULE, is_key_choice_beat
         from app.services.prompt.prose_prompt import ending_rule, prose_prompt_v2_enabled
 
         v2 = (not legacy) and prose_prompt_v2_enabled()
@@ -418,6 +445,8 @@ class WritingService:
                 },
             )
             inst += "\n字数范围仅供参考，叙事完整、表达紧凑优先，不得为达到下限补写流水账。"
+            if target_scene and is_key_choice_beat(target_scene.beat):
+                inst += "\n" + KEY_CHOICE_WRITE_RULE
         else:
             novel = self._novel_repo.get_novel_detail()
             inst = (
@@ -474,6 +503,11 @@ class WritingService:
         measurement is stored in ``repetition_checks`` for later review. T19 also counts
         appearance-card phrases used by the characters present in this scene.
         """
+        from app.services.key_choice import (
+            KeyChoiceConfig,
+            is_key_choice_beat,
+            lacks_inner_decision,
+        )
         from app.services.repetition_guard import RepetitionConfig, split_must_not_include
         from app.services.repetition_service import (
             build_rewrite_instruction,
@@ -537,6 +571,26 @@ class WritingService:
             )
             return res.content
 
+        async def _supplement_key_choice(text: str) -> str:
+            sys_msg = (
+                "你是青春小说的资深编辑。按要求做最小改动：只补足人物明确的内心判断和决定，"
+                "不要新增对话、情节或动作；只输出修改后的完整场景正文，不加标题、说明或前后缀。"
+            )
+            user_msg = (
+                "下面这一场景是关键选择场景，但正文没有写出人物明确的内心判断和决定。"
+                "请在人物做出选择的段落补上一句内心判断/决定（如“他判断……，决定不点破”），"
+                "不改写其他句子，剧情事件不变。\n\n"
+                f"【待补写的场景正文】\n{text}"
+            )
+            res = await complete_chat(
+                base_url=base_url, api_key=api_key, model=model,
+                system_prompt=sys_msg, user_prompt=user_msg,
+                temperature=0.8, timeout_sec=120.0,
+                novel_uid=self._novel_uid, task_type="rewrite_key_choice",
+                chapter_id=chapter_id, scene_id=scene_id,
+            )
+            return res.content
+
         def _record(stage: str, action: str, report, thresholds: dict) -> int:
             cur = self._conn.execute(
                 "INSERT INTO repetition_checks (chapter_id, scene_id, stage, triggered, action_taken, "
@@ -552,7 +606,7 @@ class WritingService:
             self._conn.commit()
             return int(cur.lastrowid or 0)
 
-        return await run_repetition_pipeline(
+        result = await run_repetition_pipeline(
             scene_text,
             previous_chapter=previous_chapter,
             chapter_so_far=chapter_so_far,
@@ -565,6 +619,38 @@ class WritingService:
             beat=scene.beat if scene else "",
             appearances=appearances,
         )
+
+        # T21: a key-choice scene whose prose never states the decision gets an
+        # advisory *outside* repetition detection. Warning-only by default; the
+        # opt-in switch allows ONE supplementary rewrite (no loop).
+        kc_cfg = KeyChoiceConfig.from_env()
+        final_text = result.get("final_text") or ""
+        if kc_cfg.check and scene and is_key_choice_beat(scene.beat) and lacks_inner_decision(final_text):
+            advisory = (
+                "关键选择场景缺少明确的内心判断或决定：本场应以一句内心判断收束，不要只写动作。"
+            )
+            result["advisories"] = [advisory]
+            result.setdefault("warnings", []).append(advisory)
+            allow_rewrite = cfg.auto_rewrite if auto_rewrite is None else auto_rewrite
+            if kc_cfg.rewrite and allow_rewrite:
+                try:
+                    supplemented = (await _supplement_key_choice(final_text) or "").strip()
+                except Exception as exc:  # pragma: no cover - network failure path
+                    _scene_logger.warning("key-choice supplement rewrite failed: %s", exc)
+                    supplemented = ""
+                if supplemented and not lacks_inner_decision(supplemented):
+                    result["final_text"] = supplemented
+                    result["action"] = "supplemented"
+                    result.setdefault("warnings", []).append("已按开关补写一句内心判断。")
+                elif supplemented:
+                    result.setdefault("warnings", []).append(
+                        "补写后仍未检出明确的内心判断，已保留原文，请手动确认。"
+                    )
+                else:
+                    result.setdefault("warnings", []).append(
+                        "补写失败，已保留原文，请手动补充内心判断。"
+                    )
+        return result
 
     async def check_write_boundary(self, req: StreamWriteRequest) -> str:
         """Back-compat wrapper: returns only the text to inject (``''`` when nothing to inject)."""

@@ -131,11 +131,15 @@ class RepetitionCheckRequest(BaseModel):
 class RepetitionCheckResponse(BaseModel):
     triggered: bool
     # 'none' 未超阈值 | 'rewritten' 已重写且复检通过 | 'kept_with_warning' 重写后仍超标，保留
-    # | 'rewrite_failed' 重写调用失败，保留原文
-    action: Literal["none", "rewritten", "kept_with_warning", "rewrite_failed"]
+    # | 'rewrite_failed' 重写调用失败，保留原文 | 'supplemented' 关键选择场景已补写内心判断
+    action: Literal[
+        "none", "rewritten", "kept_with_warning", "rewrite_failed", "supplemented"
+    ]
     final_text: str
     reasons: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    # T21: hints outside repetition detection (currently the key-choice judgment check).
+    advisories: list[str] = Field(default_factory=list)
     report: dict[str, object] = Field(default_factory=dict)
     check_ids: list[int] = Field(default_factory=list)
 
