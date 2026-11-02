@@ -110,7 +110,8 @@ class RepetitionConfig:
     action_phrases: tuple[str, ...] = DEFAULT_ACTION_PHRASES
     # (c) a must_not_include item is flagged when this fraction of its n-grams appears in the scene.
     forbidden_overlap: float = 0.5
-    auto_rewrite: bool = True
+    # D: 默认只提示、不自动重写。需要旧行为时显式设置 YOUTHINK_REPEAT_AUTO_REWRITE=1。
+    auto_rewrite: bool = False
     # (d) T18: compare the new scene's opening with the previous scene's ending.
     seam_check: bool = True
     seam_head_chars: int = 200

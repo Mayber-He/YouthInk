@@ -114,6 +114,8 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
   const [pipelineStep, setPipelineStep] = useState<WritingPipelineStep>("idle");
   const [streamModelName, setStreamModelName] = useState("");
   const [repetitionNotice, setRepetitionNotice] = useState<RepetitionNotice | null>(null);
+  // D：按场景保存最近一次检测提示，显示在场景卡片下方，仅提示不改写。
+  const [sceneNotices, setSceneNotices] = useState<Record<number, RepetitionNotice>>({});
   const [boundaryNotice, setBoundaryNotice] = useState<string | null>(null);
   const contentRef = useRef(content);
   contentRef.current = content;
@@ -168,6 +170,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
         decisionResolveRef.current?.({ type: "discard", text: "" });
         decisionResolveRef.current = null;
         setPendingScene(null);
+        setSceneNotices({});
         chapterTextRef.current = "";
         prevChapterIdRef.current = workspace.chapter.id;
       }
@@ -182,6 +185,15 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
       setPipelineStep("idle");
     }
   }, [streamError]);
+
+  const rememberSceneNotice = (sceneId: number, notice: RepetitionNotice | null) => {
+    setSceneNotices((prev) => {
+      const next = { ...prev };
+      if (notice) next[sceneId] = notice;
+      else delete next[sceneId];
+      return next;
+    });
+  };
 
   const triggerAutoSave = (nextText: string) => {
     // 有场景正在等待接受/丢弃时，编辑框里的内容只是候选预览，不能自动落库。
@@ -369,6 +381,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
     setReviewResult(null);
     setReviewError(null);
     setRepetitionNotice(null);
+    setSceneNotices({});
     setBoundaryNotice(null);
     setFlowNotice(null);
     setPipelineStep("assembling");
@@ -399,6 +412,8 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
       }
 
       if (step.mode === "scene" && step.sceneId !== null) {
+        // D：检测提示挂到本场卡片旁边，接受后仍然可见，方便回头手动改。
+        rememberSceneNotice(step.sceneId, outcome.notice);
         // B：停在本场，等作者选择“接受 / 带指令重写本场 / 丢弃”。
         setPendingScene({
           sceneId: step.sceneId,
@@ -484,6 +499,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
       setPipelineStep("awaiting_scene");
       return;
     }
+    rememberSceneNotice(current.sceneId, outcome.notice);
     setPendingScene((prev) =>
       prev && prev.sceneId === current.sceneId
         ? { ...prev, text: outcome.text, reasons: outcome.reasons, instruction: "" }
@@ -514,6 +530,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
     }
     const fullContent = appendSceneText(base, outcome.text);
     if (currentChapterRef.current !== chapterId) return;
+    rememberSceneNotice(sceneId, outcome.notice);
     setContent(fullContent);
     try {
       await saveMut.mutateAsync({ content: fullContent, source: "ai", create_new_version: true });
@@ -1059,6 +1076,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
                 locations={locations}
                 activeSceneId={activeSceneId}
                 isStreaming={isStreaming}
+                sceneNotices={sceneNotices}
                 onSelectScene={setActiveSceneId}
                 onWriteScene={(s: SceneItem) => void executeSceneWrite(s.id)}
                 onStartWriting={handleStartWriting}

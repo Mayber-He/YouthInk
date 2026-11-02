@@ -145,7 +145,7 @@ def test_pipeline_rewrites_once_on_appearance_tag_repeat() -> None:
         previous_chapter="",
         chapter_so_far="",
         must_not_include=[],
-        config=RepetitionConfig(),
+        config=RepetitionConfig(auto_rewrite=True),
         rewrite_fn=rewrite,
         appearances=["眉心有一点淡淡的褶"],
     ))

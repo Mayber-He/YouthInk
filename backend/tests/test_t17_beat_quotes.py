@@ -138,7 +138,7 @@ def test_pipeline_rewrites_once_when_recall_reference_is_invented() -> None:
         previous_chapter=CH1,
         chapter_so_far="",
         must_not_include=[],
-        config=RepetitionConfig(),
+        config=RepetitionConfig(auto_rewrite=True),
         rewrite_fn=rewrite,
         beat=BEAT,
     ))
@@ -181,7 +181,7 @@ def test_endpoint_wires_scene_beat_into_check_and_rewrite_prompt(
     )
     res = client.post(
         f"/api/v1/novels/{uid}/chapters/{c3}/scenes/{scene_id}/repetition-check",
-        json={"scene_text": scene_text, "chapter_so_far": ""},
+        json={"scene_text": scene_text, "chapter_so_far": "", "auto_rewrite": True},
     )
     assert res.status_code == 200
     body = res.json()

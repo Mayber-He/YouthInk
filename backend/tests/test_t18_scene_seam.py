@@ -126,7 +126,7 @@ def test_pipeline_rewrites_once_on_scene_seam() -> None:
         previous_chapter="",
         chapter_so_far=SCENE2,
         must_not_include=[],
-        config=RepetitionConfig(),
+        config=RepetitionConfig(auto_rewrite=True),
         rewrite_fn=rewrite,
     ))
     assert len(seen) == 1

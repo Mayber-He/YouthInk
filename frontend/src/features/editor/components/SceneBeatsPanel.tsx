@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import type { CharacterItem, LocationItem } from "@/types/api";
 import type { SceneItem } from "../types";
+import { SceneNoticeCard, type SceneNoticeView } from "./SceneNoticeCard";
 import {
   useCreateScene,
   useDeleteScene,
@@ -19,6 +20,8 @@ interface SceneBeatsPanelProps {
   locations: LocationItem[];
   activeSceneId: number | null;
   isStreaming: boolean;
+  /** D：按 scene.id 记录最近一次重复检测/一致性提示，只展示不改写。 */
+  sceneNotices?: Record<number, SceneNoticeView>;
   onSelectScene: (sceneId: number | null) => void;
   onWriteScene: (scene: SceneItem) => void;
   onStartWriting: () => void;
@@ -32,6 +35,7 @@ export const SceneBeatsPanel: React.FC<SceneBeatsPanelProps> = ({
   locations,
   activeSceneId,
   isStreaming,
+  sceneNotices = {},
   onSelectScene,
   onWriteScene,
   onStartWriting,
@@ -205,6 +209,7 @@ export const SceneBeatsPanel: React.FC<SceneBeatsPanelProps> = ({
                 }}
                 className="mt-2 w-full rounded border border-transparent bg-slate-50/80 p-1.5 text-xs leading-relaxed text-slate-700 focus:border-indigo-400 focus:bg-white focus:outline-none dark:bg-slate-950/60 dark:text-slate-200"
               />
+              {sceneNotices[scene.id] && <SceneNoticeCard notice={sceneNotices[scene.id]} />}
             </div>
           );
         })}

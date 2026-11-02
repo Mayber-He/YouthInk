@@ -8,6 +8,7 @@ async function load() {
   const result = await build({
     stdin: {
       contents: `export { SceneReviewBar } from './src/features/editor/components/SceneReviewBar';
+        export { SceneNoticeCard } from './src/features/editor/components/SceneNoticeCard';
         export { appendSceneText } from './src/features/editor/sceneFlow';
         export { renderToStaticMarkup } from 'react-dom/server';`,
       resolveDir: path.resolve('.'),
@@ -51,6 +52,20 @@ test('rewrite button becomes available once an instruction is entered', async ()
     SceneReviewBar({ ...props, instruction: '少写心理，多写对话' })
   );
   assert.doesNotMatch(html, /<button[^>]*\sdisabled=""/);
+});
+
+test('scene notice shows detection reasons without any rewrite action', async () => {
+  const { SceneNoticeCard, renderToStaticMarkup } = await load();
+  const html = renderToStaticMarkup(SceneNoticeCard({
+    notice: {
+      tone: 'warn',
+      text: '该场景有重复/一致性问题，已保留原文，请作者判断是否修改。',
+      details: ['重复检测命中：有 1 句台词与前文整句重复'],
+    },
+  }));
+  assert.match(html, /已保留原文/);
+  assert.match(html, /有 1 句台词与前文整句重复/);
+  assert.doesNotMatch(html, /<button/);
 });
 
 test('appendSceneText joins accepted scenes with a blank line and trims edges', async () => {

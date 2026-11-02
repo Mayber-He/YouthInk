@@ -189,7 +189,7 @@ def test_pipeline_no_trigger_means_no_model_call() -> None:
 
     out = _run(run_repetition_pipeline(
         "清晨的操场很安静。", previous_chapter=CH2, chapter_so_far="", must_not_include=[],
-        config=RepetitionConfig(), rewrite_fn=rewrite,
+        config=RepetitionConfig(auto_rewrite=True), rewrite_fn=rewrite,
     ))
     assert out["action"] == "none" and out["triggered"] is False and calls["n"] == 0
     assert out["final_text"] == "清晨的操场很安静。"
@@ -205,7 +205,7 @@ def test_pipeline_rewrites_once_and_accepts_clean_rewrite() -> None:
 
     out = _run(run_repetition_pipeline(
         s1, previous_chapter=CH2, chapter_so_far="", must_not_include=[],
-        config=RepetitionConfig(), rewrite_fn=rewrite,
+        config=RepetitionConfig(auto_rewrite=True), rewrite_fn=rewrite,
     ))
     assert out["action"] == "rewritten"
     assert out["triggered"] is True  # describes the ORIGINAL text
@@ -224,7 +224,7 @@ def test_pipeline_rewrites_only_once_when_rewrite_still_repeats() -> None:
 
     out = _run(run_repetition_pipeline(
         s1, previous_chapter=CH2, chapter_so_far="", must_not_include=[],
-        config=RepetitionConfig(), rewrite_fn=rewrite,
+        config=RepetitionConfig(auto_rewrite=True), rewrite_fn=rewrite,
     ))
     assert calls["n"] == 1  # never loops
     assert out["action"] == "kept_with_warning"
@@ -241,7 +241,7 @@ def test_pipeline_keeps_original_if_rewrite_is_worse() -> None:
 
     out = _run(run_repetition_pipeline(
         s1, previous_chapter=CH2, chapter_so_far="", must_not_include=[],
-        config=RepetitionConfig(), rewrite_fn=rewrite,
+        config=RepetitionConfig(auto_rewrite=True), rewrite_fn=rewrite,
     ))
     assert out["action"] == "kept_with_warning"
     assert out["final_text"] == s1  # the less-repetitive original wins
@@ -255,10 +255,31 @@ def test_pipeline_rewrite_failure_keeps_original() -> None:
 
     out = _run(run_repetition_pipeline(
         s1, previous_chapter=CH2, chapter_so_far="", must_not_include=[],
-        config=RepetitionConfig(), rewrite_fn=rewrite,
+        config=RepetitionConfig(auto_rewrite=True), rewrite_fn=rewrite,
     ))
     assert out["action"] == "rewrite_failed" and out["final_text"] == s1
     assert out["warnings"]
+
+
+def test_auto_rewrite_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("YOUTHINK_REPEAT_AUTO_REWRITE", raising=False)
+    assert RepetitionConfig().auto_rewrite is False
+    assert RepetitionConfig.from_env().auto_rewrite is False
+
+
+def test_pipeline_default_config_only_warns() -> None:
+    s1 = _split_scenes(CH3)[0]
+    calls = {"n": 0}
+
+    async def rewrite(text, report):
+        calls["n"] += 1
+        return "x"
+
+    out = _run(run_repetition_pipeline(
+        s1, previous_chapter=CH2, chapter_so_far="", must_not_include=[],
+        config=RepetitionConfig(), rewrite_fn=rewrite,
+    ))
+    assert calls["n"] == 0 and out["action"] == "kept_with_warning" and out["final_text"] == s1
 
 
 def test_pipeline_auto_rewrite_off_only_warns() -> None:
@@ -290,7 +311,7 @@ def test_pipeline_records_every_measurement() -> None:
 
     out = _run(run_repetition_pipeline(
         s1, previous_chapter=CH2, chapter_so_far="", must_not_include=[],
-        config=RepetitionConfig(), rewrite_fn=rewrite, record_fn=record,
+        config=RepetitionConfig(auto_rewrite=True), rewrite_fn=rewrite, record_fn=record,
     ))
     assert recorded == [("initial", "none"), ("after_rewrite", "rewritten")]
     assert out["check_ids"] == [1, 2]
@@ -305,7 +326,7 @@ def test_pipeline_survives_a_failing_recorder() -> None:
 
     out = _run(run_repetition_pipeline(
         _split_scenes(CH3)[0], previous_chapter=CH2, chapter_so_far="", must_not_include=[],
-        config=RepetitionConfig(), rewrite_fn=rewrite, record_fn=record,
+        config=RepetitionConfig(auto_rewrite=True), rewrite_fn=rewrite, record_fn=record,
     ))
     assert out["action"] == "rewritten"
 
@@ -400,7 +421,7 @@ def test_endpoint_detects_chapter2_repetition_rewrites_once_and_persists(
     s1 = _split_scenes(CH3)[0]
     res = client.post(
         f"/api/v1/novels/{uid}/chapters/{c3}/scenes/{scene}/repetition-check",
-        json={"scene_text": s1, "chapter_so_far": ""},
+        json={"scene_text": s1, "chapter_so_far": "", "auto_rewrite": True},
     )
     assert res.status_code == 200
     body = res.json()
@@ -440,7 +461,7 @@ def test_rewrite_prompt_carries_dates_gap_and_conservative_rules(
     monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
     res = client.post(
         f"/api/v1/novels/{uid}/chapters/{c3}/scenes/{scene}/repetition-check",
-        json={"scene_text": _split_scenes(CH3)[0], "chapter_so_far": ""},
+        json={"scene_text": _split_scenes(CH3)[0], "chapter_so_far": "", "auto_rewrite": True},
     )
     assert res.status_code == 200 and res.json()["action"] == "rewritten"
     user_msg = next(m["content"] for m in prompts[0] if m["role"] == "user")
@@ -493,7 +514,7 @@ def test_endpoint_respects_global_off_switch(client: TestClient, two_chapters, m
     monkeypatch.setenv("YOUTHINK_REPEAT_ENABLED", "0")
     res = client.post(
         f"/api/v1/novels/{uid}/chapters/{c3}/scenes/{scene}/repetition-check",
-        json={"scene_text": _split_scenes(CH3)[0], "chapter_so_far": ""},
+        json={"scene_text": _split_scenes(CH3)[0], "chapter_so_far": "", "auto_rewrite": True},
     )
     body = res.json()
     assert res.status_code == 200 and body["action"] == "none" and body["triggered"] is False

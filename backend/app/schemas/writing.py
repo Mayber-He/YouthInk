@@ -126,7 +126,7 @@ class ContextPreviewResponse(BaseModel):
 class RepetitionCheckRequest(BaseModel):
     scene_text: str = Field(..., min_length=1)
     chapter_so_far: str = ""
-    # None => follow server config (YOUTHINK_REPEAT_AUTO_REWRITE, default on).
+    # None => follow server config (YOUTHINK_REPEAT_AUTO_REWRITE, default off).
     auto_rewrite: bool | None = None
 
 
