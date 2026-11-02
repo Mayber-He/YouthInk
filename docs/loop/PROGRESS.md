@@ -898,3 +898,66 @@ T6 之后哪些 evidence 字段真正进提示词，随开关/模型输出而变
 
 - 按实测确认：2 字特征词白名单保持不扩充，但改为可配置。`RepetitionConfig.appearance_short_keep` 默认 `None`（使用内置白名单），`from_env()` 会把环境变量 `YOUTHINK_REPEAT_APPEARANCE_SHORT_KEEP` 中逗号/顿号分隔的 2 字标签**追加**到内置白名单，无需改代码。`count_appearance_tags` / `extract_appearance_tags` 增加 `short_keep` 参数并透传。
 - 通用词子串匹配保持现状；`「」` 只用于昵称的约定不变；时间词替换仍只约束措辞。上述三项均等待真实续写数据后再评估。
+
+
+## 自用写作流程：节拍停顿、逐场确认、约束面板、只提示不改写（2026-11-02）
+
+只读调查记录见 `docs/loop/ui_gap.md`。本次只补缺口，没有新增自动检测规则，也没有改提示词或生成逻辑；不调用真实 LLM、不改小说数据。
+
+### 原状（未重复实现）
+
+- 场景节拍可编辑：`frontend/src/features/editor/components/SceneBeatsPanel.tsx` 的 textarea，失焦保存。
+- 单场景“续写此景”已有，但只有选区重写能带指令。
+- 约束按人物查看、解除/激活已有；`active-constraints` 接口已有，前端此前未使用。
+- 伏笔台账、待处理队列、上下文预览已有；注入块可整块停用。
+- 一致性审查结果只展示，需作者点“一键应用”才会替换正文。
+
+### 新增用法
+
+**A. 节拍先生成、作者改完再开写**
+
+1. 点“流式写本章”，若本章还没有场景节拍，只做 AI 拆解，随后停住，显示“节拍已生成，请先修改，确认后开始写”。
+2. 在右侧“场景节拍”里直接改每个场景的 textarea，失焦即保存。
+3. 点提示条里的“开始写”，或节拍面板顶部“开始写”，才进入正文生成。
+4. 已有节拍的章节仍会直接开写，不再二次停顿。
+
+**B. 每场写完都停住：接受 / 带指令重写 / 丢弃**
+
+1. 每一场生成并检测完后，正文上方出现确认条，展示本场候选全文与检测原因。
+2. “接受”后把本场追加到本章缓冲，进入下一场；“丢弃”跳过本场。
+3. 需要改本场时，在输入框写一句指令（如“少写心理，多写对话”），点“带指令重写本场”；重写会基于已接受的前文再生成一次。
+4. 全部场景处理完才保存一次整章正文（新版本），然后自动做一致性审查。等待确认期间不会自动保存候选文本；中途断流/切章会保留已接受部分，不覆盖原稿。
+
+**C. 右侧“④ 约束与记忆”只读面板**
+
+1. “本章生效约束”来自与写作上下文相同的 `active-constraints` 接口，显示状态/软硬/作用域；点“停用”把状态改为已解除，点“恢复”改回生效中。
+2. “本章注入的事实与伏笔”直接展示注入块内容；取消“本章注入”会停用整个 `foreshadowing_and_facts` 块，本章不再注入。
+3. 逐条停用伏笔/事实需要改上下文注入逻辑，本次不改生成链路，因此只提供块级开关；逐条状态请到“伏笔台账”处理。
+
+**D. 重复检测与一致性审查只提示，不自动重写**
+
+1. `YOUTHINK_REPEAT_AUTO_REWRITE` 默认改为关闭；需要旧行为时显式设为 `1`。
+2. 关闭后检测命中只返回 `kept_with_warning`，正文保持原文；关键选择场景的“补一句内心判断”同样只在开关打开时执行。
+3. 检测原因显示在对应场景卡片下方（黄色提示，含具体重复项），同时也保留在逐场确认条和正文上方提示里。
+4. 一致性审查仍只展示问题与建议，不会自动替换正文。
+
+### 改动文件
+
+- `frontend/src/features/editor/WritingWorkbench.tsx`、`components/SceneBeatsPanel.tsx`、`components/SceneReviewBar.tsx`、`components/SceneNoticeCard.tsx`、`components/ConstraintMemoryPanel.tsx`、`components/WritingPipelineBar.tsx`、`sceneFlow.ts`
+- `frontend/src/features/settings-entity/api.ts`
+- `backend/app/services/repetition_guard.py`、`backend/app/schemas/writing.py`
+- `frontend/tests/sceneReview.test.mjs`、`frontend/tests/constraintMemoryPanel.test.mjs`
+- 相关后端测试显式打开 `auto_rewrite`，并新增默认关闭与默认只提示两条测试。
+
+### 验证
+
+- `cd frontend && npm run typecheck`：通过。
+- `cd frontend && node --test tests/*.test.mjs`：**11 passed**。
+- `cd backend && python -m pytest tests/test_repetition_guard.py tests/test_story_time.py tests/test_t17_beat_quotes.py tests/test_t18_scene_seam.py tests/test_t19_appearance_media.py -q`：**105 passed**。
+- 未调用真实 LLM；未修改小说数据。
+
+### 局限
+
+- C 的面板是只读 + 状态切换，不支持逐条停用单个事实/伏笔；那需要改上下文注入逻辑。
+- “带指令重写本场”仍走现有重写/续写链路，指令只作为一次性的场景要求，不会沉淀为长期约束。
+- 自动化测试覆盖组件渲染与后端检测分支，实际交互（点击、断流、切章）仍需手动验收。
