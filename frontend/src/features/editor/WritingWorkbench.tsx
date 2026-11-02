@@ -20,13 +20,38 @@ import {
 } from "./api";
 import { useStreamGenerate } from "./hooks/useStreamGenerate";
 import { SceneBeatsPanel } from "./components/SceneBeatsPanel";
+import { SceneReviewBar } from "./components/SceneReviewBar";
 import { ContextPreviewPanel } from "./components/ContextPreviewPanel";
 import { VersionHistoryModal } from "./components/VersionHistoryModal";
 import { SelectionToolbar } from "./components/SelectionToolbar";
 import { WritingHeaderBar } from "./components/WritingHeaderBar";
 import { WritingPipelineBar, type WritingPipelineStep } from "./components/WritingPipelineBar";
 import { ConfirmModal } from "@/components/ui/ConfirmModal";
+import { appendSceneText } from "./sceneFlow";
 import type { AiSmellHit, RewriteActionType, SceneItem, SelectionCritiqueResult } from "./types";
+
+interface RepetitionNotice {
+  tone: "info" | "warn";
+  text: string;
+  details: string[];
+}
+
+interface SceneStreamOutcome {
+  text: string;
+  reasons: string[];
+  notice: RepetitionNotice | null;
+}
+
+interface PendingScene {
+  sceneId: number;
+  sceneIndex: number;
+  total: number;
+  text: string;
+  reasons: string[];
+  instruction: string;
+}
+
+type SceneDecision = { type: "accept" | "discard"; text: string };
 
 export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) => {
   const {
@@ -80,13 +105,14 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
   // A：节拍生成完先停住，等作者改完节拍点“开始写”再继续。
   const [awaitingStart, setAwaitingStart] = useState(false);
   const pendingScenesRef = useRef<SceneItem[] | null>(null);
+  // B：当前等待作者确认（接受/重写/丢弃）的场景。
+  const [pendingScene, setPendingScene] = useState<PendingScene | null>(null);
+  const decisionResolveRef = useRef<((decision: SceneDecision) => void) | null>(null);
+  const chapterTextRef = useRef("");
+  const [flowNotice, setFlowNotice] = useState<string | null>(null);
   const [pipelineStep, setPipelineStep] = useState<WritingPipelineStep>("idle");
   const [streamModelName, setStreamModelName] = useState("");
-  const [repetitionNotice, setRepetitionNotice] = useState<{
-    tone: "info" | "warn";
-    text: string;
-    details: string[];
-  } | null>(null);
+  const [repetitionNotice, setRepetitionNotice] = useState<RepetitionNotice | null>(null);
   const [boundaryNotice, setBoundaryNotice] = useState<string | null>(null);
   const contentRef = useRef(content);
   contentRef.current = content;
@@ -138,6 +164,10 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
         setSupplementReady(false);
         setAwaitingStart(false);
         pendingScenesRef.current = null;
+        decisionResolveRef.current?.({ type: "discard", text: "" });
+        decisionResolveRef.current = null;
+        setPendingScene(null);
+        chapterTextRef.current = "";
         prevChapterIdRef.current = workspace.chapter.id;
       }
       if (!activeSceneId && workspace.scenes.length > 0) {
@@ -153,7 +183,8 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
   }, [streamError]);
 
   const triggerAutoSave = (nextText: string) => {
-    if (!effectiveChapterId || isComposingRef.current || isStreaming) return;
+    // 有场景正在等待接受/丢弃时，编辑框里的内容只是候选预览，不能自动落库。
+    if (!effectiveChapterId || isComposingRef.current || isStreaming || pendingScene) return;
     saveMut.mutate(
       { content: nextText, source: "manual", create_new_version: false },
       { onSuccess: () => setAutoSavedAt(new Date().toLocaleTimeString([], { hour12: false })) }
@@ -175,13 +206,14 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
     }
   };
 
-  // 流式生成单个场景（或整章兜底）；基于 baseContent 续写，resolve 生成的正文，中断/失败 resolve null。
-  // 不在此处保存或审查，交由调用方在整段完成后统一处理。
+  // 流式生成单个场景（或整章兜底）；基于 baseContent 续写，resolve 生成的正文与检测原因，
+  // 中断/失败 resolve null。不在此处保存或审查，交由调用方在整段完成后统一处理。
   const runSceneStream = (
     mode: "scene" | "chapter",
     sceneId: number | null,
-    baseContent: string
-  ): Promise<string | null> =>
+    baseContent: string,
+    instruction = ""
+  ): Promise<SceneStreamOutcome | null> =>
     new Promise((resolve) => {
       if (!effectiveChapterId) {
         resolve(null);
@@ -197,7 +229,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
           existing_content: baseContent,
           disabled_context_keys: disabledContextKeys,
           custom_context: customContext,
-          instruction: "",
+          instruction,
         },
         (delta) => {
           if (currentChapterRef.current !== effectiveChapterId) return;
@@ -211,7 +243,8 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
             resolve(null);
             return;
           }
-          // T5：整个场景流完成后做一次确定性重复检测。超阈值时后端只重写该场景一次；
+          // T5：整个场景流完成后做一次确定性重复检测。默认只提示（见 D），
+          // 只有显式打开 YOUTHINK_REPEAT_AUTO_REWRITE 时后端才会自动重写一次；
           // 检测接口本身出错则放行原文（检测器故障不应阻塞写作）。
           if (mode === "scene" && sceneId !== null) {
             try {
@@ -224,45 +257,51 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
                 resolve(null);
                 return;
               }
+              const details = [...check.reasons, ...check.warnings];
               if (check.action === "rewritten" || check.action === "supplemented") {
-                setContent(prefix + check.final_text);
-                setRepetitionNotice({
+                const notice: RepetitionNotice = {
                   tone: "info",
                   text:
                     check.action === "rewritten"
                       ? "检测到与前文重复，已自动重写该场景一次。"
                       : "关键选择场景缺少内心判断，已自动补写一句。",
-                  details: check.action === "supplemented" ? check.advisories ?? [] : [],
-                });
-                resolve(check.final_text);
+                  details: check.action === "supplemented" ? check.advisories ?? [] : details,
+                };
+                setContent(prefix + check.final_text);
+                setRepetitionNotice(notice);
+                resolve({ text: check.final_text, reasons: notice.details, notice });
                 return;
               }
               if (check.action === "kept_with_warning" || check.action === "rewrite_failed") {
-                setRepetitionNotice({
+                const notice: RepetitionNotice = {
                   tone: "warn",
                   text:
                     check.action === "rewrite_failed"
                       ? "该场景与前文有重复，自动重写失败，已保留原文，请手动处理。"
-                      : "该场景与前文仍有重复（已处理一次），已保留，请留意。",
-                  details: check.warnings,
-                });
+                      : "该场景有重复/一致性问题，已保留原文，请作者判断是否修改。",
+                  details,
+                };
+                setRepetitionNotice(notice);
                 setContent(prefix + check.final_text);
-                resolve(check.final_text);
+                resolve({ text: check.final_text, reasons: details, notice });
                 return;
               }
               // T21：重复检测未命中，但关键选择场景缺少内心判断时单独提示。
               if (check.advisories?.length) {
-                setRepetitionNotice({
+                const notice: RepetitionNotice = {
                   tone: "warn",
                   text: "本场是关键选择场景，但未检出明确的内心判断。",
                   details: check.advisories,
-                });
+                };
+                setRepetitionNotice(notice);
+                resolve({ text: fullGenerated, reasons: notice.details, notice });
+                return;
               }
             } catch {
               // fail-open：检测不可用时按原文继续
             }
           }
-          resolve(fullGenerated);
+          resolve({ text: fullGenerated, reasons: [], notice: null });
         },
         (meta) => {
           if (currentChapterRef.current !== effectiveChapterId) return;
@@ -330,10 +369,12 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
     setReviewError(null);
     setRepetitionNotice(null);
     setBoundaryNotice(null);
+    setFlowNotice(null);
     setPipelineStep("assembling");
     const chapterId = effectiveChapterId;
     const originalContent = content;
     pendingScenesRef.current = scenes;
+    chapterTextRef.current = "";
 
     // 无场景可用（拆解返回空）时，回退到整章一次生成，避免卡死。
     const plan: Array<{ mode: "scene" | "chapter"; sceneId: number | null }> =
@@ -342,20 +383,57 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
         : [{ mode: "chapter", sceneId: null }];
 
     let chapterText = "";
-    for (const step of plan) {
+    for (let index = 0; index < plan.length; index += 1) {
+      const step = plan[index];
       if (step.sceneId) setActiveSceneId(step.sceneId);
-      const generated = await runSceneStream(step.mode, step.sceneId, chapterText);
-      // 任一场景中断/失败/切章：停止循环，保留已生成部分不覆盖原稿。
-      if (generated === null) {
-        if (currentChapterRef.current === chapterId && !chapterText) setContent(originalContent);
-        setPipelineStep("idle");
+      const outcome = await runSceneStream(step.mode, step.sceneId, chapterText, "");
+      // 任一场景中断/失败/切章：停止循环，保留已接受部分，不覆盖原稿。
+      if (outcome === null) {
+        if (currentChapterRef.current === chapterId) {
+          setPendingScene(null);
+          setContent(chapterText || originalContent);
+          setPipelineStep("idle");
+        }
         return;
       }
-      chapterText = chapterText.trim() ? `${chapterText.trim()}\n\n${generated}` : generated;
-      if (currentChapterRef.current === chapterId) setContent(chapterText);
+
+      if (step.mode === "scene" && step.sceneId !== null) {
+        // B：停在本场，等作者选择“接受 / 带指令重写本场 / 丢弃”。
+        setPendingScene({
+          sceneId: step.sceneId,
+          sceneIndex: index + 1,
+          total: plan.length,
+          text: outcome.text,
+          reasons: outcome.reasons,
+          instruction: "",
+        });
+        setPipelineStep("awaiting_scene");
+        const decision = await new Promise<SceneDecision>((resolveDecision) => {
+          decisionResolveRef.current = resolveDecision;
+        });
+        decisionResolveRef.current = null;
+        if (currentChapterRef.current !== chapterId) return;
+        setPendingScene(null);
+        if (decision.type === "accept") {
+          chapterText = appendSceneText(chapterText, decision.text);
+        }
+        setContent(chapterText);
+        chapterTextRef.current = chapterText;
+        setPipelineStep("assembling");
+      } else {
+        chapterText = appendSceneText(chapterText, outcome.text);
+        chapterTextRef.current = chapterText;
+        setContent(chapterText);
+      }
     }
 
     if (currentChapterRef.current !== chapterId) return;
+    if (!chapterText.trim()) {
+      setContent(originalContent);
+      setFlowNotice("所有场景都已丢弃，本章没有可保存的正文。");
+      setPipelineStep("completed");
+      return;
+    }
     try {
       await saveMut.mutateAsync({ content: chapterText, source: "ai", create_new_version: true });
     } catch (error) {
@@ -367,6 +445,50 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
     }
     if (currentChapterRef.current !== chapterId) return;
     await runAutoReview();
+  };
+
+  const handleAcceptPendingScene = () => {
+    if (!pendingScene || !decisionResolveRef.current) return;
+    decisionResolveRef.current({ type: "accept", text: pendingScene.text });
+    decisionResolveRef.current = null;
+  };
+
+  const handleDiscardPendingScene = () => {
+    if (!pendingScene || !decisionResolveRef.current) return;
+    decisionResolveRef.current({ type: "discard", text: "" });
+    decisionResolveRef.current = null;
+  };
+
+  const handleChangeSceneInstruction = (value: string) => {
+    setPendingScene((prev) => (prev ? { ...prev, instruction: value } : prev));
+  };
+
+  const handleRewritePendingScene = async () => {
+    const current = pendingScene;
+    if (!current || !effectiveChapterId || isStreaming) return;
+    const instruction = current.instruction.trim();
+    if (!instruction) return;
+    const chapterId = effectiveChapterId;
+    setPipelineStep("assembling");
+    const outcome = await runSceneStream(
+      "scene",
+      current.sceneId,
+      chapterTextRef.current,
+      instruction
+    );
+    if (currentChapterRef.current !== chapterId) return;
+    if (outcome === null) {
+      setContent(appendSceneText(chapterTextRef.current, current.text));
+      setFlowNotice("本场重写中断，已保留上一版候选，可继续接受、丢弃或再次重写。");
+      setPipelineStep("awaiting_scene");
+      return;
+    }
+    setPendingScene((prev) =>
+      prev && prev.sceneId === current.sceneId
+        ? { ...prev, text: outcome.text, reasons: outcome.reasons, instruction: "" }
+        : prev
+    );
+    setPipelineStep("awaiting_scene");
   };
 
   // 单场景续写：生成后单独保存并审查。
@@ -383,13 +505,13 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
     const originalContent = content;
     const base = content;
 
-    const generated = await runSceneStream("scene", sceneId, base);
-    if (generated === null) {
+    const outcome = await runSceneStream("scene", sceneId, base);
+    if (outcome === null) {
       if (currentChapterRef.current === chapterId) setContent(originalContent);
       setPipelineStep("idle");
       return;
     }
-    const fullContent = base.trim() ? `${base.trim()}\n\n${generated}` : generated;
+    const fullContent = appendSceneText(base, outcome.text);
     if (currentChapterRef.current !== chapterId) return;
     setContent(fullContent);
     try {
@@ -705,6 +827,33 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
             <Button size="sm" onClick={handleStartWriting} disabled={isStreaming}>
               开始写
             </Button>
+          </div>
+        )}
+
+        {pendingScene && (
+          <SceneReviewBar
+            sceneLabel={`场景 ${pendingScene.sceneIndex}/${pendingScene.total}`}
+            text={pendingScene.text}
+            reasons={pendingScene.reasons}
+            instruction={pendingScene.instruction}
+            isStreaming={isStreaming}
+            onChangeInstruction={handleChangeSceneInstruction}
+            onAccept={handleAcceptPendingScene}
+            onRewrite={() => void handleRewritePendingScene()}
+            onDiscard={handleDiscardPendingScene}
+          />
+        )}
+
+        {flowNotice && (
+          <div className="mt-3 flex items-start justify-between gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+            <span>{flowNotice}</span>
+            <button
+              type="button"
+              className="shrink-0 cursor-pointer text-[11px] underline"
+              onClick={() => setFlowNotice(null)}
+            >
+              知道了
+            </button>
           </div>
         )}
 

@@ -7,6 +7,7 @@ export type WritingPipelineStep =
   | "assembling" // 组装提示词
   | "connecting" // 调用模型
   | "generating" // 正文生成
+  | "awaiting_scene" // 等待作者确认本场
   | "reviewing"  // 逻辑与一致性检查
   | "completed"; // 流程完成
 
@@ -27,6 +28,7 @@ const STEPS = [
   { key: "assembling", label: "核对写作计划", desc: "核对前文事实与已发生事件；有前文时增加一次规划调用" },
   { key: "connecting", label: "调用模型", desc: "建立大模型长文本通道" },
   { key: "generating", label: "正文生成", desc: "流式输出小说正文" },
+  { key: "awaiting_scene", label: "作者确认", desc: "接受 / 带指令重写 / 丢弃本场" },
   { key: "reviewing", label: "逻辑与一致性检查", desc: "常理/跨章/事实自动质检" },
 ] as const;
 
@@ -45,7 +47,7 @@ export const WritingPipelineBar: React.FC<WritingPipelineBarProps> = ({
   if (currentStep === "idle") return null;
 
   const getStepStatus = (stepKey: string) => {
-    const order = ["assembling", "connecting", "generating", "reviewing", "completed"];
+    const order = ["assembling", "connecting", "generating", "awaiting_scene", "reviewing", "completed"];
     const currentIndex = order.indexOf(currentStep);
     const stepIndex = order.indexOf(stepKey);
 
@@ -79,6 +81,8 @@ export const WritingPipelineBar: React.FC<WritingPipelineBarProps> = ({
                   >
                     {status === "done" ? (
                       <Check className="h-3 w-3" />
+                    ) : status === "active" && step.key === "awaiting_scene" ? (
+                      <span className="text-[11px] leading-none">…</span>
                     ) : status === "active" ? (
                       <Loader2 className="h-3 w-3 animate-spin" />
                     ) : (
@@ -147,6 +151,12 @@ export const WritingPipelineBar: React.FC<WritingPipelineBarProps> = ({
               </strong>{" "}
               字
             </span>
+          </div>
+        )}
+
+        {currentStep === "awaiting_scene" && (
+          <div className="flex items-center gap-2 text-indigo-700 dark:text-indigo-300">
+            <span className="font-medium">本场已生成，等待作者确认：接受 / 带指令重写本场 / 丢弃。</span>
           </div>
         )}
 
