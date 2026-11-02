@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import {
   Archive,
   ArrowLeft,
@@ -71,6 +71,7 @@ export const WorkbenchLayout: React.FC = () => {
   const { data: novel, isLoading } = useNovelDetail(currentNovelUid);
   const { data: outline } = useOutlineTree(currentNovelUid);
   const [backupOpen, setBackupOpen] = useState(false);
+  const mainRef = useRef<HTMLElement | null>(null);
 
   if (isLoading || !novel) {
     return (
@@ -202,13 +203,14 @@ export const WorkbenchLayout: React.FC = () => {
               selectedChapterId={selectedChapterId}
               onSelectChapter={(chId) => {
                 setSelectedChapterId(chId);
-                setActiveSection("outline");
+                setActiveSection("writing");
+                mainRef.current?.scrollTo({ top: 0 });
               }}
             />
           </aside>
         )}
 
-        <main className="flex-1 overflow-y-auto">{renderMainSection()}</main>
+        <main ref={mainRef} className="flex-1 overflow-y-auto">{renderMainSection()}</main>
 
         {!focusMode && rightPanelOpen && activeSection !== "writing" && (
           <aside className="flex w-72 shrink-0 flex-col border-l border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
