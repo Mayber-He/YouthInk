@@ -38,6 +38,7 @@ def test_rag_context_omits_empty_section_and_filters_chapters(client,two_chapter
     uid, previous, current, scene = two_chapters
     class Store:
         store_file=SimpleNamespace(exists=lambda:store_exists)
+        def incompatible_chapter_ids(self,*a,**k): return []
         def search_vectors(self,**kwargs):
             assert previous not in kwargs['allowed_chapter_hashes']
             assert current not in kwargs['allowed_chapter_hashes']
@@ -64,6 +65,7 @@ def test_unsaved_chapter_content_filters_overlapping_rag(client,two_chapters,mon
     overlap="甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉"
     class Store:
         store_file=SimpleNamespace(exists=lambda:True)
+        def incompatible_chapter_ids(self,*a,**k): return []
         def search_vectors(self,**kwargs):
             return [(SimpleNamespace(chapter_id=999,text=overlap),.9)]
     monkeypatch.setattr(assembler,'NovelVectorStore',lambda _:Store())
@@ -85,6 +87,7 @@ def test_generation_and_supplement_forward_unsaved_content(client,two_chapters,m
     overlap="甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉"
     class Store:
         store_file=SimpleNamespace(exists=lambda:True)
+        def incompatible_chapter_ids(self,*a,**k): return []
         def search_vectors(self,**kwargs):
             return [(SimpleNamespace(chapter_id=999,text=overlap),.9)]
     monkeypatch.setattr(assembler,'NovelVectorStore',lambda _:Store())

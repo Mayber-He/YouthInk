@@ -8,7 +8,11 @@ from pathlib import Path
 
 from app.core.config import get_config
 from app.db.manager import validate_novel_uid
-from app.services.embedding.encoder import cosine_similarity
+from app.services.embedding.encoder import (
+    LEGACY_EMBEDDING_DIM,
+    LEGACY_EMBEDDING_VERSION,
+    cosine_similarity,
+)
 
 
 @dataclass
@@ -24,6 +28,10 @@ class VectorChunkRecord:
     text: str
     vector: list[float]
     source_hash: str = ""
+    # bge-m3 migration metadata. Older files only stored model id and vector;
+    # missing values are inferred from the vector length as the legacy hash space.
+    embedding_dim: int = 0
+    embedding_version: str = ""
 
 
 class NovelVectorStore:
@@ -47,6 +55,11 @@ class NovelVectorStore:
             records: list[VectorChunkRecord] = []
             for item in raw_list:
                 if isinstance(item, dict):
+                    vector = [float(v) for v in item.get("vector", [])]
+                    dim = int(item.get("embedding_dim") or len(vector))
+                    version = str(item.get("embedding_version") or "")
+                    if not version and dim == LEGACY_EMBEDDING_DIM:
+                        version = LEGACY_EMBEDDING_VERSION
                     records.append(
                         VectorChunkRecord(
                             chunk_id=str(item.get("chunk_id", "")),
@@ -64,8 +77,10 @@ class NovelVectorStore:
                                 item.get("embedding_model_id", "bge-m3-onnx-int8")
                             ),
                             text=str(item.get("text", "")),
-                            vector=[float(v) for v in item.get("vector", [])],
+                            vector=vector,
                             source_hash=str(item.get("source_hash", "")),
+                            embedding_dim=dim,
+                            embedding_version=version,
                         )
                     )
             return records
@@ -89,6 +104,14 @@ class NovelVectorStore:
         self._save_all(existing)
         return len(new_chunks)
 
+    def replace_all_chunks(self, records: list[VectorChunkRecord]) -> int:
+        """Atomically replace the whole store (used by re-index after all encoding succeeded)."""
+        if records:
+            self._save_all(records)
+        elif self.store_file.exists():
+            self.store_file.unlink()
+        return len(records)
+
     def remove_chapter_chunks(self, chapter_ids: list[int]) -> int:
         """Remove stale chunks for deleted chapters while preserving other chapters."""
         ids = set(chapter_ids)
@@ -106,12 +129,47 @@ class NovelVectorStore:
         if self.store_file.exists():
             self.store_file.unlink()
 
+    @staticmethod
+    def is_compatible(
+        record: VectorChunkRecord,
+        expected_dim: int,
+        expected_version: str,
+        expected_model_id: str | None = None,
+    ) -> bool:
+        """A record may only be compared inside its own embedding space."""
+        if record.embedding_dim != expected_dim:
+            return False
+        if record.embedding_version != expected_version:
+            return False
+        if expected_model_id is not None and record.embedding_model_id != expected_model_id:
+            return False
+        return True
+
+    def incompatible_chapter_ids(
+        self, expected_dim: int, expected_version: str, expected_model_id: str | None = None
+    ) -> list[int]:
+        return sorted(
+            {
+                r.chapter_id
+                for r in self._load_all()
+                if not self.is_compatible(r, expected_dim, expected_version, expected_model_id)
+            }
+        )
+
     def has_model_mismatch(self, current_model_id: str) -> bool:
-        """Check if any stored chunk uses a different embedding_model_id."""
+        """Legacy check by model id; prefer ``has_incompatible`` for bge-m3 migration."""
         records = self._load_all()
         if not records:
             return False
         return any(r.embedding_model_id != current_model_id for r in records)
+
+    def has_incompatible(
+        self, expected_dim: int, expected_version: str, expected_model_id: str | None = None
+    ) -> bool:
+        return any(
+            not self.is_compatible(r, expected_dim, expected_version, expected_model_id)
+            for r in self._load_all()
+        )
 
     def search_vectors(
         self,
@@ -121,6 +179,9 @@ class NovelVectorStore:
         location_id: int | None = None,
         allowed_chapter_hashes: dict[int, str] | None = None,
         top_k: int = 8,
+        expected_dim: int | None = None,
+        expected_version: str | None = None,
+        expected_model_id: str | None = None,
     ) -> list[tuple[VectorChunkRecord, float]]:
         """
         Metadata pre-filtering + cosine similarity ranking.
@@ -131,6 +192,9 @@ class NovelVectorStore:
         char_filter = set(character_ids) if character_ids else None
 
         for rec in records:
+            if expected_dim is not None and expected_version is not None:
+                if not self.is_compatible(rec, expected_dim, expected_version, expected_model_id):
+                    continue
             if allowed_chapter_hashes is not None and (
                 rec.chapter_id not in allowed_chapter_hashes
                 or rec.source_hash != allowed_chapter_hashes[rec.chapter_id]

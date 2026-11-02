@@ -94,6 +94,10 @@ class RagChunkHit(BaseModel):
 class RagSearchResponse(BaseModel):
     query: str
     embedding_model_mismatch: bool = False
+    embedding_model_id: str = ""
+    embedding_dimension: int = 0
+    # Set when the ONNX encoder cannot be used. FTS hits are still returned.
+    embedding_error: str | None = None
     hits: list[RagChunkHit]
 
 

@@ -13,7 +13,7 @@ from app.db.manager import ensure_global_db_initialized, get_novel_db
 from app.db.repositories.memory_repo import MemoryRepository
 from app.db.vector_store import NovelVectorStore, VectorChunkRecord
 from app.main import create_app
-from app.services.embedding.encoder import encode_text_sync
+from app.services.embedding.encoder import EMBEDDING_DIM, EMBEDDING_VERSION, encode_text_sync
 
 
 @pytest.fixture()
@@ -318,6 +318,8 @@ def test_m5_hundred_chapter_long_book_stress_and_temporal_isolation(
                     embedding_model_id="bge-m3-onnx-int8",
                     text=text,
                     vector=encode_text_sync(text),
+                    embedding_dim=EMBEDDING_DIM,
+                    embedding_version=EMBEDDING_VERSION,
                 )
             )
 

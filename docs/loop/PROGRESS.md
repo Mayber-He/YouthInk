@@ -962,3 +962,109 @@ T6 之后哪些 evidence 字段真正进提示词，随开关/模型输出而变
 - C 的面板是只读 + 状态切换，不支持逐条停用单个事实/伏笔；那需要改上下文注入逻辑。
 - “带指令重写本场”仍走现有重写/续写链路，指令只作为一次性的场景要求，不会沉淀为长期约束。
 - 自动化测试覆盖组件渲染与后端检测分支，实际交互（点击、断流、切章）仍需手动验收。
+
+## 2026-11-02 向量检索迁移到 bge-m3 ONNX
+
+目标：把向量检索从 256 维哈希近似换成 `backend/data/models/bge-m3-onnx` 里的真实 bge-m3 ONNX 模型。未调用真实 LLM，未修改小说正文/记忆表/章节状态，未安装新依赖。
+
+### 编码方式与元数据
+
+- 编码器：`backend/app/services/embedding/encoder.py` 的 `OnnxEmbeddingEncoder`。
+- 运行方式：onnxruntime CPUExecutionProvider；进程内惰性加载、全局复用；批量编码（默认 8，环境变量 `YOUTHINK_EMBEDDING_BATCH_SIZE`，范围 1–64）。
+- 分词：`tokenizers.Tokenizer.from_file(tokenizer.json)`；截断到 `YOUTHINK_EMBEDDING_MAX_LENGTH`（默认 512，范围 8–512）；右侧 padding。
+- 池化：bge-m3 dense 约定为 CLS。若 ONNX 输出 3 维 `last_hidden_state`，取 `[:, 0, :]`；若输出 2 维句向量则直接使用。输出必须为 1024 维，否则明确报错，不截断、不补零。
+- 归一化：每行做 L2 归一化，检索分数为点积（等价余弦）。
+- 元数据：每条 `chunks.json` 记录新增 `embedding_dim`、`embedding_version`，并继续写 `embedding_model_id`；当前值为 `1024` / `bge-m3-onnx-1024-v1` / `bge-m3-onnx-int8`。
+- 旧索引识别：缺失元数据时按向量长度推断；256 维自动标记为 `hash-ngram-256-v1`。检索时只有维度、版本、模型 id 全部匹配的记录才参与向量比较，旧章节被排除，FTS 不受影响。
+- 失败策略：模型缺失、占位文件、分词器/ONNX 加载失败、推理失败、维度不匹配都抛 `EmbeddingModelUnavailable`；日志与 `/settings/embedding` 状态接口显示原因，检索块显示“向量模型不可用”，绝不回退哈希。旧哈希函数仅保留给测试/对比脚本显式调用。
+
+### 新增依赖
+
+不需要。`backend/requirements.txt` 已包含 `onnxruntime`、`tokenizers`、`numpy`，当前环境也已安装。
+
+### 重建索引
+
+命令（在 `backend/` 下执行）：
+
+```bash
+# 默认只读演练：只统计作品、已定稿章节、切片数、现有向量维度，不写文件
+python scripts/reindex_embeddings.py
+
+# 单作品演练 + 新旧 top3 对比
+python scripts/reindex_embeddings.py --novel-uid novel_cf825d92d2d9 \
+  --compare-query 江边黄昏照 --compare-query 开学 --compare-query 别当真
+
+# 用户确认后才执行：先备份，再重建并校验
+python scripts/reindex_embeddings.py --novel-uid novel_cf825d92d2d9 --apply
+```
+
+- 只处理 `status='final' AND continuity_review_required=0` 的章节；不修改正文、记忆表、章节状态。
+- `--apply` 先备份到 `backend/data/_loop_backups/embedding_<时间戳>/<novel_uid>/chunks.json`，全部编码成功后才整体替换 `vectors/chunks.json`；写入后校验条数、1024 维、元数据。校验失败自动从备份恢复。
+- 当前模型不可用时，`--apply` 会在写文件前拒绝执行。
+
+**耗时估计（未实测，因真实模型缺失）**：模型加载约 2–10 秒（取决于磁盘）；当前 13 个切片预计 10 秒内完成；按百章约 650 个切片、CPU int8 推理粗估 2–6 分钟。实际以机器和模型为准。
+
+**回滚**：`--apply` 输出备份路径。回滚只需把备份复制回原位置（无需改数据库、无需重启）：
+
+```bash
+cp "backend/data/_loop_backups/embedding_<时间戳>/<novel_uid>/chunks.json" \
+   "backend/data/<novel_uid>/vectors/chunks.json"
+```
+
+### dry-run 实测（2026-11-02）
+
+```text
+Embedding 模型：bge-m3-onnx-int8 1024 维 version=bge-m3-onnx-1024-v1 ready=False
+模型状态错误：ONNX 模型是占位文件（25 字节），请放入真实 bge-m3 模型文件：...\backend\data\models\bge-m3-onnx\model.onnx
+
+作品：novel_cf825d92d2d9
+  现有向量：13 条，维度 [256]
+  已定稿章节：2 章，切片 13 条
+    - 第 #1 章 (sort=1)：6 片
+    - 第 #2 章 (sort=2)：7 片
+```
+
+**结论：脚本可以统计重建范围，但当前 `model.onnx` 和 `tokenizer.json` 仍是 25 字节占位文件，无法生成新向量；因此没有执行 `--apply`。**
+
+### 新旧 top3 对比（第 1/2 章范围）
+
+新编码不可用（模型缺失），以下只有旧 256 维哈希结果，不能据此判断语义质量；放入真实模型后重跑同一条命令即可同时输出新旧两列。
+
+```text
+查询「江边黄昏照」
+  旧 #2 0.0961 起来。“嗯，在迎新点。”她的声音压得很低，像怕吵着排队的
+  旧 #1 0.0412 碰上。这个念头转了一圈，没找到落处，也就淡了。对话框还是
+  旧 #1 0.0341 八月末的夜晚还是闷，江澈把凉席往床边拽了拽，后背贴上竹面，手
+  新：不可用（模型缺失）
+
+查询「开学」
+  旧 #1 0.1690 几秒。这回慢吞吞地回来一句：“开学啊。”就三个字，没有感
+  旧 #1 0.1354 挺好啊。又补一句：等四十分钟，也就你能等。她那边静了
+  旧 #1 0.0843 江澈拿起来打了一个字：“嗯。”想了想，又加了一句：“发消
+  新：不可用（模型缺失）
+
+查询「别当真」
+  旧 #2 0.0593 行李箱的轮子在人字纹地砖上碾出连续的咯咯声，震得掌心发麻。江
+  旧 #1 0.0471 合不上，我习惯了。”他顿了顿，又补一句，“你要哪天真三天不吭
+  旧 #2 0.0241 十个字。新生接过表退开时，肩膀明显松了一下。旁边另一个志
+  新：不可用（模型缺失）
+```
+
+### 改动文件
+
+- 后端：`app/services/embedding/encoder.py`、`app/db/vector_store.py`、`app/services/memory/finalizer.py`、`app/services/context/assembler.py`、`app/services/rag/retriever.py`、`app/services/memory/consistency.py`、`app/services/embedding/manager.py`、`app/core/config.py`、`app/schemas/memory.py`、`scripts/reindex_embeddings.py`
+- 前端：`src/features/memory/types.ts`、`src/features/memory/PendingQueueSection.tsx`
+- 测试：`tests/conftest.py`（autouse 确定性假编码器）、`tests/test_embedding_onnx.py`（新增）、`tests/test_refinalization_transaction.py`、`tests/test_m4_m5_memory_and_stress.py`、`tests/test_rag_dedup.py`
+
+### 测试结果
+
+- `python -m pytest tests/test_embedding_onnx.py -q`：**10 passed, 1 skipped**。覆盖 CLS 池化、2 维输出、L2 归一化、批量、维度错误、模型缺失/占位/max_length 超限、元数据持久化、新旧 256/1024 隔离、无元数据旧记录推断；真实模型语义对比测试因模型缺失 skip。
+- 受影响测试：**50 passed, 1 skipped, 1 failed**；唯一失败 `test_m5_hundred_chapter_long_book_stress_and_temporal_isolation` 在未改动的 HEAD 基线同样失败（`character_state_changes.origin` 默认 `legacy` 被时序查询排除），与本次改动无关。
+- 全量：`python -m pytest tests -q` → **466 passed, 1 skipped, 5 failed**。5 项失败（M2 时序/滚动 3 项、M3 流式 1 项、M5 长书 1 项）与 HEAD 基线逐项一致，无新增失败。
+- 前端：`cd frontend && npm run typecheck` 通过。
+
+### 当前阻塞与下一步
+
+1. 需要把真实的 bge-m3 `model.onnx` 与 `tokenizer.json` 放入 `backend/data/models/bge-m3-onnx/`（当前两个文件都是 25 字节占位内容）。
+2. 重新运行 dry-run 与三条查询对比，确认新编码可用、向量为 1024 维且范数为 1。
+3. 用户确认后再执行 `--apply`；脚本会先备份并校验，失败自动回滚。

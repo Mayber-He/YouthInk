@@ -22,7 +22,12 @@ from app.schemas.memory import (
     LlmMemoryExtractionOutput,
 )
 from app.services.backup_service import create_novel_backup
-from app.services.embedding.encoder import encode_text_sync
+from app.services.embedding.encoder import (
+    EMBEDDING_DIM,
+    EMBEDDING_MODEL_ID,
+    EMBEDDING_VERSION,
+    encode_texts_sync,
+)
 from app.services.llm.client import complete_chat
 from app.services.llm.timeout_budget import (
     RetryBudget,
@@ -189,17 +194,22 @@ class ChapterFinalizerService:
         )
 
     def _current_embedding_model_id(self) -> str:
-        cfg = self.settings_repo.get_setting("embedding", {})
-        return str(cfg.get("model_id", "bge-m3-onnx-int8")) if isinstance(cfg, dict) else "bge-m3-onnx-int8"
+        # The only encoder wired into production is bge-m3 ONNX. Do not trust an
+        # arbitrary settings string here: metadata must describe the bytes actually used.
+        return EMBEDDING_MODEL_ID
 
     async def rebuild_all_indexes(self) -> dict[str, int]:
-        """Clear and rebuild all vector chunks and FTS5 indexes for finalized chapters."""
-        self.vector_store.clear_all_vectors()
+        """Rebuild all vector chunks and FTS5 indexes for finalized chapters.
+
+        Encode everything first, then replace the store in one write. A model
+        failure therefore leaves the previous index untouched instead of emptying it.
+        """
         emb_model = self._current_embedding_model_id()
         rows = self.conn.execute(
             "SELECT id, sort_order, story_time, content_hash FROM chapters WHERE status = 'final' AND continuity_review_required = 0 ORDER BY sort_order ASC"
         ).fetchall()
-        total_chunks = 0
+        all_records: list[VectorChunkRecord] = []
+        fts_versions: list[tuple[int, str]] = []
         for r in rows:
             cid = int(r["id"])
             versions = self.writing_repo.list_versions(cid)
@@ -208,10 +218,12 @@ class ChapterFinalizerService:
                 records = await self._prepare_chapter_chunks(
                     cid, float(r["sort_order"]), str(r["story_time"] or ""), ver.content, emb_model, text_sha256(ver.content)
                 )
-                self.vector_store.upsert_chapter_chunks(cid, records)
-                total_chunks += len(records)
-                self.memory_repo.index_chapter_version_fts(ver.id, ver.content)
-        return {"chapters_reindexed": len(rows), "chunks_indexed": total_chunks}
+                all_records.extend(records)
+                fts_versions.append((ver.id, ver.content))
+        self.vector_store.replace_all_chunks(all_records)
+        for version_id, content in fts_versions:
+            self.memory_repo.index_chapter_version_fts(version_id, content)
+        return {"chapters_reindexed": len(rows), "chunks_indexed": len(all_records)}
 
     async def _prepare_chapter_chunks(
         self,
@@ -230,9 +242,18 @@ class ChapterFinalizerService:
         )
         loc_id = next((s.location_id for s in scenes if s.location_id), None)
 
+        pieces = split_text_chunks(content)
+        if not pieces:
+            return []
+        # Batch on a worker thread; model loading/inference must not hold the
+        # SQLite write lock (this method is called before the finalize transaction).
+        vectors = await asyncio.to_thread(encode_texts_sync, pieces)
+        if len(vectors) != len(pieces):
+            raise RuntimeError(
+                f"向量编码数量不匹配：切片 {len(pieces)}，向量 {len(vectors)}"
+            )
         records: list[VectorChunkRecord] = []
-        for idx, piece in enumerate(split_text_chunks(content), start=1):
-            vec = await asyncio.to_thread(encode_text_sync, piece)
+        for idx, (piece, vec) in enumerate(zip(pieces, vectors), start=1):
             records.append(
                 VectorChunkRecord(
                     chunk_id=f"ch_{chapter_id}_ck_{idx}",
@@ -246,6 +267,8 @@ class ChapterFinalizerService:
                     text=piece,
                     vector=vec,
                     source_hash=source_hash,
+                    embedding_dim=EMBEDDING_DIM,
+                    embedding_version=EMBEDDING_VERSION,
                 )
             )
         return records

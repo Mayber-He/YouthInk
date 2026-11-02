@@ -103,6 +103,9 @@ export interface RagChunkHit {
 export interface RagSearchResponse {
   query: string;
   embedding_model_mismatch: boolean;
+  embedding_model_id: string;
+  embedding_dimension: number;
+  embedding_error: string | null;
   hits: RagChunkHit[];
 }
 

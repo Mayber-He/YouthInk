@@ -15,6 +15,9 @@ class AppConfig:
     host: str
     port: int
     static_dir: Path
+    # bge-m3 ONNX runtime. max_length is capped at 512 by the encoder.
+    embedding_max_length: int = 512
+    embedding_batch_size: int = 8
 
     @property
     def global_db_path(self) -> Path:
@@ -54,6 +57,19 @@ def load_config() -> AppConfig:
 
     host = os.environ.get("YOUTHINK_HOST", "0.0.0.0")
     port = int(os.environ.get("YOUTHINK_PORT", "8000"))
+    # ONNX Runtime configuration (CPU only). Keep max_length <= 512.
+    try:
+        embedding_max_length = min(
+            512, max(8, int(os.environ.get("YOUTHINK_EMBEDDING_MAX_LENGTH", "512")))
+        )
+    except ValueError:
+        embedding_max_length = 512
+    try:
+        embedding_batch_size = min(
+            64, max(1, int(os.environ.get("YOUTHINK_EMBEDDING_BATCH_SIZE", "8")))
+        )
+    except ValueError:
+        embedding_batch_size = 8
 
     # Priority: backend/static (copied build) -> frontend/dist (direct build)
     static_candidates = [
@@ -70,6 +86,8 @@ def load_config() -> AppConfig:
         host=host,
         port=port,
         static_dir=static_dir,
+        embedding_max_length=embedding_max_length,
+        embedding_batch_size=embedding_batch_size,
     )
 
 

@@ -34,7 +34,12 @@ from app.services.memory.consistency_parse import (
     parse_consistency_issues,
 )
 from app.services.prompt.author_style import author_style_prompt
-from app.services.embedding.encoder import encode_text_sync
+from app.services.embedding.encoder import (
+    EMBEDDING_DIM,
+    EMBEDDING_MODEL_ID,
+    EMBEDDING_VERSION,
+    encode_text_sync,
+)
 from app.services.memory.finalizer import split_text_chunks
 
 _HISTORY_TOP_K = 3
@@ -344,6 +349,9 @@ class ConsistencyReviewService:
                     query_vec=query_vec,
                     allowed_chapter_hashes=allowed_hashes,
                     top_k=_HISTORY_QUERY_TOP_K,
+                    expected_dim=EMBEDDING_DIM,
+                    expected_version=EMBEDDING_VERSION,
+                    expected_model_id=EMBEDDING_MODEL_ID,
                 )
                 for record, score in hits:
                     if score < _HISTORY_MIN_SIMILARITY:
@@ -376,8 +384,10 @@ class ConsistencyReviewService:
                 + "\n注意：检索片段是少量、不完整的参考证据；未检索到不代表历史中没有发生。"
                 "历史章节片段只提供作者层面的剧情参照；若片段来自待查章节之后，不能据此认定人物在待查时点已知晓后续信息。"
             )
-        except Exception:
-            # Search is supplemental; a missing or unhealthy index must not block review.
+        except Exception as exc:
+            # Search is supplemental; a missing or unhealthy index must not block review,
+            # but the reason is logged instead of silently pretending there were no hits.
+            logger.warning("consistency vector search unavailable: %s", exc)
             return ""
 
     def _build_checklist(self, chapter_id: int, sort_order: float) -> str:

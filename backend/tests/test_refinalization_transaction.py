@@ -62,10 +62,10 @@ def service(monkeypatch):
         assert conn.in_transaction, 'Publish prepared vectors only after source validation under the write lock'
         svc.events.append('index')
     svc.vector_store = SimpleNamespace(upsert_chapter_chunks=index)
-    def encode(text):
+    def encode(texts):
         assert not conn.in_transaction, 'Embedding must not hold a SQLite transaction'
-        return [1.0]
-    monkeypatch.setattr('app.services.memory.finalizer.encode_text_sync', encode)
+        return [[1.0] + [0.0] * 1023 for _ in texts]
+    monkeypatch.setattr('app.services.memory.finalizer.encode_texts_sync', encode)
     monkeypatch.setattr('app.services.memory.finalizer.create_novel_backup', lambda *args, **kw: SimpleNamespace(filename='mock.db'))
     async def summary(*args):
         assert not conn.in_transaction, 'Summary model call inside transaction'
@@ -203,7 +203,7 @@ def test_index_failure_leaves_sqlite_batch_unchanged(service,monkeypatch,failure
     def fail(*args):
         raise OSError('injected index failure')
     if failure_point=='embedding':
-        monkeypatch.setattr('app.services.memory.finalizer.encode_text_sync',fail)
+        monkeypatch.setattr('app.services.memory.finalizer.encode_texts_sync',fail)
     else:
         service.vector_store.upsert_chapter_chunks=fail
     with pytest.raises(OSError):run(service)

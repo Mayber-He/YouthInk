@@ -7,6 +7,7 @@ from typing import Literal
 
 from app.core.config import get_config
 from app.schemas.settings import EmbeddingModelStatus
+from app.services.embedding.encoder import get_embedding_runtime_status
 
 DownloadSource = Literal["modelscope", "hf_mirror", "huggingface"]
 
@@ -28,26 +29,30 @@ def check_embedding_model_status(
     model_dir = cfg.bge_m3_dir
     model_dir.mkdir(parents=True, exist_ok=True)
 
-    has_files = all((model_dir / f).exists() for f in REQUIRED_MODEL_FILES)
-    if has_files:
+    runtime = get_embedding_runtime_status()
+    if runtime.ready:
         return EmbeddingModelStatus(
-            model_id="bge-m3-onnx-int8",
+            model_id=runtime.model_id,
             ready=True,
             status="ready",
             progress=100.0,
             download_source=preferred_source,
             local_path=str(model_dir),
-            message="本地 Embedding 模型已就绪",
+            message=f"本地 Embedding 模型已就绪（{runtime.dimension} 维，max_length={runtime.max_length}）",
         )
 
     current_status = str(_download_state.get("status", "not_downloaded"))
     progress = float(_download_state.get("progress", 0.0))  # type: ignore[arg-type]
-    msg = str(_download_state.get("message") or f"可将模型文件放入 {model_dir} 或点击下载")
+    msg = runtime.error or str(
+        _download_state.get("message") or f"请将真实模型文件放入 {model_dir}"
+    )
 
     return EmbeddingModelStatus(
-        model_id="bge-m3-onnx-int8",
+        model_id=runtime.model_id,
         ready=False,
-        status=current_status if current_status in ("downloading", "error") else "not_downloaded",  # type: ignore[arg-type]
+        status="error" if runtime.error else (
+            current_status if current_status in ("downloading", "error") else "not_downloaded"
+        ),
         progress=progress,
         download_source=preferred_source,
         local_path=str(model_dir),
@@ -77,21 +82,25 @@ async def _background_prepare_task(source: DownloadSource) -> None:
         _download_state["message"] = f"正在校验 {source} 模型清单..."
         await asyncio.sleep(0.2)
 
-        # Write local manifest so users can also manually drop full ONNX weights
+        # Do not create placeholder weights: a fake model.onnx would make the
+        # status look healthy while every embedding call fails.
         manifest_path = model_dir / "manifest.json"
         manifest_path.write_text(
             '{"model_id": "bge-m3-onnx-int8", "source": "' + source + '", "dimension": 1024}',
             encoding="utf-8",
         )
-        # If full weights aren't manually placed yet, provide lightweight deterministic fallback
-        for req_file in REQUIRED_MODEL_FILES:
-            target = model_dir / req_file
-            if not target.exists():
-                target.write_text("YOUTHINK_ONNX_PLACEHOLDER", encoding="utf-8")
-
-        _download_state["status"] = "ready"
-        _download_state["progress"] = 100.0
-        _download_state["message"] = "Embedding 模型已就绪"
+        runtime = get_embedding_runtime_status()
+        if runtime.ready:
+            _download_state["status"] = "ready"
+            _download_state["progress"] = 100.0
+            _download_state["message"] = "Embedding 模型已就绪"
+        else:
+            _download_state["status"] = "error"
+            _download_state["progress"] = 100.0
+            _download_state["message"] = (
+                runtime.error
+                or "自动下载未实现，请手动放置真实 model.onnx 与 tokenizer.json"
+            )
     except Exception as exc:
         _download_state["status"] = "error"
         _download_state["message"] = f"下载失败: {exc}"

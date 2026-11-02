@@ -14,7 +14,13 @@ from app.db.repositories.settings_repo import SettingsRepository
 from app.db.repositories.writing_repo import WritingRepository
 from app.db.vector_store import NovelVectorStore
 from app.schemas.writing import ContextBlockItem, ContextPreviewResponse
-from app.services.embedding.encoder import encode_text_sync
+from app.services.embedding.encoder import (
+    EMBEDDING_DIM,
+    EMBEDDING_MODEL_ID,
+    EMBEDDING_VERSION,
+    EmbeddingModelUnavailable,
+    encode_text_sync,
+)
 from app.services.llm.client import estimate_tokens
 from app.services.context.memory_selection import select_memory_rows
 from app.services.context.prev_tail import prev_tail_max_chars, prev_tail_strategy, select_previous_tail
@@ -418,29 +424,57 @@ class ContextAssembler:
                 ).fetchall()
                 if int(row["id"]) not in excluded_ids
             }
-            query_str = combined_beats.strip() or ch.title
-            q_vec = encode_text_sync(query_str)
-            vec_hits = self._vector_store.search_vectors(
-                query_vec=q_vec,
-                max_chapter_sort=ch.sort_order - 0.0001,
-                allowed_chapter_hashes=fresh_chapter_hashes,
-                top_k=3,
+            stale_chapters = self._vector_store.incompatible_chapter_ids(
+                EMBEDDING_DIM, EMBEDDING_VERSION, EMBEDDING_MODEL_ID
             )
-            vec_hits = filter_history_hits(
-                vec_hits, excluded_chapter_ids=excluded_ids,
-                history_texts=[prev_full[-tail_chars:], existing_content],
-            )
-            rag_lines = [
-                f"• [历史章节 #{rec.chapter_id} 片段] {rec.text[:260]}"
-                for rec, _score in vec_hits
-            ]
-        if rag_lines:
-            blocks.append(
-                self._make_block(
-                    "rag_history", "RAG 检索相关历史场景片段",
-                    "\n".join(rag_lines), disabled, priority="optional",
+            if stale_chapters:
+                time_warnings.append(
+                    "向量索引需要重建：检测到旧的 256 维哈希向量，"
+                    f"这些章节暂不参与向量检索（章节 ID：{stale_chapters[:8]}）。"
+                    "全文检索 FTS 不受影响。"
                 )
-            )
+            try:
+                query_str = combined_beats.strip() or ch.title
+                q_vec = encode_text_sync(query_str)
+                vec_hits = self._vector_store.search_vectors(
+                    query_vec=q_vec,
+                    max_chapter_sort=ch.sort_order - 0.0001,
+                    allowed_chapter_hashes=fresh_chapter_hashes,
+                    top_k=3,
+                    expected_dim=EMBEDDING_DIM,
+                    expected_version=EMBEDDING_VERSION,
+                    expected_model_id=EMBEDDING_MODEL_ID,
+                )
+                vec_hits = filter_history_hits(
+                    vec_hits, excluded_chapter_ids=excluded_ids,
+                    history_texts=[prev_full[-tail_chars:], existing_content],
+                )
+                rag_lines = [
+                    f"• [历史章节 #{rec.chapter_id} 片段] {rec.text[:260]}"
+                    for rec, _score in vec_hits
+                ]
+                if rag_lines:
+                    blocks.append(
+                        self._make_block(
+                            "rag_history",
+                            "RAG 检索相关历史场景片段",
+                            "\n".join(rag_lines),
+                            disabled,
+                            priority="optional",
+                        )
+                    )
+            except EmbeddingModelUnavailable as exc:
+                # Never substitute the legacy hash encoder here.
+                time_warnings.append(f"向量模型不可用：{exc}")
+                blocks.append(
+                    self._make_block(
+                        "rag_history",
+                        "RAG 检索相关历史场景片段",
+                        f"向量模型不可用：{exc}",
+                        disabled,
+                        priority="optional",
+                    )
+                )
 
         total_tokens = sum(b.tokens for b in blocks if b.enabled)
         return ContextPreviewResponse(

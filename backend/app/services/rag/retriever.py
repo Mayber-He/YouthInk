@@ -9,7 +9,14 @@ from app.db.repositories.memory_repo import MemoryRepository
 from app.db.repositories.settings_repo import SettingsRepository
 from app.db.vector_store import NovelVectorStore
 from app.schemas.memory import RagChunkHit, RagSearchResponse
-from app.services.embedding.encoder import encode_text_sync
+from app.services.embedding.encoder import (
+    EMBEDDING_DIM,
+    EMBEDDING_MODEL_ID,
+    EMBEDDING_VERSION,
+    EmbeddingModelUnavailable,
+    encode_text_sync,
+    get_embedding_runtime_status,
+)
 
 RRF_K = 60
 
@@ -39,25 +46,30 @@ class HybridRagRetriever:
         if not query or not query.strip():
             return RagSearchResponse(query=query, hits=[])
 
-        emb_cfg = self.settings_repo.get_setting("embedding", {})
-        model_id = str(
-            emb_cfg.get("model_id", "bge-m3-onnx-int8")
-            if isinstance(emb_cfg, dict)
-            else "bge-m3-onnx-int8"
+        runtime = get_embedding_runtime_status()
+        mismatch = self.vector_store.has_incompatible(
+            EMBEDDING_DIM, EMBEDDING_VERSION, EMBEDDING_MODEL_ID
         )
-        mismatch = self.vector_store.has_model_mismatch(model_id)
+        embedding_error: str | None = None
+        vec_hits: list[tuple[object, float]] = []
 
-        # 1. Encode query vector in threadpool to avoid blocking event loop
-        query_vec = await asyncio.to_thread(encode_text_sync, query)
-
-        # 2. Vector recall with metadata filtering
-        vec_hits = self.vector_store.search_vectors(
-            query_vec=query_vec,
-            max_chapter_sort=max_chapter_sort,
-            character_ids=character_ids,
-            location_id=location_id,
-            top_k=top_k * 2,
-        )
+        # 1. Encode query vector in threadpool to avoid blocking event loop.
+        # A failure is reported, never replaced by the legacy hash vector space.
+        try:
+            query_vec = await asyncio.to_thread(encode_text_sync, query)
+            # 2. Vector recall with metadata filtering
+            vec_hits = self.vector_store.search_vectors(
+                query_vec=query_vec,
+                max_chapter_sort=max_chapter_sort,
+                character_ids=character_ids,
+                location_id=location_id,
+                top_k=top_k * 2,
+                expected_dim=EMBEDDING_DIM,
+                expected_version=EMBEDDING_VERSION,
+                expected_model_id=EMBEDDING_MODEL_ID,
+            )
+        except EmbeddingModelUnavailable as exc:
+            embedding_error = str(exc)
 
         # 3. FTS5 keyword recall with jieba pre-tokenization
         fts_rows = self.memory_repo.search_chapters_fts(
@@ -116,5 +128,8 @@ class HybridRagRetriever:
         return RagSearchResponse(
             query=query,
             embedding_model_mismatch=mismatch,
+            embedding_model_id=runtime.model_id,
+            embedding_dimension=runtime.dimension,
+            embedding_error=embedding_error,
             hits=sorted_hits,
         )

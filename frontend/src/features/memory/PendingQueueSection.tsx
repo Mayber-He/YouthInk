@@ -300,9 +300,15 @@ export const PendingQueueSection: React.FC<PendingQueueSectionProps> = ({
 
         {ragMut.data && (
           <div className="mt-3 space-y-2">
-            {ragMut.data.embedding_model_mismatch && (
+            {ragMut.data.embedding_error && (
+              <div role="alert" className="rounded-lg bg-rose-50 p-2 text-xs text-rose-800 dark:bg-rose-950/40 dark:text-rose-200">
+                向量模型不可用：{ragMut.data.embedding_error}（以下仅为全文检索 FTS 结果）
+              </div>
+            )}
+            {!ragMut.data.embedding_error && ragMut.data.embedding_model_mismatch && (
               <div className="rounded-lg bg-amber-50 p-2 text-xs text-amber-800">
-                检测到当前 Embedding 模型与历史向量不一致，请点击右上角「一键重建全书索引」。
+                向量索引需要重建：检测到旧版 256 维哈希向量，与当前 {ragMut.data.embedding_dimension || 1024} 维模型不兼容；
+                不兼容章节暂不参与向量检索。请点击右上角「一键重建全书索引」。
               </div>
             )}
             {ragMut.data.hits.map((hit) => (
