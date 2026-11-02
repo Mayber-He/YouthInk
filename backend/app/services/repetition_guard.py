@@ -119,6 +119,9 @@ class RepetitionConfig:
     # (f) T19: appearance phrases from present characters' cards that recur in this chapter.
     appearance_check: bool = True
     appearance_max_count: int = 3
+    # T23: extra 2-character tags allowed below the 3-character floor. ``None`` uses the
+    # built-in white list; from_env() merges YOUTHINK_REPEAT_APPEARANCE_SHORT_KEEP into it.
+    appearance_short_keep: tuple[str, ...] | None = None
     # (g) T22: a beat line "叙述称呼：真名→别名" forbids the real name in this scene.
     narration_alias_check: bool = True
 
@@ -127,7 +130,7 @@ class RepetitionConfig:
         """Env overrides (all optional): YOUTHINK_REPEAT_ENABLED / _AUTO_REWRITE / _NGRAM /
         _MIN_SPAN / _MAX_SPANS / _MAX_COVERAGE / _ACTION_MAX / _FORBIDDEN_OVERLAP / _ACTION_WORDS
         / _SEAM_CHECK / _SEAM_HEAD / _SEAM_TAIL / _SEAM_NGRAM /
-        _APPEARANCE_CHECK / _APPEARANCE_MAX / _NARRATION_ALIAS_CHECK."""
+        _APPEARANCE_CHECK / _APPEARANCE_MAX / _APPEARANCE_SHORT_KEEP / _NARRATION_ALIAS_CHECK."""
         cfg = cls()
 
         def _flag(name: str, default: bool) -> bool:
@@ -157,6 +160,17 @@ class RepetitionConfig:
         cfg.appearance_max_count = max(2, _num(
             "YOUTHINK_REPEAT_APPEARANCE_MAX", cfg.appearance_max_count, int
         ))
+        # T23: additive — comma/顿号 separated 2-character tags, so a missed label can be
+        # added without a code change.
+        extra_short = os.environ.get("YOUTHINK_REPEAT_APPEARANCE_SHORT_KEEP", "")
+        extra_tags = {
+            tag.strip()
+            for tag in extra_short.replace("、", ",").split(",")
+            if tag.strip()
+        }
+        cfg.appearance_short_keep = tuple(
+            sorted(set(_SHORT_APPEARANCE_KEEP) | extra_tags)
+        )
         cfg.narration_alias_check = _flag(
             "YOUTHINK_REPEAT_NARRATION_ALIAS_CHECK", cfg.narration_alias_check
         )
@@ -492,7 +506,10 @@ def _looks_like_appearance(phrase: str) -> bool:
 
 
 def extract_appearance_tags(
-    appearance: str, min_chars: int = _MIN_APPEARANCE_CHARS, max_chars: int = 8
+    appearance: str,
+    min_chars: int = _MIN_APPEARANCE_CHARS,
+    max_chars: int = 8,
+    short_keep: tuple[str, ...] | None = None,
 ) -> list[str]:
     """T19/T23: short descriptive phrases from a character's appearance card.
 
@@ -500,11 +517,18 @@ def extract_appearance_tags(
     longer clauses contribute their word tokens (jieba) so a distinctive label such as "眉心"
     is found inside "眉心有一点淡淡的褶". T23 raises the floor to 3 characters (2-character
     distinctive compounds such as "眉心" are kept) and drops generic body/sensory nouns.
-    Only body/expression/posture phrases survive; clothing/accessory nouns, obvious
-    non-appearance words and actions are dropped. First-seen order.
+    ``short_keep`` extends the built-in 2-character white list (configurable via
+    ``YOUTHINK_REPEAT_APPEARANCE_SHORT_KEEP``). Only body/expression/posture phrases survive;
+    clothing/accessory nouns, obvious non-appearance words and actions are dropped.
+    First-seen order.
     """
     import jieba  # lazy: the other repetition checks never pay the dictionary-load cost
 
+    keep = (
+        _SHORT_APPEARANCE_KEEP
+        if short_keep is None
+        else _SHORT_APPEARANCE_KEEP | frozenset(short_keep)
+    )
     out: list[str] = []
     seen: set[str] = set()
 
@@ -512,10 +536,7 @@ def extract_appearance_tags(
         phrase = (phrase or "").strip()
         if not (min_chars <= len(phrase) <= max_chars):
             # T23: the only exception to the >=3-character floor.
-            if not (
-                phrase in _SHORT_APPEARANCE_KEEP
-                and 2 <= len(phrase) <= max_chars
-            ):
+            if not (phrase in keep and 2 <= len(phrase) <= max_chars):
                 return
         if phrase in seen or not _looks_like_appearance(phrase):
             return
@@ -538,6 +559,7 @@ def count_appearance_tags(
     chapter_so_far: str,
     appearances: list[str] | None,
     max_count: int = 3,
+    short_keep: tuple[str, ...] | None = None,
 ) -> list[AppearanceTagHit]:
     """T19: appearance phrases whose chapter-wide count reaches ``max_count``.
 
@@ -549,7 +571,7 @@ def count_appearance_tags(
     seen: set[str] = set()
     hits: list[AppearanceTagHit] = []
     for appearance in appearances:
-        for phrase in extract_appearance_tags(appearance):
+        for phrase in extract_appearance_tags(appearance, short_keep=short_keep):
             if phrase in seen:
                 continue
             seen.add(phrase)
@@ -811,6 +833,7 @@ def analyze_scene_repetition(
             chapter_so_far,
             appearances,
             max_count=cfg.appearance_max_count,
+            short_keep=cfg.appearance_short_keep,
         )
         if report.appearance_hits:
             report.reasons.append(

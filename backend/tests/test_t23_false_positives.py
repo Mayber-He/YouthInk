@@ -34,6 +34,28 @@ def test_generic_body_words_are_not_appearance_tags() -> None:
         assert generic not in tags
 
 
+def test_short_appearance_keep_is_configurable(monkeypatch) -> None:
+    # A 2-character tag outside the built-in list is dropped...
+    assert extract_appearance_tags("颈侧") == []
+
+    # ...but can be added via env without a code change; defaults stay in place.
+    monkeypatch.setenv("YOUTHINK_REPEAT_APPEARANCE_SHORT_KEEP", "颈侧、唇角")
+    cfg = RepetitionConfig.from_env()
+    assert "颈侧" in cfg.appearance_short_keep
+    assert "眉心" in cfg.appearance_short_keep
+
+    tags = extract_appearance_tags("颈侧", short_keep=cfg.appearance_short_keep)
+    assert "颈侧" in tags
+    report = analyze_scene_repetition(
+        "颈侧有一道浅疤。她偏过头，颈侧又露出来。颈侧那道疤很淡。",
+        previous_chapter="",
+        chapter_so_far="",
+        config=cfg,
+        appearances=["颈侧"],
+    )
+    assert any(hit.phrase == "颈侧" for hit in report.appearance_hits)
+
+
 def test_gao_gezi_in_v5_prose_is_not_flagged_but_meixin_still_is() -> None:
     scene = (
         "高个子那个用胳膊肘捅了捅他。另一个高个子抬了抬下巴，"
