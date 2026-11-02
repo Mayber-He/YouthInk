@@ -207,6 +207,10 @@ class WritingService:
             "\n【关键选择场景】涉及人物关键选择的场景，must_happen 中必须有一条同时写出该人物明确的内心判断和决定"
             "（如“他判断……，决定……”），不能只写外部动作；"
             "同一场景的 must_not_include 必须写明对方不得察觉这个判断或决定，也不得回头、追问或回应，把反应留给后续场景。"
+            "\n【叙述称呼】当视角人物尚未得知某在场人物的真实姓名时（依据起点状态、人物卡、约束判断），"
+            "为该场景输出 narration_alias 字段，格式“真名→叙述别名”（如“裴南栀→白衬衫学姐”），"
+            "本场叙述只能用别名指代该人物；若情节需要在本场得知真名，在 must_happen 中加入"
+            "“看到名牌/被人喊出名字”等合理揭示事件；若视角人物已知真名，则不要输出该字段。"
         )
         if instruction:
             inst += f"\n作者附加要求：{instruction}"
@@ -217,7 +221,7 @@ class WritingService:
             '"entry_state": "江澈刚到报到处，裴南栀在发放材料", '
             '"must_happen": ["江澈找到报到处", "裴南栀帮他办手续", "两人加了联系方式"], '
             '"exit_state": "江澈拿到材料，心里记住了这个学姐", '
-            '"must_not_include": ["江澈认出她是网友", "表白或暧昧"], '
+            '"must_not_include": ["江澈认出她是网友", "表白或暧昧"], "narration_alias": "", '
             '"pov_character_name": "江澈", "location_name": "报到处", '
             '"character_names": ["江澈", "裴南栀"], "story_time": "报到日上午", "target_words": 850}]}'
         )
@@ -344,6 +348,7 @@ class WritingService:
                 beat_text = format_scene_beat(
                     item.goal, item.entry_state, item.must_happen,
                     item.exit_state, item.must_not_include,
+                    narration_alias=item.narration_alias,
                 )
             else:
                 beat_text = item.beat
@@ -380,12 +385,27 @@ class WritingService:
         ``YOUTHINK_PROSE_PROMPT_V2=0``.
         """
         from app.services.key_choice import KEY_CHOICE_WRITE_RULE, is_key_choice_beat
+        from app.services.narration_alias import (
+            alias_rule,
+            apply_aliases,
+            collect_narration_aliases,
+            parse_narration_aliases,
+            strip_narration_lines,
+        )
         from app.services.prompt.prose_prompt import ending_rule, prose_prompt_v2_enabled
+
+        ch = self._outline_repo.get_chapter(req.chapter_id)
+        scenes = self._writing_repo.list_scenes(req.chapter_id)
+        all_aliases = collect_narration_aliases([s.beat for s in scenes])
 
         v2 = (not legacy) and prose_prompt_v2_enabled()
         layer1, layer2, layer3 = self._build_base_layers(prose=v2)
         if legacy:
             layer1 = _LEGACY_SYSTEM_ROLE
+        if all_aliases:
+            layer1 = apply_aliases(layer1, all_aliases)
+            layer2 = apply_aliases(layer2, all_aliases)
+            layer3 = apply_aliases(layer3, all_aliases)
         preview = self._assembler.build_context_preview(
             req.chapter_id, req.scene_id, req.disabled_context_keys, existing_content=req.existing_content
         )
@@ -422,8 +442,8 @@ class WritingService:
                 tail = req.existing_content.strip()[-1800:]
                 enabled_parts.append(f"### 本章已写前文（请自然衔接续写，切勿重复）\n{tail}")
             layer4 = "\n\n".join(enabled_parts)
-        ch = self._outline_repo.get_chapter(req.chapter_id)
-        scenes = self._writing_repo.list_scenes(req.chapter_id)
+        if all_aliases:
+            layer4 = apply_aliases(strip_narration_lines(layer4), all_aliases)
 
         if req.mode == "scene" and req.scene_id is not None:
             target_scene = next((s for s in scenes if s.id == req.scene_id), None)
@@ -433,12 +453,14 @@ class WritingService:
             tpl = next(
                 p for p in self._settings_repo.list_prompt_templates() if p.task_type == "write_scene"
             )
+            raw_beat = target_scene.beat if target_scene else ch.synopsis
+            scene_beat = apply_aliases(strip_narration_lines(raw_beat), all_aliases)
             inst = render_template(
                 tpl.content,
                 {
                     "chapter_title": ch.title,
                     "scene_index": scene_idx,
-                    "scene_beat": target_scene.beat if target_scene else ch.synopsis,
+                    "scene_beat": scene_beat,
                     "target_words": _word_count_range(
                         target_scene.target_words if target_scene else 800
                     ),
@@ -447,6 +469,9 @@ class WritingService:
             inst += "\n字数范围仅供参考，叙事完整、表达紧凑优先，不得为达到下限补写流水账。"
             if target_scene and is_key_choice_beat(target_scene.beat):
                 inst += "\n" + KEY_CHOICE_WRITE_RULE
+            scene_aliases = parse_narration_aliases(raw_beat)
+            if scene_aliases:
+                inst += "\n" + alias_rule(scene_aliases)
         else:
             novel = self._novel_repo.get_novel_detail()
             inst = (
@@ -454,6 +479,8 @@ class WritingService:
                 f"{_word_count_range(novel.words_per_chapter)} 字。"
             )
             inst += "字数范围仅供参考，叙事完整、表达紧凑优先，不得为达到下限补写流水账。"
+            if all_aliases:
+                inst += "\n" + alias_rule(all_aliases)
 
         if req.instruction.strip():
             inst += f"\n作者额外写作要求：{req.instruction.strip()}"

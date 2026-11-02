@@ -47,6 +47,7 @@ def _severity(report: RepetitionReport) -> int:
         + len(report.recall_misses) * 3
         + len(report.seam_spans) * 2
         + len(report.appearance_hits) * 2
+        + len(report.alias_hits) * 3
     )
 
 
@@ -100,6 +101,15 @@ def build_rewrite_instruction(report: RepetitionReport, *, time_hint: str = "") 
             "【节拍要求的逐字呼应】\n"
             "以下句子是节拍要求的逐字呼应，必须原样保留，不得改写、删除或替换：\n"
             + "\n".join(f"- 「{q}」" for q in report.required_quotes)
+        )
+    if report.alias_hits:
+        parts.append(
+            "【叙述称呼】本场正文中的下列本名必须全部替换为指定别名；"
+            "只做称谓替换，其余字词与剧情不变：\n"
+            + "\n".join(
+                f"- 「{v.real_name}」→「{v.alias}」（出现 {v.count} 次）"
+                for v in report.alias_hits
+            )
         )
     if time_hint:
         parts.append(time_hint)

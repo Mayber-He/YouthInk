@@ -800,3 +800,51 @@ T6 之后哪些 evidence 字段真正进提示词，随开关/模型输出而变
 - 生成后检查默认只警告（`YOUTHINK_KEY_CHOICE_CHECK=true`、`YOUTHINK_KEY_CHOICE_REWRITE=false`）；打开补写开关后会多一次 LLM 调用，且 `action=supplemented` 的前端提示样式需要实际走查。
 - 补写只检查是否出现判断/决定类词，不能保证语义正确；补写后仍不含关键词时保留原文并警告，不循环重试。
 - 规划校验与 T3 的重拆共用一次机会：若同一次输出还同时存在相邻重复或边界问题，三者一起提示，只重拆一次。
+
+
+## T22 完成：叙述称呼规则（2026-11-02）
+
+### 改动
+
+- 新增 `backend/app/services/narration_alias.py`（纯函数，无 DB/LLM 依赖）：
+  - `parse_narration_aliases`：解析节拍中的元信息行“叙述称呼：裴南栀→白衬衫学姐”，支持一行多组、中英文冒号。
+  - `collect_narration_aliases`：合并全章各场景的别名映射（后出现的场景覆盖冲突项）。
+  - `strip_narration_lines`：从上下文块与节拍里剥离“叙述称呼：”元信息行，保证不进入正文提示词。
+  - `apply_aliases`：按真名长度倒序替换，避免短名先替换破坏长名。
+  - `alias_rule`：生成写作指令“【叙述称呼】「真名」→「别名」……正文叙述不得出现本名……不得借叙述、对话或他人称呼提前泄露本名”。
+- `backend/app/services/scene_planning.py`：`format_scene_beat` 新增 `narration_alias` 参数，有值时在“终点状态”之后追加“叙述称呼：……”一行。
+- `backend/app/schemas/writing.py`：`LlmSceneItem` 新增 `narration_alias: str = ""`，兼容未输出该字段的旧模型。
+- `backend/app/services/writing_service.py`：
+  - 规划提示词新增【叙述称呼】规则：POV 尚不知真名时输出 `narration_alias`，需要本场揭名时在 must_happen 加入“看到名牌/被人喊出名字”；JSON 示例带空字段。
+  - 落库 beat 时把 `narration_alias` 序列化为“叙述称呼：”行。
+  - `prepare_stream_write_prompts`：先收集全章别名；`layer1`/`layer2`/`layer3` 与上下文块 `layer4` 统一替换为别名并剥离元信息行；目标场景节拍同样替换。场景模式只附加本场别名的 `alias_rule`，整章模式附加全章别名的 `alias_rule`。
+- `backend/app/services/repetition_guard.py`：
+  - `RepetitionConfig.narration_alias_check`，环境变量 `YOUTHINK_REPEAT_NARRATION_ALIAS_CHECK`，默认 `true`。
+  - 新增 `AliasViolation(real_name, alias, count)` 与 `RepetitionReport.alias_hits`；正文出现节拍禁止的本名时计为 `reasons` 里的“叙述称呼违规”，并进入 `describe_for_model` 给模型的原因列表。
+- `backend/app/services/repetition_service.py`：`alias_hits` 计入严重度；`build_rewrite_instruction` 新增【叙述称呼】段，要求只做称谓替换、其余字词与剧情不变。
+- 新增 `backend/tests/test_t22_narration_alias.py`（9 tests）与 fixtures `t22_scene2_beat.txt`、`t22_scene2_final.txt`、`t22_scene3_beat.txt`、`t22_scene3_final.txt`（取自 v5 场景 2、3）：
+  - 解析/剥离/替换、跨场景合并、`format_scene_beat` 序列化。
+  - 场景 2、3 出现本名被检出，重写指令包含“「裴南栀」→「白衬衫学姐」”与“必须全部替换”。
+  - 无“叙述称呼”行时不误报。
+  - 写作提示词：规则段之前不出现本名、元信息行不进入提示词、系统提示词不含本名；无别名行时保留本名。
+  - 规划提示词包含 `narration_alias`、别名规则与“看到名牌/被人喊出名字”，生成结果落库为带“叙述称呼：”的节拍。
+
+### 改动文件
+
+- 新增 `backend/app/services/narration_alias.py`、`backend/tests/test_t22_narration_alias.py`、`backend/tests/fixtures/t22_scene2_beat.txt`、`backend/tests/fixtures/t22_scene2_final.txt`、`backend/tests/fixtures/t22_scene3_beat.txt`、`backend/tests/fixtures/t22_scene3_final.txt`
+- `backend/app/schemas/writing.py`、`backend/app/services/writing_service.py`、`backend/app/services/repetition_guard.py`、`backend/app/services/repetition_service.py`、`backend/app/services/scene_planning.py`
+- `docs/loop/PLAN.md`、`docs/loop/PROGRESS.md`
+
+### 验证
+
+- T22 专项 `python -m pytest tests/test_t22_narration_alias.py -q`：**9 passed**。
+- 相关回归（T22 + 场景清单 + 场景规划 + 提示词 + 重复检测 + T17 + T19 + T20 + T21 + 写作质量）：**130 passed**。
+- 全量 `cd backend && python -m pytest tests -q`：**445 passed / 5 failed**（242.52 秒），5 项与既有基线逐项一致（M2 时序/滚动 3 项、M3 流式 1 项、M5 长书 1 项），无新增失败。
+- 模型调用全部 mock/固定样本，未调真实 LLM；测试使用临时库，未写入或修改小说数据。
+
+### 局限 / 人工确认
+
+- 别名只在节拍显式写出“叙述称呼：”行时生效；规划模型是否真的只在 POV 不知道姓名时输出 `narration_alias`，需要真实规划抽查。
+- 提示词会把该人物在所有上下文块（含人物卡）中的本名替换成别名，人物卡上的“姓名”字段也会显示为别名；这符合“不提前泄露本名”的目标，但可能让模型误以为角色本名就是别名，需要确认或后续在人物卡块中单独说明。
+- 正文本名检测是纯字面计数，无法区分叙述、对话与他人称呼；重写只要求替换称谓，不保证模型一定不泄露。
+- 未回填既有场景节拍或正文；既有 `repetition_checks` 记录不含 `alias_hits`。

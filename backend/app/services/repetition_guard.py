@@ -39,6 +39,8 @@ import os
 import re
 from dataclasses import asdict, dataclass, field
 
+from app.services.narration_alias import parse_narration_aliases
+
 # Speaker label at the start of a chat line: 「名字」： / [名字]： / 名字：
 _LABEL = re.compile(
     r"^\s*(?:[「『\[【（(][^」』\]】）)\n]{1,12}[」』\]】）)]\s*[：:]"
@@ -117,13 +119,15 @@ class RepetitionConfig:
     # (f) T19: appearance phrases from present characters' cards that recur in this chapter.
     appearance_check: bool = True
     appearance_max_count: int = 3
+    # (g) T22: a beat line "叙述称呼：真名→别名" forbids the real name in this scene.
+    narration_alias_check: bool = True
 
     @classmethod
     def from_env(cls) -> "RepetitionConfig":
         """Env overrides (all optional): YOUTHINK_REPEAT_ENABLED / _AUTO_REWRITE / _NGRAM /
         _MIN_SPAN / _MAX_SPANS / _MAX_COVERAGE / _ACTION_MAX / _FORBIDDEN_OVERLAP / _ACTION_WORDS
         / _SEAM_CHECK / _SEAM_HEAD / _SEAM_TAIL / _SEAM_NGRAM /
-        _APPEARANCE_CHECK / _APPEARANCE_MAX."""
+        _APPEARANCE_CHECK / _APPEARANCE_MAX / _NARRATION_ALIAS_CHECK."""
         cfg = cls()
 
         def _flag(name: str, default: bool) -> bool:
@@ -153,6 +157,9 @@ class RepetitionConfig:
         cfg.appearance_max_count = max(2, _num(
             "YOUTHINK_REPEAT_APPEARANCE_MAX", cfg.appearance_max_count, int
         ))
+        cfg.narration_alias_check = _flag(
+            "YOUTHINK_REPEAT_NARRATION_ALIAS_CHECK", cfg.narration_alias_check
+        )
         words = os.environ.get("YOUTHINK_REPEAT_ACTION_WORDS")
         if words and words.strip():
             cfg.action_phrases = tuple(w.strip() for w in words.split(",") if w.strip())
@@ -198,6 +205,13 @@ class RecallMiss:
 
 
 @dataclass
+class AliasViolation:
+    real_name: str
+    alias: str
+    count: int
+
+
+@dataclass
 class RepetitionReport:
     triggered: bool = False
     reasons: list[str] = field(default_factory=list)
@@ -219,6 +233,8 @@ class RepetitionReport:
     seam_spans: list[RepeatedSpan] = field(default_factory=list)
     # T19: appearance-card phrases overused in chapter-so-far + this scene.
     appearance_hits: list[AppearanceTagHit] = field(default_factory=list)
+    # T22: real names the beat forbids in favour of a narration alias.
+    alias_hits: list[AliasViolation] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -251,6 +267,11 @@ class RepetitionReport:
             lines.append(
                 f"- 回忆引用无法在上一章原文中逐字找到：「{rm.text}」；"
                 "请改成概括，不得补写表情或台词"
+            )
+        for av in self.alias_hits[:max_items]:
+            lines.append(
+                f"- 叙述称呼：本场不得出现本名「{av.real_name}」（出现 {av.count} 次），"
+                f"必须全部替换为别名「{av.alias}」"
             )
         return "\n".join(lines)
 
@@ -775,6 +796,19 @@ def analyze_scene_repetition(
                 f"本场景开头与上一场景结尾有 {len(report.seam_spans)} 处 "
                 f"≥{cfg.seam_ngram} 字的重复片段："
                 + "、".join(f"「{sp.text}」" for sp in report.seam_spans[:3])
+            )
+
+    if cfg.narration_alias_check:
+        for real, alias in parse_narration_aliases(beat).items():
+            count = (scene_text or "").count(real)
+            if count:
+                report.alias_hits.append(AliasViolation(real, alias, count))
+        if report.alias_hits:
+            report.reasons.append(
+                "叙述称呼违规："
+                + "、".join(f"本名「{v.real_name}」×{v.count}" for v in report.alias_hits)
+                + "，本场应统一用别名"
+                + "、".join(f"「{v.alias}」" for v in report.alias_hits)
             )
 
     report.triggered = bool(report.reasons)

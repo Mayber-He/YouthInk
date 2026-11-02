@@ -42,6 +42,7 @@ def format_scene_beat(
     must_happen: list[str],
     exit_state: str,
     must_not_include: list[str],
+    narration_alias: str = "",
 ) -> str:
     """Serialize an event checklist into the text stored in ``scenes.beat``.
 
@@ -58,6 +59,8 @@ def format_scene_beat(
         lines.append("必须发生：" + "；".join(mh))
     if exit_state.strip():
         lines.append(f"终点状态：{exit_state.strip()}")
+    if narration_alias.strip():
+        lines.append(f"叙述称呼：{narration_alias.strip()}")
     mni = [m.strip() for m in must_not_include if m.strip()]
     if mni:
         lines.append("本场禁止出现：" + "；".join(mni))

@@ -57,6 +57,8 @@ class LlmSceneItem(BaseModel):
     must_happen: list[str] = Field(default_factory=list)
     exit_state: str = ""
     must_not_include: list[str] = Field(default_factory=list)
+    # T22: “真名→别名”；POV 尚不知真名时由规划模型输出，序列化进 beat。
+    narration_alias: str = ""
     # 旧字段：仍兼容老模型输出 / 老测试；若新字段为空则回退到 beat 原文。
     beat: str = ""
     pov_character_name: str = ""
