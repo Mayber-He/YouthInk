@@ -21,8 +21,8 @@ import jieba
 
 logger = logging.getLogger(__name__)
 
-EMBEDDING_MODEL_ID = "bge-m3-onnx-int8"
-EMBEDDING_VERSION = "bge-m3-onnx-1024-v1"
+EMBEDDING_MODEL_ID = "bge-m3-onnx-fp32"
+EMBEDDING_VERSION = "bge-m3-onnx-fp32-1024-v1"
 EMBEDDING_DIM = 1024
 LEGACY_EMBEDDING_MODEL_ID = "hash-ngram-256"
 LEGACY_EMBEDDING_VERSION = "hash-ngram-256-v1"
@@ -177,14 +177,23 @@ class OnnxEmbeddingEncoder:
             outputs = session.get_outputs()
             if not outputs:
                 raise EmbeddingModelUnavailable("ONNX 模型没有输出")
+            # BAAI/bge-m3 exports both token_embeddings (3-D) and
+            # sentence_embedding (2-D, already CLS-pooled + L2-normalized).
+            # Prefer the dedicated sentence output; fall back to a 2-D output,
+            # then to the first output (CLS pooling is applied in _encode_batch).
             preferred = next(
                 (
                     item
                     for item in outputs
-                    if any(key in item.name.lower() for key in ("embedding", "dense", "sentence"))
+                    if any(key in item.name.lower() for key in ("sentence", "dense", "pool"))
                 ),
-                outputs[0],
+                None,
             )
+            if preferred is None:
+                preferred = next(
+                    (item for item in outputs if len(item.shape or ()) == 2),
+                    outputs[0],
+                )
             self._tokenizer = tokenizer
             self._session = session
             self._input_names = names
@@ -306,8 +315,14 @@ def encode_text_sync(text: str) -> list[float]:
     return vectors[0]
 
 
-def get_embedding_runtime_status() -> EmbeddingRuntimeStatus:
-    """Cheap file validation plus the most recent load/inference error."""
+def get_embedding_runtime_status(probe: bool = False) -> EmbeddingRuntimeStatus:
+    """Validate model files; with ``probe`` also load ONNX/tokenizer and encode once.
+
+    Retrieval call sites keep the cheap check (``probe=False``) so they never
+    block on a model load. The settings status endpoint uses ``probe=True`` to
+    prove that the files can actually be loaded and used.
+    """
+    global _last_error
     config = OnnxEmbeddingConfig.from_app_config()
     error: str | None = None
     try:
@@ -322,6 +337,18 @@ def get_embedding_runtime_status() -> EmbeddingRuntimeStatus:
             )
     except Exception as exc:
         error = str(exc)
+    if error is None and probe:
+        try:
+            # Deliberately bypass the test-only override: status must prove the
+            # real files work, not a fake encoder.
+            vectors = _get_encoder().encode(["模型自检"])
+            if not vectors or len(vectors[0]) != EMBEDDING_DIM:
+                raise EmbeddingModelUnavailable("模型自检未返回 1024 维向量")
+            _last_error = None
+        except Exception as exc:
+            error = str(exc)
+            _last_error = error
+            logger.warning("embedding model probe failed: %s", error)
     if error is None and _last_error:
         error = _last_error
     return EmbeddingRuntimeStatus(

@@ -234,7 +234,7 @@ def _print_comparison(chapters: list[dict], queries: list[str]) -> None:
             reverse=True,
         )[:3]
         for score, record in old_scored:
-            print(f"    旧 #{record.chapter_id} {score:.4f} {record.text[:30]}")
+            print(f"    旧 #{record.chapter_id} {score:.4f} {record.text[:60]}")
         if new_vectors is None:
             print("    新：不可用（模型缺失）")
             continue
@@ -252,7 +252,7 @@ def _print_comparison(chapters: list[dict], queries: list[str]) -> None:
             reverse=True,
         )[:3]
         for score, chapter_id, piece in new_scored:
-            print(f"    新 #{chapter_id} {score:.4f} {piece[:30]}")
+            print(f"    新 #{chapter_id} {score:.4f} {piece[:60]}")
 
 
 def main() -> None:

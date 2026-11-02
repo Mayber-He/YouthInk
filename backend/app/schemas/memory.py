@@ -98,6 +98,9 @@ class RagSearchResponse(BaseModel):
     embedding_dimension: int = 0
     # Set when the ONNX encoder cannot be used. FTS hits are still returned.
     embedding_error: str | None = None
+    # Set when finalization/rebuild could not publish vectors for some chapters.
+    vector_index_pending_rebuild: bool = False
+    vector_index_error: str | None = None
     hits: list[RagChunkHit]
 
 
@@ -112,6 +115,9 @@ class FinalizeChapterResponse(BaseModel):
     # 记忆抽取结果：'ok' 全部成功 | 'partial' 部分条目被丢弃 | 'failed' 整批失败走兜底。
     # 前端据此显示“本章记忆抽取失败/部分失败”标记。
     extraction_status: str = "ok"
+    # 向量索引是旁路：编码/写入失败时章节仍定稿，这里标记 'pending_rebuild'。
+    vector_index_status: str = "ok"
+    vector_index_error: str | None = None
 
 
 # --- LLM Memory Extraction Structured Output Schemas ---

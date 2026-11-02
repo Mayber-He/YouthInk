@@ -83,7 +83,7 @@ class ConsistencyReviewService:
         ).fetchall()
         upstream_hash = text_sha256("|".join(f"{r['id']}:{r['content_hash'] or ''}:{r['continuity_review_required']}" for r in upstream_rows))
         checklist = self._build_checklist(chapter_id, ch.sort_order)
-        history_context = self._retrieve_historical_context(chapter_id, content)
+        history_context, history_warning = self._retrieve_historical_context(chapter_id, content)
         if history_context:
             checklist += "\n\n" + history_context
         prompt = self._build_prompt(ch, content, checklist)
@@ -166,6 +166,21 @@ class ConsistencyReviewService:
         for issue in issues:
             if issue.check_type == "prose":
                 issue.verdict = "suspicious"
+        if history_warning:
+            # Never silently pretend historical retrieval succeeded. This is a
+            # visible review item, not a transient log line.
+            issues.append(
+                ConsistencyIssue(
+                    check_type="continuity",
+                    ref_label="向量检索不可用",
+                    verdict="suspicious",
+                    description=history_warning,
+                    suggestion="请放入可用的 bge-m3 模型文件并重建向量索引后重跑审查。",
+                )
+            )
+            logger.warning(
+                "consistency review chapter_id=%s: %s", chapter_id, history_warning
+            )
         violation_count = sum(1 for i in issues if i.verdict == "violation")
         suspicious_count = len(issues) - violation_count
         if not issues:
@@ -298,12 +313,20 @@ class ConsistencyReviewService:
             or str(review_row["upstream_hash"]) != upstream_hash
         )
 
-    def _retrieve_historical_context(self, chapter_id: int, content: str) -> str:
-        """Return a few fresh finalized vector matches; retrieval is best-effort only."""
+    def _retrieve_historical_context(self, chapter_id: int, content: str) -> tuple[str, str]:
+        """Return (history context, warning); retrieval is best-effort but never silent."""
+        warning = ""
         try:
             vector_store = NovelVectorStore(self._novel_uid)
+            index_status = vector_store.read_index_status()
+            if index_status.get("pending_rebuild"):
+                warning = (
+                    "向量索引待重建："
+                    + str(index_status.get("reason") or "上次索引失败")
+                    + "；本次审查可能缺少历史向量证据。"
+                )
             if not vector_store.store_file.exists():
-                return ""
+                return "", warning
 
             ordered_rows = self._conn.execute(
                 """
@@ -333,7 +356,7 @@ class ConsistencyReviewService:
                     "story_time": str(row["story_time"] or ""),
                 }
             if not allowed_hashes:
-                return ""
+                return "", warning
 
             best_by_chunk: dict[str, tuple[VectorChunkRecord, float]] = {}
             query_chunks = split_text_chunks(content)
@@ -377,18 +400,19 @@ class ConsistencyReviewService:
                 if len(lines) >= _HISTORY_TOP_K:
                     break
             if not lines:
-                return ""
+                return "", warning
             return (
                 "【检查表F：向量检索到的定稿章节参考片段】\n"
                 + "\n".join(lines)
                 + "\n注意：检索片段是少量、不完整的参考证据；未检索到不代表历史中没有发生。"
-                "历史章节片段只提供作者层面的剧情参照；若片段来自待查章节之后，不能据此认定人物在待查时点已知晓后续信息。"
+                "历史章节片段只提供作者层面的剧情参照；若片段来自待查章节之后，不能据此认定人物在待查时点已知晓后续信息。",
+                warning,
             )
         except Exception as exc:
             # Search is supplemental; a missing or unhealthy index must not block review,
-            # but the reason is logged instead of silently pretending there were no hits.
+            # but the reason is surfaced as a review item instead of silently empty.
             logger.warning("consistency vector search unavailable: %s", exc)
-            return ""
+            return "", f"向量检索不可用：{exc}"
 
     def _build_checklist(self, chapter_id: int, sort_order: float) -> str:
         ch = self._outline_repo.get_chapter(chapter_id)

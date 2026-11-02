@@ -13,7 +13,12 @@ from app.db.manager import ensure_global_db_initialized, get_novel_db
 from app.db.repositories.memory_repo import MemoryRepository
 from app.db.vector_store import NovelVectorStore, VectorChunkRecord
 from app.main import create_app
-from app.services.embedding.encoder import EMBEDDING_DIM, EMBEDDING_VERSION, encode_text_sync
+from app.services.embedding.encoder import (
+    EMBEDDING_DIM,
+    EMBEDDING_MODEL_ID,
+    EMBEDDING_VERSION,
+    encode_text_sync,
+)
 
 
 @pytest.fixture()
@@ -315,7 +320,7 @@ def test_m5_hundred_chapter_long_book_stress_and_temporal_isolation(
                     character_ids=[heroine_id, hero_id],
                     location_id=None,
                     story_time=f"高二第{i}天",
-                    embedding_model_id="bge-m3-onnx-int8",
+                    embedding_model_id=EMBEDDING_MODEL_ID,
                     text=text,
                     vector=encode_text_sync(text),
                     embedding_dim=EMBEDDING_DIM,

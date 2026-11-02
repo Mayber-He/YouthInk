@@ -33,6 +33,22 @@ class AppConfig:
 
     @property
     def bge_m3_dir(self) -> Path:
+        """Directory of the usable bge-m3 ONNX export.
+
+        The repository receives two different exports:
+        - ``models/bge-m3/onnx``: the complete BAAI/bge-m3 export with
+          ``model.onnx``, ``model.onnx_data`` and ``tokenizer.json``;
+        - ``models/bge-m3-onnx``: an NPU-oriented export that may only contain
+          ``bge-m3.onnx``/``bge-m3.onnx.data`` and no tokenizer.
+        Prefer the complete directory, while keeping an explicit environment
+        override for deployments that use another layout.
+        """
+        override = os.environ.get("YOUTHINK_EMBEDDING_MODEL_DIR")
+        if override:
+            return Path(override).resolve()
+        complete = self.models_dir / "bge-m3" / "onnx"
+        if (complete / "model.onnx").exists() and (complete / "tokenizer.json").exists():
+            return complete
         return self.models_dir / "bge-m3-onnx"
 
     def novel_dir(self, novel_uid: str) -> Path:

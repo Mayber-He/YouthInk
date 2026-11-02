@@ -52,20 +52,31 @@ class _FakeTokenizer:
 
 
 class _FakeSession:
-    def __init__(self, output_name: str, raw_fn, input_names: list[str] | None = None):
-        self._output_name = output_name
+    def __init__(
+        self,
+        output_name: str | list[SimpleNamespace],
+        raw_fn,
+        input_names: list[str] | None = None,
+    ):
+        self._outputs = (
+            output_name
+            if isinstance(output_name, list)
+            else [SimpleNamespace(name=output_name, shape=[None, EMBEDDING_DIM])]
+        )
         self._raw_fn = raw_fn
         self._input_names = input_names or ["input_ids", "attention_mask"]
         self.run_calls = 0
+        self.requested_outputs: list[str] = []
 
     def get_inputs(self) -> list[SimpleNamespace]:
         return [SimpleNamespace(name=name) for name in self._input_names]
 
     def get_outputs(self) -> list[SimpleNamespace]:
-        return [SimpleNamespace(name=self._output_name)]
+        return self._outputs
 
     def run(self, output_names, feeds):  # noqa: ANN001
         self.run_calls += 1
+        self.requested_outputs.extend(output_names)
         return [self._raw_fn(feeds)]
 
 
@@ -78,10 +89,10 @@ def _materialize_model_files(tmp_path: Path) -> tuple[Path, Path]:
     return model, tokenizer
 
 
-def _install_fakes(monkeypatch, tmp_path, raw_fn, tokenizer=None):
+def _install_fakes(monkeypatch, tmp_path, raw_fn, tokenizer=None, outputs=None):
     model, tokenizer_path = _materialize_model_files(tmp_path)
     fake_tokenizer = tokenizer or _FakeTokenizer()
-    session = _FakeSession("last_hidden_state", raw_fn)
+    session = _FakeSession(outputs or "last_hidden_state", raw_fn)
 
     from tokenizers import Tokenizer
 
@@ -140,6 +151,29 @@ def test_two_dimensional_embeddings_are_normalized(monkeypatch, tmp_path):
     assert vector[0] == pytest.approx(0.6, abs=1e-6)
     assert vector[1] == pytest.approx(0.8, abs=1e-6)
     assert math.isclose(sum(v * v for v in vector), 1.0, rel_tol=1e-5)
+
+
+def test_prefers_sentence_embedding_over_token_embeddings(monkeypatch, tmp_path):
+    import numpy as np
+
+    def raw_fn(feeds):
+        batch = feeds["input_ids"].shape[0]
+        out = np.zeros((batch, EMBEDDING_DIM), dtype=np.float32)
+        out[:, 0] = 3.0
+        out[:, 1] = 4.0
+        return out
+
+    outputs = [
+        SimpleNamespace(name="token_embeddings", shape=[None, None, EMBEDDING_DIM]),
+        SimpleNamespace(name="sentence_embedding", shape=[None, EMBEDDING_DIM]),
+    ]
+    encoder, _tokenizer, session = _install_fakes(
+        monkeypatch, tmp_path, raw_fn, outputs=outputs
+    )
+    vector = encoder.encode(["江边黄昏"])[0]
+    assert session.requested_outputs == ["sentence_embedding"]
+    assert vector[0] == pytest.approx(0.6, abs=1e-6)
+    assert vector[1] == pytest.approx(0.8, abs=1e-6)
 
 
 def test_batch_encoding_respects_batch_size(monkeypatch, tmp_path):
@@ -311,8 +345,107 @@ def test_legacy_records_without_metadata_are_inferred_as_256d(tmp_path):
     ) == [1]
 
 
-def test_real_model_semantics_if_available():
+def _runtime_status(ready: bool, error: str | None = None):
+    from app.services.embedding.encoder import EmbeddingRuntimeStatus
+
+    return EmbeddingRuntimeStatus(
+        model_id=EMBEDDING_MODEL_ID,
+        dimension=EMBEDDING_DIM,
+        version=EMBEDDING_VERSION,
+        ready=ready,
+        error=error,
+        model_path="model.onnx",
+        tokenizer_path="tokenizer.json",
+        max_length=512,
+    )
+
+
+def test_model_status_requires_real_probe_and_never_writes_placeholders(
+    monkeypatch, tmp_path
+):
+    import asyncio
+    from types import SimpleNamespace
+
+    from app.services.embedding import manager
+
+    model_dir = tmp_path / "models" / "bge-m3-onnx"
+    monkeypatch.setattr(
+        manager, "get_config", lambda: SimpleNamespace(bge_m3_dir=model_dir)
+    )
+    calls = []
+
+    def probe(*, probe=False):
+        calls.append(probe)
+        return _runtime_status(False, "ONNX 模型不存在")
+
+    monkeypatch.setattr(manager, "get_embedding_runtime_status", probe)
+    status = manager.check_embedding_model_status()
+    assert calls == [True]
+    assert status.ready is False
+    assert "请手动放置模型文件到该目录" in status.message
+    assert "ONNX 模型不存在" in status.message
+
+    result = asyncio.run(manager.trigger_embedding_download())
+    assert result.ready is False
+    assert "自动下载未实现" in result.message
+    assert not model_dir.exists() or not list(model_dir.iterdir())
+
+
+def test_model_status_ready_only_after_probe_succeeds(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from app.services.embedding import manager
+
+    model_dir = tmp_path / "models"
+    monkeypatch.setattr(
+        manager, "get_config", lambda: SimpleNamespace(bge_m3_dir=model_dir)
+    )
+    monkeypatch.setattr(
+        manager, "get_embedding_runtime_status", lambda *, probe=False: _runtime_status(True)
+    )
+    status = manager.check_embedding_model_status()
+    assert status.ready is True
+    assert status.progress == 100.0
+    assert "已就绪" in status.message
+
+
+def test_index_status_marker_persists_reason_and_chapters(tmp_path):
+    from app.core.config import reset_config_for_testing
+    from app.db.vector_store import NovelVectorStore
+
+    reset_config_for_testing(tmp_path / "data")
+    store = NovelVectorStore("novel_index_status_test")
+    assert store.read_index_status()["pending_rebuild"] is False
+
+    store.mark_rebuild_pending("向量编码失败：模型缺失", [7, 8])
+    status = store.read_index_status()
+    assert status["pending_rebuild"] is True
+    assert status["reason"] == "向量编码失败：模型缺失"
+    assert status["chapters"] == [7, 8]
+
+    store.clear_chapter_pending(7)
+    assert store.read_index_status()["chapters"] == [8]
+    store.clear_chapter_pending(8)
+    assert store.read_index_status()["pending_rebuild"] is False
+    assert not store.index_status_file.exists()
+
+    store.index_status_file.write_text(
+        '{"pending_rebuild": true, "reason": "bad", "chapters": ["oops"]}',
+        encoding="utf-8",
+    )
+    corrupt = store.read_index_status()
+    assert corrupt["pending_rebuild"] is True
+    assert "章节字段损坏" in corrupt["reason"]
+
+
+def test_real_model_semantics_if_available(monkeypatch):
     """Runs only when the real bge-m3 files are installed."""
+    from app.core.config import reset_config_for_testing
+
+    # Earlier unit tests point YOUTHINK_DATA_DIR at tmp_path; restore the real
+    # backend/data directory so the model present on disk can be exercised.
+    monkeypatch.delenv("YOUTHINK_DATA_DIR", raising=False)
+    reset_config_for_testing()
     enc.set_encoder_override(None)
     enc.reset_encoder()
     status = enc.get_embedding_runtime_status()
@@ -336,3 +469,6 @@ def test_real_model_semantics_if_available():
 
     assert sim(0, 1) > sim(0, 3)
     assert sim(0, 1) > sim(1, 2)
+    assert sim(0, 1) == max(
+        sim(i, j) for i in range(len(texts)) for j in range(i + 1, len(texts))
+    )

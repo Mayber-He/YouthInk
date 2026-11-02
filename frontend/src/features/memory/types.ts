@@ -106,6 +106,8 @@ export interface RagSearchResponse {
   embedding_model_id: string;
   embedding_dimension: number;
   embedding_error: string | null;
+  vector_index_pending_rebuild: boolean;
+  vector_index_error: string | null;
   hits: RagChunkHit[];
 }
 
@@ -119,4 +121,7 @@ export interface FinalizeChapterResponse {
   pending_count: number;
   // 'ok' | 'partial' | 'failed'：记忆抽取结果，用于显示失败/部分失败标记
   extraction_status: string;
+  // 'ok' | 'pending_rebuild'：向量索引失败不影响章节/摘要/记忆定稿
+  vector_index_status: string;
+  vector_index_error: string | null;
 }

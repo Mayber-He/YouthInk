@@ -433,6 +433,15 @@ class ContextAssembler:
                     f"这些章节暂不参与向量检索（章节 ID：{stale_chapters[:8]}）。"
                     "全文检索 FTS 不受影响。"
                 )
+            read_status = getattr(self._vector_store, "read_index_status", None)
+            if callable(read_status):
+                index_status = read_status()
+                if index_status.get("pending_rebuild"):
+                    time_warnings.append(
+                        "向量索引待重建："
+                        + str(index_status.get("reason") or "上次索引失败")
+                        + "。全文检索 FTS 不受影响。"
+                    )
             try:
                 query_str = combined_beats.strip() or ch.title
                 q_vec = encode_text_sync(query_str)

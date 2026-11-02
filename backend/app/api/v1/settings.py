@@ -23,6 +23,7 @@ from app.schemas.settings import (
     TaskAssignmentUpdate,
     TrustModeSettings,
 )
+from app.services.embedding.encoder import EMBEDDING_MODEL_ID
 from app.services.embedding.manager import (
     check_embedding_model_status,
     trigger_embedding_download,
@@ -194,5 +195,5 @@ async def download_embedding_model(
     source: Literal["modelscope", "hf_mirror", "huggingface"] = "modelscope",
     repo: SettingsRepository = Depends(get_settings_repo),
 ) -> EmbeddingModelStatus:
-    repo.set_setting("embedding", {"model_id": "bge-m3-onnx-int8", "download_source": source})
+    repo.set_setting("embedding", {"model_id": EMBEDDING_MODEL_ID, "download_source": source})
     return await trigger_embedding_download(source)

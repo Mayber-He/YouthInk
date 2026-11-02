@@ -47,6 +47,7 @@ class HybridRagRetriever:
             return RagSearchResponse(query=query, hits=[])
 
         runtime = get_embedding_runtime_status()
+        index_status = self.vector_store.read_index_status()
         mismatch = self.vector_store.has_incompatible(
             EMBEDDING_DIM, EMBEDDING_VERSION, EMBEDDING_MODEL_ID
         )
@@ -131,5 +132,9 @@ class HybridRagRetriever:
             embedding_model_id=runtime.model_id,
             embedding_dimension=runtime.dimension,
             embedding_error=embedding_error,
+            vector_index_pending_rebuild=bool(index_status["pending_rebuild"]),
+            vector_index_error=(
+                str(index_status["reason"]) if index_status["pending_rebuild"] else None
+            ),
             hits=sorted_hits,
         )

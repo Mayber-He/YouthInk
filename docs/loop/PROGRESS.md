@@ -1068,3 +1068,206 @@ Embedding 模型：bge-m3-onnx-int8 1024 维 version=bge-m3-onnx-1024-v1 ready=F
 1. 需要把真实的 bge-m3 `model.onnx` 与 `tokenizer.json` 放入 `backend/data/models/bge-m3-onnx/`（当前两个文件都是 25 字节占位内容）。
 2. 重新运行 dry-run 与三条查询对比，确认新编码可用、向量为 1024 维且范数为 1。
 3. 用户确认后再执行 `--apply`；脚本会先备份并校验，失败自动回滚。
+
+---
+
+## 真实 bge-m3 ONNX 复验（2026-11-02）
+
+本轮目标：用真实 BAAI/bge-m3 ONNX 文件完成向量链路验证；不调用真实 LLM，不修改小说数据，不执行 `--apply`。
+
+### 1. 模型目录与修正结论
+
+- 实际完整可用的 BAAI 导出在 `backend/data/models/bge-m3/onnx/`：`model.onnx` 724,923 字节、`model.onnx_data` 2,266,820,608 字节、`tokenizer.json` 17,082,821 字节、`sentencepiece.bpe.model` 5,069,051 字节。
+- 用户提到的 `backend/data/models/bge-m3-onnx/` 实际是另一份 NPU 导出：`bge-m3.onnx` 316,132 字节、`bge-m3.onnx.data` 2,271,019,008 字节，**没有 `tokenizer.json`**，输入固定 `[1,512]`，输出为 `last_hidden_state` / `pooler_output`。它不是当前编码器可直接使用的布局。
+- 因此 `config.bge_m3_dir` 的解析顺序改为：`YOUTHINK_EMBEDDING_MODEL_DIR` 覆盖 → 完整目录 `models/bge-m3/onnx`（`model.onnx` 与 `tokenizer.json` 同时存在）→ 回退 `models/bge-m3-onnx`。回退目录若仍不完整，状态检查会明确报错，不再伪装就绪。
+- `models/bge-m3/onnx/manifest.json` 已写入实际元数据：`bge-m3-onnx-fp32`、`bge-m3-onnx-fp32-1024-v1`、1024 维、`fp32`、CLS 池化、L2 归一化。该文件随 `backend/data/` 被 git 忽略，只存在本地。
+- 旧索引仍是 13 条 256 维哈希向量（`hash-ngram-256-v1`）；维度、版本、模型 id 都与新编码不兼容，**旧索引必须重建**的判断仍然正确。
+
+### 2. 输出名与池化方式
+
+真实模型输入：
+
+- `input_ids`：`[batch_size, sequence_length]`
+- `attention_mask`：`[batch_size, sequence_length]`
+
+真实模型输出：
+
+- `token_embeddings`：`[batch_size, sequence_length, 1024]`
+- `sentence_embedding`：`[batch_size, 1024]`
+
+编码器优先选择名字含 `sentence` / `dense` / `pool` 的输出，因此实际取 `sentence_embedding`；没有该输出时选二维输出，最后才回退第一个输出并对三维结果做 CLS 池化。
+
+实测同一句：
+
+- `sentence_embedding` 范数 `0.9999999403953552`
+- `token_embeddings[:, 0, :]` 归一化后与 `sentence_embedding` 的余弦相似度 `1.0`
+- 最大绝对差 `7.45e-9`
+
+结论：`sentence_embedding` 就是 L2 归一化后的 CLS 向量，直接使用符合 BGE-M3 约定。
+
+### 3. 耗时与内存
+
+同进程 CPU 实测：
+
+- tokenizer 加载：531.7 ms
+- ONNX session 加载：2,187.4 ms
+- 单句推理（15 token，热态中位数）：40.84 ms
+- 8 条批量推理（含一条 400+ token 长段，padding 后）：5,887.22 ms，折合 735.9 ms/条
+- RSS：基线 48.4 MB → 加载后 1,533.3 MB（+1,484.9 MB）→ 编码后 1,695.0 MB（再 +161.8 MB）
+
+批量耗时主要受最长样本 padding 与长序列注意力影响；重建 650 字章节切片时不能按单句 40 ms 线性估算。
+
+真实模型语义测试（不再 skip）：
+
+- “江边黄昏 / 傍晚江水落日” 0.7160（四句所有配对中最高）
+- “江边黄昏 / 股市上涨” 0.3628
+- 测试断言 0.7160 高于 0.3628，且为全部配对最大值。
+
+### 4. dry-run 结果
+
+命令：
+
+```bash
+cd backend
+python scripts/reindex_embeddings.py \
+  --compare-query 江边黄昏照 --compare-query 开学 --compare-query 别当真
+```
+
+实际输出（未加 `--apply`）：
+
+```text
+Embedding 模型：bge-m3-onnx-fp32 1024 维 version=bge-m3-onnx-fp32-1024-v1 ready=True
+
+作品：novel_cf825d92d2d9
+  现有向量：13 条，维度 [256]
+  已定稿章节：2 章，切片 13 条
+    - 第 #1 章 (sort=1)：6 片
+    - 第 #2 章 (sort=2)：7 片
+```
+
+未写入任何文件；`vectors/chunks.json`、章节正文、记忆表均未变化。
+
+### 5. 新旧编码 top3 对比（片段前 60 字 + 相似度）
+
+对比范围：`novel_cf825d92d2d9` 已定稿的第 1、2 章，共 13 片；旧侧只统计现有 256 维哈希记录。
+
+```text
+查询「江边黄昏照」
+  旧 #2 0.0961 起来。
+
+“嗯，在迎新点。”她的声音压得很低，像怕吵着排队的人，“上午结束。”
+
+电话那头说了句什么。她顿了一下，眉心那
+  旧 #1 0.0412 碰上。这个念头转了一圈，没找到落处，也就淡了。
+
+对话框还是空的。他敲了半句问她下周三有没有空，看了一眼又删掉。不是不能
+  旧 #1 0.0341 八月末的夜晚还是闷，江澈把凉席往床边拽了拽，后背贴上竹面，手机举在脸前。屏幕的光把天花板映出一小块青白。风扇在头顶转，风
+  新 #1 0.5955 八月末的夜晚还是闷，江澈把凉席往床边拽了拽，后背贴上竹面，手机举在脸前。屏幕的光把天花板映出一小块青白。风扇在头顶转，风
+  新 #1 0.5147 江澈拿起来打了一个字：“嗯。”
+
+想了想，又加了一句：“发消息就回。”
+
+屏幕还亮着，对话框停在他最后发出的那句下面，灰
+  新 #1 0.4918 挺好啊。
+
+又补一句：等四十分钟，也就你能等。
+
+她那边静了不到两秒——然后刷、刷、刷地连发了七八条：
+
+你懂！
+
+真的
+
+查询「开学」
+  旧 #1 0.1690 几秒。这回慢吞吞地回来一句：“开学啊。”
+
+就三个字，没有感叹号，也没有语气词。
+
+江澈看着这仨字，不知道该接什么。风扇
+  旧 #1 0.1354 挺好啊。
+
+又补一句：等四十分钟，也就你能等。
+
+她那边静了不到两秒——然后刷、刷、刷地连发了七八条：
+
+你懂！
+
+真的
+  旧 #1 0.0843 江澈拿起来打了一个字：“嗯。”
+
+想了想，又加了一句：“发消息就回。”
+
+屏幕还亮着，对话框停在他最后发出的那句下面，灰
+  新 #1 0.6169 几秒。这回慢吞吞地回来一句：“开学啊。”
+
+就三个字，没有感叹号，也没有语气词。
+
+江澈看着这仨字，不知道该接什么。风扇
+  新 #2 0.5587 行李箱的轮子在人字纹地砖上碾出连续的咯咯声，震得掌心发麻。江澈在校门口停下来，把录取通知书从塑料袋里抽出来又看了一遍——
+  新 #2 0.5429 从袋中一并抽出来，又检查了一遍，确认没落下东西。桌后那支笔还在飞快地走，表格一叠叠过手，偶尔传来一声“下一位”——跟之前
+
+查询「别当真」
+  旧 #2 0.0593 行李箱的轮子在人字纹地砖上碾出连续的咯咯声，震得掌心发麻。江澈在校门口停下来，把录取通知书从塑料袋里抽出来又看了一遍——
+  旧 #1 0.0471 合不上，我习惯了。”他顿了顿，又补一句，“你要哪天真三天不吭声，我才得问问你是不是出什么事了。”
+
+对面沉默了。
+
+然后
+  旧 #2 0.0241 十个字。新生接过表退开时，肩膀明显松了一下。
+
+旁边另一个志愿者趁空档凑过来小声跟她说话，她侧耳听完，只点了下头，连“行
+  新 #1 0.4973 合不上，我习惯了。”他顿了顿，又补一句，“你要哪天真三天不吭声，我才得问问你是不是出什么事了。”
+
+对面沉默了。
+
+然后
+  新 #1 0.4458 挺好啊。
+
+又补一句：等四十分钟，也就你能等。
+
+她那边静了不到两秒——然后刷、刷、刷地连发了七八条：
+
+你懂！
+
+真的
+  新 #2 0.4442 从袋中一并抽出来，又检查了一遍，确认没落下东西。桌后那支笔还在飞快地走，表格一叠叠过手，偶尔传来一声“下一位”——跟之前
+```
+
+观察：新编码分数整体明显高于旧哈希（0.44–0.62 vs 0.02–0.17），且“开学”能同时召回第 1 章对话和第 2 章校门口报到，语义排序更合理。旧哈希的“江边黄昏照”并没有召回真正含江边/黄昏描写的第一章片段，说明旧索引不可继续使用。
+
+**本轮未执行 `--apply`。** 待用户确认后再重建。
+
+### 6. 模型不可用/索引失败时的定稿行为
+
+代码与测试保证：
+
+- 章节定稿以正文、摘要、记忆为主链路。`_prepare_chapter_chunks` 的编码异常、`upsert_chapter_chunks` 的写入异常都在定稿事务内外被捕获，不向上抛出。
+- 章节仍写入 `status='final'`、更新 `content_hash`；摘要仍 upsert；事实/状态/认知/关系/伏笔/约束检查照常落库；`extraction_status` 保持 `ok`。
+- 失败时写 `vectors/index_status.json`：`pending_rebuild=true`、原因（如“向量编码失败：模型文件缺失”“向量索引写入失败：…”）、受影响章节、更新时间。写入失败本身也不会反过来导致定稿失败。
+- 定稿响应返回 `vector_index_status="pending_rebuild"`、`vector_index_error=原因`，且 `chunks_indexed=0`（没有实际发布成功的切片）。
+- 成功发布时清理本章的 pending 标记；全书重建成功时清理整个标记文件。
+- 检索接口返回 `vector_index_pending_rebuild` / `vector_index_error`；写作上下文与前端混合检索均显示“向量索引待重建”，FTS 不受影响。
+
+测试覆盖：
+
+- `test_index_failure_still_finalizes_text_and_marks_pending`：分别注入编码失败与向量写入失败，断言定稿成功、摘要为“摘要2”、六类记忆均为新批次、章节 final、pending 标记和原因正确、`chunks_indexed=0`。
+- `test_missing_embedding_model_degrades_to_pending_not_failure`：首次定稿即遇 `EmbeddingModelUnavailable`，仍成功写出摘要和兜底记忆，并标记待重建。
+- `test_vector_index_unavailable_is_visible_in_review` / `test_vector_search_exception_is_visible_not_silent`：一致性审查在 pending 或检索异常时追加一条 `continuity` / `suspicious` 的“向量检索不可用”审查项，不再静默返回空。
+- `test_model_status_requires_real_probe_and_never_writes_placeholders`：状态检查必须走真实加载+编码 probe；未就绪时提示“请手动放置模型文件到该目录”，下载入口不创建任何占位文件。
+
+设置页调整：后端下载接口只做真实校验并返回手动放置指引，不再写占位文件或标记 ready；前端按钮从三个“下载源”改为“重新检查模型”，并展示真实错误。
+
+### 7. 测试与检查结果
+
+- `python -m pytest tests/test_embedding_onnx.py -q`：**15 passed**，真实模型语义用例已实际运行，不再 skip。
+- `python -m pytest tests/test_embedding_onnx.py tests/test_refinalization_transaction.py tests/test_consistency_review.py -q`：**46 passed, 1 skipped**（当时真实模型用例受前序配置污染 skip，随后已修正为实际运行并通过）。
+- 全量 `python -m pytest tests -q`：**473 passed, 5 failed**。5 项失败与 HEAD 基线逐项相同：M2 时序/滚动 3 项、M3 流式 1 项、M5 长书 1 项，均与本轮改动无关，无新增失败。
+- `cd frontend && npm run typecheck`：通过。
+- 未调用真实 LLM；未执行 `--apply`；未修改小说正文、记忆或现有向量文件。
+
+### 8. 本轮改动文件
+
+- 后端：`app/core/config.py`、`app/services/embedding/encoder.py`、`app/services/embedding/manager.py`、`app/db/vector_store.py`、`app/services/memory/finalizer.py`、`app/services/memory/consistency.py`、`app/services/context/assembler.py`、`app/services/rag/retriever.py`、`app/schemas/memory.py`、`app/api/v1/settings.py`、`app/db/init_schema.py`、`scripts/reindex_embeddings.py`
+- 前端：`src/features/app-settings/TaskAndEmbeddingTab.tsx`、`src/features/memory/types.ts`、`src/features/memory/PendingQueueSection.tsx`
+- 测试：`tests/test_embedding_onnx.py`、`tests/test_refinalization_transaction.py`、`tests/test_consistency_review.py`、`tests/test_m4_m5_memory_and_stress.py`
+- 文档：`docs/loop/embedding_survey.md`（新增第 9 节）、`docs/loop/PROGRESS.md`（本节）

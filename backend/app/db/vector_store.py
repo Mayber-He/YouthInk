@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import datetime
 import json
 from pathlib import Path
 
 from app.core.config import get_config
 from app.db.manager import validate_novel_uid
 from app.services.embedding.encoder import (
+    EMBEDDING_MODEL_ID,
     LEGACY_EMBEDDING_DIM,
+    LEGACY_EMBEDDING_MODEL_ID,
     LEGACY_EMBEDDING_VERSION,
     cosine_similarity,
 )
@@ -44,6 +47,9 @@ class NovelVectorStore:
         self.vectors_dir: Path = cfg.novel_vectors_dir(novel_uid)
         self.vectors_dir.mkdir(parents=True, exist_ok=True)
         self.store_file: Path = self.vectors_dir / "chunks.json"
+        # Written when embedding/indexing fails so finalization can still
+        # succeed while the UI reports "待重建" and the reason.
+        self.index_status_file: Path = self.vectors_dir / "index_status.json"
 
     def _load_all(self) -> list[VectorChunkRecord]:
         if not self.store_file.exists():
@@ -60,6 +66,13 @@ class NovelVectorStore:
                     version = str(item.get("embedding_version") or "")
                     if not version and dim == LEGACY_EMBEDDING_DIM:
                         version = LEGACY_EMBEDDING_VERSION
+                    model_id = str(item.get("embedding_model_id") or "")
+                    if not model_id:
+                        model_id = (
+                            LEGACY_EMBEDDING_MODEL_ID
+                            if dim == LEGACY_EMBEDDING_DIM
+                            else EMBEDDING_MODEL_ID
+                        )
                     records.append(
                         VectorChunkRecord(
                             chunk_id=str(item.get("chunk_id", "")),
@@ -74,7 +87,7 @@ class NovelVectorStore:
                             else None,
                             story_time=str(item.get("story_time", "")),
                             embedding_model_id=str(
-                                item.get("embedding_model_id", "bge-m3-onnx-int8")
+                                item.get("embedding_model_id", EMBEDDING_MODEL_ID)
                             ),
                             text=str(item.get("text", "")),
                             vector=vector,
@@ -128,6 +141,79 @@ class NovelVectorStore:
         """Remove all stored vector chunks (used before full re-indexing)."""
         if self.store_file.exists():
             self.store_file.unlink()
+
+    def read_index_status(self) -> dict[str, object]:
+        """Return the pending-rebuild marker written after an indexing failure."""
+        empty: dict[str, object] = {
+            "pending_rebuild": False,
+            "reason": "",
+            "chapters": [],
+            "updated_at": "",
+        }
+        if not self.index_status_file.exists():
+            return empty
+        try:
+            raw = json.loads(self.index_status_file.read_text(encoding="utf-8"))
+        except Exception:
+            return {**empty, "pending_rebuild": True, "reason": "索引状态文件损坏"}
+        if not isinstance(raw, dict):
+            return {**empty, "pending_rebuild": True, "reason": "索引状态文件格式错误"}
+        chapters = raw.get("chapters") or []
+        try:
+            chapter_ids = sorted({int(c) for c in chapters})
+        except Exception:
+            return {**empty, "pending_rebuild": True, "reason": "索引状态文件章节字段损坏"}
+        return {
+            "pending_rebuild": bool(raw.get("pending_rebuild")),
+            "reason": str(raw.get("reason") or ""),
+            "chapters": chapter_ids,
+            "updated_at": str(raw.get("updated_at") or ""),
+        }
+
+    def mark_rebuild_pending(
+        self, reason: str, chapter_ids: list[int] | None = None
+    ) -> None:
+        """Persist a pending marker; never raises into the finalization path."""
+        status = self.read_index_status()
+        chapters = set(status["chapters"])  # type: ignore[arg-type]
+        chapters.update(int(c) for c in (chapter_ids or []))
+        payload = {
+            "pending_rebuild": True,
+            "reason": reason,
+            "chapters": sorted(chapters),
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        tmp = self.index_status_file.with_suffix(".tmp")
+        try:
+            tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(self.index_status_file)
+        except Exception:
+            # The marker is diagnostic; failure to write it must not fail finalize.
+            if tmp.exists():
+                tmp.unlink(missing_ok=True)
+
+    def clear_chapter_pending(self, chapter_id: int) -> None:
+        status = self.read_index_status()
+        if not status["pending_rebuild"]:
+            return
+        chapters = [c for c in status["chapters"] if int(c) != int(chapter_id)]  # type: ignore[union-attr]
+        try:
+            if chapters:
+                payload = {
+                    **status,
+                    "chapters": chapters,
+                    "updated_at": datetime.now().isoformat(timespec="seconds"),
+                }
+                tmp = self.index_status_file.with_suffix(".tmp")
+                tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+                tmp.replace(self.index_status_file)
+            else:
+                self.index_status_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def clear_rebuild_pending(self) -> None:
+        self.index_status_file.unlink(missing_ok=True)
 
     @staticmethod
     def is_compatible(

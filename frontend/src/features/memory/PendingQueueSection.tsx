@@ -311,6 +311,12 @@ export const PendingQueueSection: React.FC<PendingQueueSectionProps> = ({
                 不兼容章节暂不参与向量检索。请点击右上角「一键重建全书索引」。
               </div>
             )}
+            {ragMut.data.vector_index_pending_rebuild && (
+              <div role="alert" className="rounded-lg bg-amber-50 p-2 text-xs text-amber-800">
+                向量索引待重建：{ragMut.data.vector_index_error || "上次索引失败"}；
+                以下结果可能缺少部分章节的向量召回，全文检索 FTS 不受影响。
+              </div>
+            )}
             {ragMut.data.hits.map((hit) => (
               <div
                 key={hit.chunk_id}

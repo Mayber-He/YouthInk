@@ -1,5 +1,5 @@
 import React from "react";
-import { Cpu, Download, ShieldCheck } from "lucide-react";
+import { Cpu, RefreshCw, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import {
@@ -167,22 +167,15 @@ export const TaskAndEmbeddingTab: React.FC = () => {
               <p className="mt-0.5 text-xs text-slate-400">{embStatus.message}</p>
             </div>
             <div className="flex items-center gap-2">
-              {(["modelscope", "hf_mirror", "huggingface"] as const).map((src) => (
-                <Button
-                  key={src}
-                  variant={embStatus.download_source === src ? "primary" : "outline"}
-                  size="sm"
-                  disabled={downloadEmbMut.isPending}
-                  onClick={() => downloadEmbMut.mutate(src)}
-                >
-                  <Download className="h-3.5 w-3.5" />
-                  {src === "modelscope"
-                    ? "ModelScope 源"
-                    : src === "hf_mirror"
-                    ? "HF 镜像源"
-                    : "HuggingFace"}
-                </Button>
-              ))}
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={downloadEmbMut.isPending}
+                onClick={() => downloadEmbMut.mutate(embStatus.download_source)}
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                重新检查模型
+              </Button>
             </div>
           </div>
         </div>

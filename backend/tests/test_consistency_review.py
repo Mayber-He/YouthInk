@@ -262,6 +262,56 @@ def test_consistency_review_clean(
     assert "未发现问题" in data["summary"]
 
 
+def test_vector_index_unavailable_is_visible_in_review(
+    client: TestClient, novel_uid: str, monkeypatch: pytest.MonkeyPatch, character_id: int
+) -> None:
+    _setup_llm_profile(client)
+    ch = _make_chapter_with_content(
+        client, novel_uid, character_id, "林夏拿着新生手册在校园里找宿舍。"
+    )
+    _mock_review_response(monkeypatch, [])
+    monkeypatch.setattr(
+        "app.services.memory.consistency.NovelVectorStore.read_index_status",
+        lambda self: {
+            "pending_rebuild": True,
+            "reason": "向量编码失败：模型文件缺失",
+            "chapters": [1],
+        },
+    )
+
+    r = client.post(f"/api/v1/novels/{novel_uid}/chapters/{ch}/consistency-review")
+    assert r.status_code == 201
+    data = r.json()
+    assert data["issue_count"] == 1
+    assert data["violation_count"] == 0
+    issue = data["issues"][0]
+    assert issue["check_type"] == "continuity"
+    assert issue["ref_label"] == "向量检索不可用"
+    assert "模型文件缺失" in issue["description"]
+    assert issue["verdict"] == "suspicious"
+
+
+def test_vector_search_exception_is_visible_not_silent(
+    client: TestClient, novel_uid: str, monkeypatch: pytest.MonkeyPatch, character_id: int
+) -> None:
+    _setup_llm_profile(client)
+    ch = _make_chapter_with_content(
+        client, novel_uid, character_id, "林夏抱着书从图书馆出来。"
+    )
+    _mock_review_response(monkeypatch, [])
+    def fail(self):
+        raise OSError("index unreadable")
+    monkeypatch.setattr(
+        "app.services.memory.consistency.NovelVectorStore.read_index_status", fail
+    )
+
+    r = client.post(f"/api/v1/novels/{novel_uid}/chapters/{ch}/consistency-review")
+    assert r.status_code == 201
+    issue = r.json()["issues"][0]
+    assert issue["ref_label"] == "向量检索不可用"
+    assert "index unreadable" in issue["description"]
+
+
 def test_consistency_review_empty_content_rejected(
     client: TestClient, novel_uid: str, character_id: int
 ) -> None:

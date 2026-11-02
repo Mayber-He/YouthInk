@@ -26,6 +26,7 @@ from app.services.embedding.encoder import (
     EMBEDDING_DIM,
     EMBEDDING_MODEL_ID,
     EMBEDDING_VERSION,
+    EmbeddingModelUnavailable,
     encode_texts_sync,
 )
 from app.services.llm.client import complete_chat
@@ -142,14 +143,30 @@ class ChapterFinalizerService:
         extraction, extraction_status = await self._extract_chapter_memories(
             chapter_id, ch.title, content
         )
-        records = await self._prepare_chapter_chunks(
-            chapter_id=chapter_id,
-            chapter_sort_order=ch.sort_order,
-            story_time=ch.story_time or "",
-            content=raw_content,
-            source_hash=source_hash,
-        )
-        chunks_count = len(records)
+        vector_error: str | None = None
+        try:
+            records = await self._prepare_chapter_chunks(
+                chapter_id=chapter_id,
+                chapter_sort_order=ch.sort_order,
+                story_time=ch.story_time or "",
+                content=raw_content,
+                source_hash=source_hash,
+            )
+        except Exception as exc:
+            # Finalization is a text/memory operation first. A missing model or
+            # broken encoder must not block the chapter, summary, or memories.
+            records = []
+            vector_error = f"向量编码失败：{exc}"
+            if isinstance(exc, EmbeddingModelUnavailable):
+                logger.warning(
+                    "finalize chapter %s: embedding unavailable, vector index marked pending: %s",
+                    chapter_id, exc,
+                )
+            else:
+                logger.warning(
+                    "finalize chapter %s: vector encoding failed, vector index marked pending",
+                    chapter_id, exc_info=True,
+                )
         with self.conn:
             self.conn.execute("BEGIN IMMEDIATE")
             current_versions = self.writing_repo.list_versions(chapter_id)
@@ -179,18 +196,38 @@ class ChapterFinalizerService:
                 "continuity_dirty_from_chapter_id = NULL, updated_at = datetime('now') WHERE id = ?",
                 (source_hash, chapter_id),
             )
-            # No awaits here: stale requests cannot replace newer vectors, and a
-            # vector publication failure rolls back the pending SQLite changes.
-            self.vector_store.upsert_chapter_chunks(chapter_id, records)
+            # No awaits here: stale requests cannot replace newer vectors.
+            # A vector publication failure is recorded as pending, not allowed
+            # to roll back the chapter/summary/memory writes.
+            if vector_error is None:
+                try:
+                    self.vector_store.upsert_chapter_chunks(chapter_id, records)
+                except Exception as exc:
+                    vector_error = f"向量索引写入失败：{exc}"
+                    logger.warning(
+                        "finalize chapter %s: vector publish failed, index marked pending",
+                        chapter_id, exc_info=True,
+                    )
+            if vector_error:
+                self.vector_store.mark_rebuild_pending(vector_error, [chapter_id])
+            else:
+                self.vector_store.clear_chapter_pending(chapter_id)
+        index_status = self.vector_store.read_index_status()
         return FinalizeChapterResponse(
             chapter_id=chapter_id,
             status="final",
             backup_filename=backup_info.filename,
-            chunks_indexed=chunks_count,
+            chunks_indexed=0 if vector_error else len(records),
             chapter_summary=summary_text,
             auto_confirmed_count=auto_confirmed,
             pending_count=pending_cnt,
             extraction_status=extraction_status,
+            vector_index_status=(
+                "pending_rebuild" if index_status["pending_rebuild"] else "ok"
+            ),
+            vector_index_error=(
+                str(index_status["reason"]) if index_status["pending_rebuild"] else None
+            ),
         )
 
     def _current_embedding_model_id(self) -> str:
@@ -210,19 +247,25 @@ class ChapterFinalizerService:
         ).fetchall()
         all_records: list[VectorChunkRecord] = []
         fts_versions: list[tuple[int, str]] = []
-        for r in rows:
-            cid = int(r["id"])
-            versions = self.writing_repo.list_versions(cid)
-            ver = versions[0] if versions else None
-            if ver and ver.content.strip():
-                records = await self._prepare_chapter_chunks(
-                    cid, float(r["sort_order"]), str(r["story_time"] or ""), ver.content, emb_model, text_sha256(ver.content)
-                )
-                all_records.extend(records)
-                fts_versions.append((ver.id, ver.content))
-        self.vector_store.replace_all_chunks(all_records)
-        for version_id, content in fts_versions:
-            self.memory_repo.index_chapter_version_fts(version_id, content)
+        chapter_ids = [int(r["id"]) for r in rows]
+        try:
+            for r in rows:
+                cid = int(r["id"])
+                versions = self.writing_repo.list_versions(cid)
+                ver = versions[0] if versions else None
+                if ver and ver.content.strip():
+                    records = await self._prepare_chapter_chunks(
+                        cid, float(r["sort_order"]), str(r["story_time"] or ""), ver.content, emb_model, text_sha256(ver.content)
+                    )
+                    all_records.extend(records)
+                    fts_versions.append((ver.id, ver.content))
+            self.vector_store.replace_all_chunks(all_records)
+            for version_id, content in fts_versions:
+                self.memory_repo.index_chapter_version_fts(version_id, content)
+        except Exception as exc:
+            self.vector_store.mark_rebuild_pending(f"索引重建失败：{exc}", chapter_ids)
+            raise
+        self.vector_store.clear_rebuild_pending()
         return {"chapters_reindexed": len(rows), "chunks_indexed": len(all_records)}
 
     async def _prepare_chapter_chunks(

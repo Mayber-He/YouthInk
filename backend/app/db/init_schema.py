@@ -7,6 +7,7 @@ import sqlite3
 
 from app.builtin.style_presets import BUILTIN_STYLE_TEMPLATES
 from app.core.text_hash import text_sha256
+from app.services.embedding.encoder import EMBEDDING_MODEL_ID
 
 GLOBAL_DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS llm_profiles (
@@ -431,7 +432,7 @@ DEFAULT_APP_SETTINGS: dict[str, object] = {
         "auto_confirm_foreshadow_plant_recover": False,
     },
     "embedding": {
-        "model_id": "bge-m3-onnx-int8",
+        "model_id": EMBEDDING_MODEL_ID,
         "download_source": "modelscope",
     },
 }
