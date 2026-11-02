@@ -208,7 +208,7 @@ def test_repetition_check_warns_about_missing_inner_judgment(client) -> None:
     scene_id = _scene_with_beat(client, uid, ch, BEAT)
     resp = client.post(
         f"/api/v1/novels/{uid}/chapters/{ch}/scenes/{scene_id}/repetition-check",
-        json={"scene_text": FINAL, "chapter_so_far": ""},
+        json={"scene_text": FINAL, "chapter_so_far": "", "auto_rewrite": True},
     )
     assert resp.status_code == 200, resp.text
     data = resp.json()
@@ -241,7 +241,7 @@ def test_supplement_switch_rewrites_once_and_adopts_result(
     monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
     resp = client.post(
         f"/api/v1/novels/{uid}/chapters/{ch}/scenes/{scene_id}/repetition-check",
-        json={"scene_text": FINAL, "chapter_so_far": ""},
+        json={"scene_text": FINAL, "chapter_so_far": "", "auto_rewrite": True},
     )
     assert resp.status_code == 200, resp.text
     data = resp.json()
