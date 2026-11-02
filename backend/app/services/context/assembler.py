@@ -17,6 +17,7 @@ from app.schemas.writing import ContextBlockItem, ContextPreviewResponse
 from app.services.embedding.encoder import encode_text_sync
 from app.services.llm.client import estimate_tokens
 from app.services.context.memory_selection import select_memory_rows
+from app.services.context.prev_tail import prev_tail_max_chars, prev_tail_strategy, select_previous_tail
 from app.services.story_time import time_anchor
 from app.services.rag.dedup import filter_history_hits
 
@@ -308,14 +309,14 @@ class ContextAssembler:
                 f"【上一章《{prev_row['title']}》梗概（事实与剧情连续性依据）】{prev_row['synopsis']}"
             )
         prev_full = str(prev_row["latest_content"] or "").strip() if prev_is_fresh else ""
+        # 只喂上一章结尾片段用于衔接语气与承接悬念；完整事实依据由上一章梗概提供。
+        # 不喂全文，避免模型模仿上一章句式造成文风遗传放大，也控制上下文体量。
+        # T16: 长度与取舍策略可配置（默认仍为末 1500 字，行为不变）。
+        tail_chars = prev_tail_max_chars()
         if prev_full:
-            # 只喂上一章结尾片段用于衔接语气与承接悬念；完整事实依据由上一章梗概提供。
-            # 不喂全文，避免模型模仿上一章句式造成文风遗传放大，也控制上下文体量。
-            tail_chars = 1500
-            if len(prev_full) > tail_chars:
-                prev_tail = "……\n" + prev_full[-tail_chars:]
-            else:
-                prev_tail = prev_full
+            prev_tail = select_previous_tail(
+                prev_full, max_chars=tail_chars, strategy=prev_tail_strategy()
+            )
             sum_lines.append(
                 f"【上一章《{prev_row['title']}》结尾片段（仅用于衔接语气与承接悬念，完整事实以上方梗概为准）】\n{prev_tail}"
             )
@@ -427,7 +428,7 @@ class ContextAssembler:
             )
             vec_hits = filter_history_hits(
                 vec_hits, excluded_chapter_ids=excluded_ids,
-                history_texts=[prev_full[-1500:], existing_content],
+                history_texts=[prev_full[-tail_chars:], existing_content],
             )
             rag_lines = [
                 f"• [历史章节 #{rec.chapter_id} 片段] {rec.text[:260]}"
