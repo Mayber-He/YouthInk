@@ -2,7 +2,7 @@
 
 Pure functions (no DB / no LLM) so they are unit-testable with fixed samples.
 
-Five independent signals, all configurable via :class:`RepetitionConfig`:
+Six independent signals, all configurable via :class:`RepetitionConfig`:
 
 (a) **Reused spans** – maximal runs of text (>= ``ngram`` characters, default 8) that also
     appear in the previous chapter or in what is already written in this chapter. Dialogue
@@ -20,6 +20,10 @@ Five independent signals, all configurable via :class:`RepetitionConfig`:
 (e) **Scene seam (T18)** – the new scene's first ~200 characters are compared with the previous
     scene's last ~300 characters; any shared run of >=6 characters means the scene restarted by
     re-describing the old ending instead of continuing after it.
+(f) **Appearance tags (T19)** – 2–8-character descriptive phrases taken from present characters'
+    appearance cards (punctuation-split clauses and word-level sub-phrases) whose total count in
+    chapter-so-far + new scene reaches ``appearance_max_count``. The rewrite keeps the earliest
+    occurrence and rewrites/deletes the rest.
 
 Calibration note (real chapters from this project, see docs/loop/PROGRESS.md): whole-text
 8-gram *coverage* barely separates a repeating chapter pair (2.9%) from clean ones (0–1.8%),
@@ -109,12 +113,16 @@ class RepetitionConfig:
     seam_head_chars: int = 200
     seam_tail_chars: int = 300
     seam_ngram: int = 6
+    # (f) T19: appearance phrases from present characters' cards that recur in this chapter.
+    appearance_check: bool = True
+    appearance_max_count: int = 3
 
     @classmethod
     def from_env(cls) -> "RepetitionConfig":
         """Env overrides (all optional): YOUTHINK_REPEAT_ENABLED / _AUTO_REWRITE / _NGRAM /
         _MIN_SPAN / _MAX_SPANS / _MAX_COVERAGE / _ACTION_MAX / _FORBIDDEN_OVERLAP / _ACTION_WORDS
-        / _SEAM_CHECK / _SEAM_HEAD / _SEAM_TAIL / _SEAM_NGRAM."""
+        / _SEAM_CHECK / _SEAM_HEAD / _SEAM_TAIL / _SEAM_NGRAM /
+        _APPEARANCE_CHECK / _APPEARANCE_MAX."""
         cfg = cls()
 
         def _flag(name: str, default: bool) -> bool:
@@ -140,6 +148,10 @@ class RepetitionConfig:
         cfg.seam_head_chars = max(40, _num("YOUTHINK_REPEAT_SEAM_HEAD", cfg.seam_head_chars, int))
         cfg.seam_tail_chars = max(40, _num("YOUTHINK_REPEAT_SEAM_TAIL", cfg.seam_tail_chars, int))
         cfg.seam_ngram = max(4, _num("YOUTHINK_REPEAT_SEAM_NGRAM", cfg.seam_ngram, int))
+        cfg.appearance_check = _flag("YOUTHINK_REPEAT_APPEARANCE_CHECK", cfg.appearance_check)
+        cfg.appearance_max_count = max(2, _num(
+            "YOUTHINK_REPEAT_APPEARANCE_MAX", cfg.appearance_max_count, int
+        ))
         words = os.environ.get("YOUTHINK_REPEAT_ACTION_WORDS")
         if words and words.strip():
             cfg.action_phrases = tuple(w.strip() for w in words.split(",") if w.strip())
@@ -172,6 +184,13 @@ class ReusedDialogue:
 
 
 @dataclass
+class AppearanceTagHit:
+    phrase: str
+    count: int         # total in chapter-so-far + scene
+    scene_count: int   # occurrences in the new scene only
+
+
+@dataclass
 class RecallMiss:
     text: str          # the claimed quotation / expression as written in the new scene
     kind: str          # "quoted" | "expression"
@@ -197,6 +216,8 @@ class RepetitionReport:
     recall_misses: list[RecallMiss] = field(default_factory=list)
     # T18: wording shared between this scene's opening and the previous scene's ending.
     seam_spans: list[RepeatedSpan] = field(default_factory=list)
+    # T19: appearance-card phrases overused in chapter-so-far + this scene.
+    appearance_hits: list[AppearanceTagHit] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -218,6 +239,11 @@ class RepetitionReport:
             )
         for ah in self.action_hits[:max_items]:
             lines.append(f"- 固定动作/意象「{ah.phrase}」在本章已出现 {ah.count} 次，请换一种写法或省略")
+        for ah in self.appearance_hits[:max_items]:
+            lines.append(
+                f"- 外貌标签「{ah.phrase}」在本章（含本场）已出现 {ah.count} 次（本场 {ah.scene_count} 次）；"
+                "保留最早一处，其余在本场改写或删除"
+            )
         for fh in self.forbidden_hits[:max_items]:
             lines.append(f"- 本场景禁止出现的素材「{fh.item}」被写入了，请删除或留给后续场景")
         for rm in self.recall_misses[:max_items]:
@@ -374,6 +400,100 @@ def count_action_phrases(
         if not p or p not in scene_text:
             continue
         hits.append(ActionPhraseHit(phrase=p, count=chapter_so_far.count(p) + scene_text.count(p)))
+    return hits
+
+
+# T19: appearance cards are free text; keep only short phrases that name a body/clothing/
+# posture feature. This deliberately favours recall and may still flag a generic noun.
+_APPEARANCE_HINTS: tuple[str, ...] = (
+    "眉", "眼", "脸", "面", "鼻", "嘴", "唇", "耳", "发", "皮肤",
+    "五官", "手", "肩", "背", "腰", "腿", "脚", "身", "个子", "高挑", "瘦", "胖",
+    "衣", "衫", "裙", "裤", "鞋", "袜", "帽", "围巾", "眼镜", "袖", "领",
+    "扣", "束", "扎", "戴", "穿", "姿",
+)
+# Non-appearance words that contain an appearance hint character (e.g. 手机 contains 手).
+_APPEARANCE_STOP: frozenset[str] = frozenset({
+    "手机", "手上", "手里", "手中", "对方", "时候", "一点", "有些", "没有",
+    "别的", "东西", "什么", "一个", "一件", "一根", "一支", "上面", "下面",
+})
+# Actions that happen to contain a body-part character (抬眼/低头) are not appearance labels.
+_APPEARANCE_ACTIONS: tuple[str, ...] = (
+    "低头", "抬头", "回头", "转头", "抬眼", "垂眼", "眯眼",
+    "说话", "微笑", "皱眉", "抿嘴",
+)
+
+
+def _looks_like_appearance(phrase: str) -> bool:
+    phrase = (phrase or "").strip()
+    if not phrase or phrase in _APPEARANCE_STOP:
+        return False
+    if any(action in phrase for action in _APPEARANCE_ACTIONS):
+        return False
+    return any(hint in phrase for hint in _APPEARANCE_HINTS)
+
+
+def extract_appearance_tags(
+    appearance: str, min_chars: int = 2, max_chars: int = 8
+) -> list[str]:
+    """T19: short descriptive phrases from a character's appearance card.
+
+    The card is split on punctuation first; each 2–8-character clause is a candidate, and
+    longer clauses contribute their 2–8-character word tokens (jieba) so a distinctive label
+    such as "眉心" is found inside "眉心有一点淡淡的褶". Only body/clothing/posture phrases
+    survive, and obvious non-appearance words/actions are dropped. First-seen order.
+    """
+    import jieba  # lazy: the other repetition checks never pay the dictionary-load cost
+
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(phrase: str) -> None:
+        phrase = (phrase or "").strip()
+        if not (min_chars <= len(phrase) <= max_chars):
+            return
+        if phrase in seen or not _looks_like_appearance(phrase):
+            return
+        seen.add(phrase)
+        out.append(phrase)
+
+    clauses = re.split(r"[，。；：！？、,.;:!?\n\r\t（）()【】\[\]《》“”\"'‘’]+", appearance or "")
+    for clause in clauses:
+        clause = clause.strip()
+        if not clause:
+            continue
+        _add(clause)
+        for token in jieba.cut(clause):
+            _add(token)
+    return out
+
+
+def count_appearance_tags(
+    scene_text: str,
+    chapter_so_far: str,
+    appearances: list[str] | None,
+    max_count: int = 3,
+) -> list[AppearanceTagHit]:
+    """T19: appearance phrases whose chapter-wide count reaches ``max_count``.
+
+    Like the stock-action check, only phrases used in the NEW scene are returned: a scene that
+    does not mention the overused tag has nothing for the rewrite to remove.
+    """
+    if not appearances:
+        return []
+    seen: set[str] = set()
+    hits: list[AppearanceTagHit] = []
+    for appearance in appearances:
+        for phrase in extract_appearance_tags(appearance):
+            if phrase in seen:
+                continue
+            seen.add(phrase)
+            scene_count = scene_text.count(phrase)
+            if scene_count <= 0:
+                continue
+            total = chapter_so_far.count(phrase) + scene_count
+            if total >= max_count:
+                hits.append(AppearanceTagHit(phrase=phrase, count=total, scene_count=scene_count))
+    hits.sort(key=lambda h: (-h.count, h.phrase))
     return hits
 
 
@@ -540,12 +660,14 @@ def analyze_scene_repetition(
     config: RepetitionConfig | None = None,
     story_time_gap_days: int | None = None,
     beat: str = "",
+    appearances: list[str] | None = None,
 ) -> RepetitionReport:
     """Run all checks on a freshly generated scene and decide whether it is over threshold.
 
     ``beat`` (T17) lets quotes the scene plan explicitly requires be exempted from the
     dialogue/span checks — but only when the same words already exist verbatim in the previous
-    chapter or in the already-written part of this chapter.
+    chapter or in the already-written part of this chapter. ``appearances`` (T19) are the
+    appearance cards of the characters present in this scene.
     """
     cfg = config or RepetitionConfig()
     report = RepetitionReport()
@@ -598,6 +720,19 @@ def analyze_scene_repetition(
         report.reasons.append(
             "固定动作词过多：" + "、".join(f"{h.phrase}×{h.count}" for h in report.action_hits)
         )
+
+    if cfg.appearance_check:
+        report.appearance_hits = count_appearance_tags(
+            scene_text,
+            chapter_so_far,
+            appearances,
+            max_count=cfg.appearance_max_count,
+        )
+        if report.appearance_hits:
+            report.reasons.append(
+                "外貌标签重复："
+                + "、".join(f"{h.phrase}×{h.count}" for h in report.appearance_hits)
+            )
 
     report.forbidden_hits = [
         h for h in forbidden_overlap(scene_text, must_not_include or [])

@@ -469,7 +469,8 @@ class WritingService:
         chapter; counts stock action phrases chapter-wide; checks the scene's own
         ``must_not_include``. Over threshold -> the model rewrites this scene once with the
         concrete repeated spans listed; still over -> keep + warn (never loops). Every
-        measurement is stored in ``repetition_checks`` for later review.
+        measurement is stored in ``repetition_checks`` for later review. T19 also counts
+        appearance-card phrases used by the characters present in this scene.
         """
         from app.services.repetition_guard import RepetitionConfig, split_must_not_include
         from app.services.repetition_service import (
@@ -491,6 +492,16 @@ class WritingService:
         # strip the "【上一章《…》完整正文】" header line so it is not treated as prose
         previous_chapter = raw_prev.split("\n", 1)[1] if raw_prev.startswith("【") and "\n" in raw_prev else raw_prev
         must_not = split_must_not_include(scene.beat) if scene else []
+        appearances: list[str] = []
+        if scene and cfg.appearance_check:
+            present_ids = set(scene.character_ids or [])
+            if scene.pov_character:
+                present_ids.add(scene.pov_character)
+            if present_ids:
+                appearances = [
+                    c.appearance for c in self._entity_repo.list_characters()
+                    if c.id in present_ids and (c.appearance or "").strip()
+                ]
         from app.services.story_time import story_time_gap
         prev_time = self._conn.execute(
             'SELECT story_time FROM chapters WHERE sort_order < ? ORDER BY sort_order DESC, id DESC LIMIT 1',
@@ -550,6 +561,7 @@ class WritingService:
             auto_rewrite=auto_rewrite,
             story_time_gap_days=gap,
             beat=scene.beat if scene else "",
+            appearances=appearances,
         )
 
     async def check_write_boundary(self, req: StreamWriteRequest) -> str:

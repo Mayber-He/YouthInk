@@ -677,3 +677,47 @@ T6 之后哪些 evidence 字段真正进提示词，随开关/模型输出而变
 - 200/300 字窗口与 6 字阈值目前只按真实场景 2→3 校准，未覆盖全部章节；建议实际续写几章后抽查 `seam_spans` 原因，确认没有把必要的承接动作误判为抄写。
 - 规划边界检查使用 3-gram Jaccard 0.6：能抓到逐字包含与高度同文，但抓不到完全换词的“换皮复述”；重拆提示词的遵从度也只能靠真实模型抽查。
 - 未回填或改写既有场景；不自动修复已保存的 `exit_state`/`entry_state`。
+
+
+## T19 完成：外貌标签与媒介规则（2026-11-02）
+
+### 外貌标签
+
+- `RepetitionConfig` 新增 `appearance_check`（默认开）与 `appearance_max_count`（默认 3，下限 2）；环境变量 `YOUTHINK_REPEAT_APPEARANCE_CHECK` / `YOUTHINK_REPEAT_APPEARANCE_MAX`。关闭后不提取、不计入原因。
+- 新增纯函数 `extract_appearance_tags`：先按中英文标点切句；2–8 字的整句作为候选，长句再用 jieba 词边界取 2–8 字子短语（例如“眉心有一点淡淡的褶”切出“眉心”）。仅保留含身体/服饰/姿态提示词的短语，并排除“手机/手上/对方”等非外貌词与“低头/抬眼/说话”等动作词；去重后按首次出现顺序返回。
+- 新增 `count_appearance_tags`：从**在场人物**的外貌卡提取标签，统计“本章已写正文 + 新场景”的总次数；总次数 ≥ 阈值且**新场景确实使用了该标签**才计入。后者与固定动作词规则一致，避免前文已超阈值但本场未出现时反复触发无意义重写。
+- `RepetitionReport` 新增 `appearance_hits`（`phrase`、全章 `count`、本场 `scene_count`），追加原因“外貌标签重复：…”，并进入严重度评分。`describe_for_model` 输出：`外貌标签「X」在本章（含本场）已出现 N 次（本场 M 次）；保留最早一处，其余在本场改写或删除`；既有“一次重写”流水线直接复用。
+- 接线：`check_scene_repetition` 用 `scene.character_ids` + `scene.pov_character` 取 `EntityRepository.list_characters()` 的 `appearance`，只把在场人物的卡传给重写前后的两次分析；未在场人物不会参与。
+
+### 媒介规则
+
+- 内置 `write_scene` 模板版本 1.1 → 1.2，在【写作常理自检】中加入原句：**“若两个人物此前只通过文字沟通，首次听到声音时只能写声音本身，不得拿语调、音色与文字消息对照。”**
+- 只改内置模板，不改数据库里的模板记录；已只读核对当前全局库 `prompt_templates` 为空，当前书使用内置版本，因此新规则会进入实际写作 prompt。若用户曾自定义 `write_scene` 覆盖模板，需要在设置里重置/手动合并才能获得该句。
+
+### 测试与样本
+
+- 新增 `backend/tests/test_t19_appearance_media.py`（9 tests）与 `backend/tests/fixtures/t19_appearance_pei.txt`（v4 中裴南栀的外貌卡原文）。
+- 固定样本取真实场景 1/2 终稿 + 场景 3 初稿（即 v4 全文）：三场各出现一次“眉心”，全章合计 3 次，本场 1 次；断言 `appearance_hits` 检出 `眉心×3`、原因与重写 prompt 含“保留最早一处，其余在本场改写或删除”。
+- 同一 v4 样本中“白衬衫”合计 4 次，也会被计为外貌标签；测试未把该结果当成必须保留的预期，但这是当前启发式的真实输出，需人工确认是否接受。
+- 覆盖：2–8 字限制、长句切出“眉心”、动作/手机等排除；只看本章已写+新场景、本场未用不触发；开关与阈值、环境变量；流水线恰好重写一次；HTTP 接口只取在场人物卡（未在场人物的“袖口”不触发）；内置模板与真实写作 prompt 均含媒介规则。
+
+### 改动文件
+
+- `backend/app/services/repetition_guard.py`、`repetition_service.py`、`writing_service.py`
+- `backend/app/builtin/prompt_templates.py`
+- 新增 `backend/tests/test_t19_appearance_media.py`、`backend/tests/fixtures/t19_appearance_pei.txt`
+- `docs/loop/PLAN.md`、`PROGRESS.md`
+
+### 验证
+
+- T19 专项 9 passed；相关重复/提示词测试（T5/T13/T17/T18/T15）100 passed。
+- 全量 `cd backend && python -m pytest tests -q` **424 passed / 5 failed**（244.49 秒），5 项与既有基线逐项一致（M2 时序/滚动 3 项、M3 流式 1 项、M5 长书 1 项），无新增失败。模型调用全部 mock/固定样本，未调真实 LLM；测试使用临时库，未写入或修改小说数据。
+- 未修改既有小说正文、场景节拍、人物卡、记忆或重复检测记录；`.gitignore` 中 `docs/loop/` 的既有暂存改动未纳入本次提交。
+
+### 局限 / 人工确认
+
+- 外貌短语是词面启发式：标点+分词边界依赖 jieba，可能把普通名词或服饰标签当外貌标签（v4 的“白衬衫×4”即会触发）；是否只保留身体特征、或把服饰标签加入豁免，需要你结合实际文风决定。
+- 只统计本章已写正文 + 新场景，不把上一章或更早章节计入；因此“跨章反复使用同一外貌标签”不会被本规则捕获。
+- 只有新场景出现该标签才触发重写；若前文已 ≥3 次而本场未提，报告不会提醒。该选择是为了避免重写无法删除任何内容却反复触发。
+- 媒介规则只写进提示词，无法确定性验证模型是否遵守；真实模型首次听到声音时是否仍拿文字消息对照，需要实际续写抽查。
+- 未回填或改写既有场景、正文或模板记录；不改写已保存的 `repetition_checks`。
