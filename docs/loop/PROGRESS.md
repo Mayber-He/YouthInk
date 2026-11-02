@@ -513,3 +513,32 @@ T6 之后哪些 evidence 字段真正进提示词，随开关/模型输出而变
 - 5个既有失败仍为M2人物时序/滚动章节三项、M3流式写作一项、M5长书时序一项；和本轮前已验证的独立基线一致，不掩盖为全绿。
 - 现有57个数据库、密钥和SQLite侧文件的SHA-256与本轮只读调查前一致；未调用真实LLM、未执行恢复SQL、未重启真实服务、未迁移或修改小说数据。
 - 需人工处理：审阅并决定是否运行 `constraint_incident.md` 的恢复SQL；补无法确定的 story_time；抽查场景名单、保留的RAG片段和新模型输出的记忆质量。GET上下文预览按保存版本去重，含未保存内容的实际生成请求可能与预览不同。
+
+
+## 重新定稿的记忆批次与事务修复（2026-11-02）
+
+### 第0步：真实库只读报告
+
+- 详见 `memory_state_report.md`：使用 SQLite mode=ro/query_only=ON 和单次读取事务统计 origin × 确认状态 × is_stale；facts 的确认字段为 status，其余为 confirm_status。
+- facts15、character_state_changes7、cognitive_records5、relationship_changes1、foreshadowing4、constraint_checks11，共43条；均 extracted/confirmed/is_stale=0，全部来自第1章《吃一口软糖》。六表 manual 均为0，无 manual 来源章节可列。
+- 本次不重分类历史记录，也不据这些字段推断过去操作者；既有 manual 记录的保留策略通过隔离样本测试。
+
+### 改动与行为
+
+- 普通确认只变更确认状态，保留 origin/source_hash；携带 updated_text 的普通确认不会编辑内容。只有 action=edit 且正文内容实际变化才转 manual；同文本编辑保留来源。伏笔真正修改描述、回收区间或状态也转 manual，仅确认或不变的字段不转。
+- 待确认队列（含各状态筛选）和伏笔列表默认排除 stale。单条/批量确认或编辑、直接伏笔更新都拒绝失效条目，返回409 MEMORY_ITEM_STALE；写入时再次使用 is_stale=0 条件，避免检查后失效的竞态。过期条目可丢弃，但不会被复活或夹带改文；不存在条目404。
+- 摘要模型、记忆抽取与解析、embedding 计算先完成，不持有 SQLite 写事务。随后 BEGIN IMMEDIATE 短事务校验最新版本ID/正文哈希，统一完成旧抽取批次失效、新记录插入、章节摘要upsert、FTS和章节元数据发布。异常整体回滚 SQLite，摘要始终只有同章一行。
+- 向量只预计算在事务外；通过版本校验后，在写锁内最后同步发布缓存，不再让被拒绝的旧定稿覆盖新版本索引。向量发布失败也会回滚尚未提交的SQLite变化。备份、已完成的生成调用日志及文件型向量缓存不是SQLite事务资源；极端SQLite commit失败不具有跨介质原子提交保证，本次未扩展成跨文件事务。
+- 整批抽取失败时追加的兜底事实强制pending，不使旧批次失效；同一正文哈希已有有效摘要时保留该摘要。首次没有有效摘要仍创建摘要/待确认兜底；不会把已失效旧记忆重新置为有效。
+- 真正人工创建/编辑的 manual 记忆不被重新定稿覆盖。约束判定仍进入pending，重新抽取不自动应用或回滚约束状态；作者明确确认判定后应用状态的现有流程保留。
+- 不需要新字段或schema迁移；未修改真实库或重新运行真实章节定稿。
+
+### 验证
+
+- 新增 `test_memory_queue_freshness.py` **81 passed**，覆盖六类来源保留、真实编辑、stale过滤/拒绝、并发条件写入、直接伏笔更新与批量失败回滚。
+- 新增 `test_refinalization_transaction.py` **21 passed**，覆盖连续定稿单一有效批次、manual保留、摘要唯一、模型/embedding无写事务、中途/FTS/索引失败回滚、兜底保护、约束状态不变、版本新增及原地改稿409。
+- 新旧相关模块联合 **116 passed**。缺陷先红后绿；独立代码复审通过。
+- 全量 `cd backend` 后 `python -u -m pytest tests -q -p deny_network --basetemp=.pytest-refinal-full`：**354 passed / 5 failed**（219.44秒）。5项失败与修复前全量逐项一致（M2时序/滚动3项、M3流式1项、M5长书时序1项），无新增失败。模型响应均mock，内存/临时测试库；本轮临时deny_network插件阻断外部网络。
+- 前端 `node --test tests/*.test.mjs` **5 passed**；`npm run typecheck`通过；`git diff --check`通过。
+- 本轮开始与提交前，真实数据目录57个数据库/密钥/SQLite侧文件SHA-256一致；未调用真实LLM、未写真实库、未重启服务。已有 `eval_export.md` 不纳入本次提交。
+- 生效方式：本次只修改并提交源码，后端服务下次重启后加载修复；现有记录不会被自动清理或迁移。

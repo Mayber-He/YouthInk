@@ -119,7 +119,7 @@ class MemoryRepository:
         sql = """
             SELECT f.*, COALESCE(c.title, '') AS planted_chapter_title
             FROM foreshadowing f LEFT JOIN chapters c ON c.id = f.planted_chapter_id
-            WHERE f.confirm_status != 'discarded'
+            WHERE f.confirm_status != 'discarded' AND f.is_stale = 0
         """
         params: list[object] = []
         if status:
@@ -163,7 +163,17 @@ class MemoryRepository:
 
     def update_foreshadowing(self, fid: int, data: ForeshadowUpdate) -> ForeshadowResponse:
         cur = self.get_foreshadowing(fid)
-        self.conn.execute(
+        self._require_current_memory_item("foreshadowing", fid)
+        content_changed = any(
+            value is not None and value != getattr(cur, field)
+            for field, value in (
+                ("description", data.description),
+                ("plan_recover_start", data.plan_recover_start),
+                ("plan_recover_end", data.plan_recover_end),
+                ("status", data.status),
+            )
+        )
+        result = self.conn.execute(
             """
             UPDATE foreshadowing
             SET description = ?, plan_recover_start = ?, plan_recover_end = ?,
@@ -172,7 +182,7 @@ class MemoryRepository:
                 source_hash = CASE WHEN ? THEN NULL ELSE source_hash END,
                 is_stale = CASE WHEN ? THEN 0 ELSE is_stale END,
                 updated_at = datetime('now')
-            WHERE id = ?
+            WHERE id = ? AND is_stale = 0
             """,
             (
                 data.description if data.description is not None else cur.description,
@@ -180,12 +190,14 @@ class MemoryRepository:
                 data.plan_recover_end if data.plan_recover_end is not None else cur.plan_recover_end,
                 data.status if data.status is not None else cur.status,
                 data.confirm_status if data.confirm_status is not None else cur.confirm_status,
-                data.description is not None and data.description != cur.description,
-                data.description is not None and data.description != cur.description,
-                data.description is not None and data.description != cur.description,
+                content_changed,
+                content_changed,
+                content_changed,
                 fid,
             ),
         )
+        if result.rowcount == 0:
+            raise AppError("MEMORY_ITEM_STALE", "该记忆条目已失效，请刷新后处理最新抽取结果", status_code=409)
         return self.get_foreshadowing(fid)
 
     def delete_foreshadowing(self, fid: int) -> None:
@@ -200,25 +212,25 @@ class MemoryRepository:
         chapters_map = self._chapter_lookup()
         items: list[PendingQueueItem] = []
         specs: list[tuple[MemoryItemCategory, str, str]] = [
-            ("fact", "SELECT * FROM facts WHERE status = ? ORDER BY id DESC", "chapter_id"),
+            ("fact", "SELECT * FROM facts WHERE status = ? AND is_stale = 0 ORDER BY id DESC", "chapter_id"),
             (
                 "char_state",
-                "SELECT cs.*, ch.name AS char_name FROM character_state_changes cs JOIN characters ch ON ch.id = cs.character_id WHERE cs.confirm_status = ? ORDER BY cs.id DESC",
+                "SELECT cs.*, ch.name AS char_name FROM character_state_changes cs JOIN characters ch ON ch.id = cs.character_id WHERE cs.confirm_status = ? AND cs.is_stale = 0 ORDER BY cs.id DESC",
                 "chapter_id",
             ),
-            ("cognitive", "SELECT * FROM cognitive_records WHERE confirm_status = ? ORDER BY id DESC", "chapter_id"),
+            ("cognitive", "SELECT * FROM cognitive_records WHERE confirm_status = ? AND is_stale = 0 ORDER BY id DESC", "chapter_id"),
             (
                 "relationship",
-                "SELECT rc.*, ca.name AS char_a_name, cb.name AS char_b_name FROM relationship_changes rc JOIN characters ca ON ca.id = rc.char_a_id JOIN characters cb ON cb.id = rc.char_b_id WHERE rc.confirm_status = ? ORDER BY rc.id DESC",
+                "SELECT rc.*, ca.name AS char_a_name, cb.name AS char_b_name FROM relationship_changes rc JOIN characters ca ON ca.id = rc.char_a_id JOIN characters cb ON cb.id = rc.char_b_id WHERE rc.confirm_status = ? AND rc.is_stale = 0 ORDER BY rc.id DESC",
                 "chapter_id",
             ),
-            ("foreshadowing", "SELECT * FROM foreshadowing WHERE confirm_status = ? ORDER BY id DESC", "planted_chapter_id"),
+            ("foreshadowing", "SELECT * FROM foreshadowing WHERE confirm_status = ? AND is_stale = 0 ORDER BY id DESC", "planted_chapter_id"),
             (
                 "constraint_check",
                 "SELECT cc.*, cc.evidence_quote AS source_quote, c.content AS constraint_content "
                 "FROM constraint_checks cc "
                 "JOIN constraints c ON c.id = cc.constraint_id "
-                "WHERE cc.confirm_status = ? ORDER BY cc.id DESC",
+                "WHERE cc.confirm_status = ? AND cc.is_stale = 0 ORDER BY cc.id DESC",
                 "chapter_id",
             ),
         ]
@@ -274,28 +286,38 @@ class MemoryRepository:
             "constraint_check": ("constraint_checks", "confirm_status", "description"),
         }
         tbl, st_col, txt_col = table_map[item_type]
-        if req.updated_text:
-            self.conn.execute(
+        row = self._require_current_memory_item(tbl, item_id, allow_stale=req.action == "discard")
+        if req.action == "edit" and req.updated_text is not None and req.updated_text != row[txt_col]:
+            result = self.conn.execute(
                 f"UPDATE {tbl} SET {txt_col} = ?, {st_col} = ?, origin = 'manual', "
-                f"source_hash = NULL, is_stale = 0 WHERE id = ?",
+                f"source_hash = NULL, is_stale = 0 WHERE id = ? AND is_stale = 0",
                 (req.updated_text, target, item_id),
             )
         else:
-            if req.action == "confirm":
-                self.conn.execute(
-                    f"UPDATE {tbl} SET {st_col} = ?, origin = 'manual', source_hash = NULL, is_stale = 0 WHERE id = ?",
-                    (target, item_id),
-                )
-            else:
-                self.conn.execute(
-                    f"UPDATE {tbl} SET {st_col} = ? WHERE id = ?", (target, item_id)
-                )
+            freshness_filter = "" if req.action == "discard" else " AND is_stale = 0"
+            result = self.conn.execute(
+                f"UPDATE {tbl} SET {st_col} = ? WHERE id = ?{freshness_filter}", (target, item_id)
+            )
+        if result.rowcount == 0:
+            raise AppError("MEMORY_ITEM_STALE", "该记忆条目已失效，请刷新后处理最新抽取结果", status_code=409)
         if item_type == "fact" and target == "confirmed":
             row = self.conn.execute("SELECT content FROM facts WHERE id = ?", (item_id,)).fetchone()
             if row:
                 self.index_fact_fts(item_id, str(row["content"]))
         if item_type == "constraint_check" and target == "confirmed":
             self._apply_constraint_check_verdict(item_id)
+
+    def _require_current_memory_item(
+        self, table: str, item_id: int, *, allow_stale: bool = False
+    ) -> sqlite3.Row:
+        row = self.conn.execute(f"SELECT * FROM {table} WHERE id = ?", (item_id,)).fetchone()
+        if row is None:
+            raise AppError("MEMORY_ITEM_NOT_FOUND", f"未找到记忆条目 #{item_id}", status_code=404)
+        if row["is_stale"] and not allow_stale:
+            raise AppError(
+                "MEMORY_ITEM_STALE", "该记忆条目已失效，请刷新后处理最新抽取结果", status_code=409
+            )
+        return row
 
     def _apply_constraint_check_verdict(self, check_id: int) -> None:
         """Apply a confirmed violation/resolution verdict to the constraint itself."""

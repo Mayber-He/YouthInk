@@ -127,37 +127,51 @@ class ChapterFinalizerService:
 
         source_hash = text_sha256(raw_content)
         backup_info = create_novel_backup(self.novel_uid, reason=f"finalize_ch_{chapter_id}")
-        chunks_count = await self._index_chapter_chunks_and_fts(
-            chapter_id=chapter_id,
-            chapter_sort_order=ch.sort_order,
-            story_time=ch.story_time or "",
-            version_id=latest_ver.id if latest_ver else chapter_id,
-            content=raw_content,
-            source_hash=source_hash,
-        )
-        self.conn.commit()
-
+        # Complete upstream calls and validation before taking a SQLite write lock.
         summary_text = await self._generate_chapter_summary(chapter_id, ch.title, content)
-        self.memory_repo.upsert_summary("chapter", chapter_id, summary_text, is_stale=False, source_hash=source_hash)
-        self.conn.execute(
-            "UPDATE chapters SET status = 'final', content_hash = ?, continuity_review_required = 0, continuity_dirty_from_chapter_id = NULL WHERE id = ?",
-            (source_hash, chapter_id),
-        )
-        self.conn.commit()
-
         extraction, extraction_status = await self._extract_chapter_memories(
             chapter_id, ch.title, content
         )
-        # 整批失败走兜底事实时，禁止自动确认——必须进待确认队列由人工把关。
-        auto_confirmed, pending_cnt = self._persist_extracted_memories(
-            chapter_id, extraction, source_hash,
-            force_pending=(extraction_status == "failed"),
+        records = await self._prepare_chapter_chunks(
+            chapter_id=chapter_id,
+            chapter_sort_order=ch.sort_order,
+            story_time=ch.story_time or "",
+            content=raw_content,
+            source_hash=source_hash,
         )
-
-        self.conn.execute(
-            "UPDATE chapters SET status = 'final', content_hash = ?, updated_at = datetime('now') WHERE id = ?",
-            (source_hash, chapter_id),
-        )
+        chunks_count = len(records)
+        with self.conn:
+            self.conn.execute("BEGIN IMMEDIATE")
+            current_versions = self.writing_repo.list_versions(chapter_id)
+            if (not current_versions or current_versions[0].id != latest_ver.id
+                    or text_sha256(current_versions[0].content) != source_hash):
+                raise AppError(
+                    "CHAPTER_CONTENT_CHANGED", "定稿期间章节正文已变化，请刷新后重新定稿", status_code=409
+                )
+            failed = extraction_status == "failed"
+            auto_confirmed, pending_cnt = self._persist_extracted_memories(
+                chapter_id, extraction, source_hash, force_pending=failed,
+            )
+            previous_summary = self.conn.execute(
+                "SELECT content FROM summaries WHERE level = 'chapter' AND ref_id = ? "
+                "AND is_stale = 0 AND source_hash = ?", (chapter_id, source_hash),
+            ).fetchone()
+            if failed and previous_summary:
+                # A fallback is diagnostic, not a replacement for a successful batch.
+                summary_text = str(previous_summary["content"])
+            else:
+                self.memory_repo.upsert_summary(
+                    "chapter", chapter_id, summary_text, is_stale=False, source_hash=source_hash,
+                )
+            self.memory_repo.index_chapter_version_fts(latest_ver.id, raw_content)
+            self.conn.execute(
+                "UPDATE chapters SET status = 'final', content_hash = ?, continuity_review_required = 0, "
+                "continuity_dirty_from_chapter_id = NULL, updated_at = datetime('now') WHERE id = ?",
+                (source_hash, chapter_id),
+            )
+            # No awaits here: stale requests cannot replace newer vectors, and a
+            # vector publication failure rolls back the pending SQLite changes.
+            self.vector_store.upsert_chapter_chunks(chapter_id, records)
         return FinalizeChapterResponse(
             chapter_id=chapter_id,
             status="final",
@@ -186,21 +200,23 @@ class ChapterFinalizerService:
             versions = self.writing_repo.list_versions(cid)
             ver = versions[0] if versions else None
             if ver and ver.content.strip():
-                total_chunks += await self._index_chapter_chunks_and_fts(
-                    cid, float(r["sort_order"]), str(r["story_time"] or ""), ver.id, ver.content, emb_model, text_sha256(ver.content)
+                records = await self._prepare_chapter_chunks(
+                    cid, float(r["sort_order"]), str(r["story_time"] or ""), ver.content, emb_model, text_sha256(ver.content)
                 )
+                self.vector_store.upsert_chapter_chunks(cid, records)
+                total_chunks += len(records)
+                self.memory_repo.index_chapter_version_fts(ver.id, ver.content)
         return {"chapters_reindexed": len(rows), "chunks_indexed": total_chunks}
 
-    async def _index_chapter_chunks_and_fts(
+    async def _prepare_chapter_chunks(
         self,
         chapter_id: int,
         chapter_sort_order: float,
         story_time: str,
-        version_id: int,
         content: str,
         model_id: str | None = None,
         source_hash: str | None = None,
-    ) -> int:
+    ) -> list[VectorChunkRecord]:
         emb_model = model_id or self._current_embedding_model_id()
         source_hash = source_hash or text_sha256(content)
         scenes = self.writing_repo.list_scenes(chapter_id)
@@ -227,9 +243,7 @@ class ChapterFinalizerService:
                     source_hash=source_hash,
                 )
             )
-        self.vector_store.upsert_chapter_chunks(chapter_id, records)
-        self.memory_repo.index_chapter_version_fts(version_id, content)
-        return len(records)
+        return records
 
     async def _generate_chapter_summary(self, chapter_id: int, title: str, content: str) -> str:
         prompt = f"请将章节《{title}》浓缩为 180~300 字剧情摘要：\n\n{content[:4500]}"
@@ -388,8 +402,9 @@ class ChapterFinalizerService:
         source_hash: str,
         force_pending: bool = False,
     ) -> tuple[int, int]:
-        for table, column in (("facts", "chapter_id"), ("character_state_changes", "chapter_id"), ("cognitive_records", "chapter_id"), ("relationship_changes", "chapter_id"), ("foreshadowing", "planted_chapter_id"), ("constraint_checks", "chapter_id")):
-            self.conn.execute(f"UPDATE {table} SET is_stale = 1 WHERE {column} = ? AND origin = 'extracted'", (chapter_id,))
+        if not force_pending:
+            for table, column in (("facts", "chapter_id"), ("character_state_changes", "chapter_id"), ("cognitive_records", "chapter_id"), ("relationship_changes", "chapter_id"), ("foreshadowing", "planted_chapter_id"), ("constraint_checks", "chapter_id")):
+                self.conn.execute(f"UPDATE {table} SET is_stale = 1 WHERE {column} = ? AND origin = 'extracted'", (chapter_id,))
         trust = self.settings_repo.get_trust_mode()
         chars = self.entity_repo.list_characters()
         name_to_id = {c.name: c.id for c in chars}
