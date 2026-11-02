@@ -12,6 +12,7 @@ backend/test_passage.py
 
 # Planning notes (local only)
 .planning/
+docs/loop/
 
 # Runtime Data & Databases
 backend/data/
