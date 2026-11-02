@@ -23,6 +23,7 @@ from app.schemas.writing import (
 from app.services.context.assembler import ContextAssembler
 from app.services.llm.client import complete_chat
 from app.services.llm.json_parser import parse_and_validate_json
+from app.services.prompt.character_voice import previous_voice_block
 from app.services.prompt.renderer import assemble_six_layer_prompt, render_template
 
 _scene_logger = logging.getLogger(__name__)
@@ -149,12 +150,20 @@ class WritingService:
         locs = self._entity_repo.list_locations()
 
         layer1, layer2, layer3 = self._build_base_layers()
+        raw_prev = self._writing_repo.get_previous_chapter_text(ch.sort_order, tail_chars=None)
+        # 去掉“【上一章《…》完整正文】”表头，只把正文交给口癖摘录。
+        prev_text = (
+            raw_prev.split("\n", 1)[1]
+            if raw_prev.startswith("【") and "\n" in raw_prev
+            else raw_prev
+        )
         context = (
             f"当前章节：第 {ch.display_index} 章《{ch.title}》\n"
             f"章节梗概：{ch.synopsis}\n"
             "人物卡中的既有经历与人物弧线（章节事实约束）："
             f"{json.dumps([{'name': c.name, 'role': c.role, 'background': c.background, 'arc_design': c.arc_design} for c in chars], ensure_ascii=False)}\n"
-            f"可用地点列表：{json.dumps([l.name for l in locs], ensure_ascii=False)}"
+            f"可用地点列表：{json.dumps([l.name for l in locs], ensure_ascii=False)}\n"
+            f"{previous_voice_block(prev_text)}"
         )
 
         tpl = next(
@@ -185,6 +194,15 @@ class WritingService:
         inst += (
             "人物卡中的既有经历和关系是必须遵守的故事事实；不得把已经认识或持续联系的人物安排成初次相识、首次加好友。"
             "人物卡不代表 POV 自动知晓他人的私密信息，但不能因此改写人物既有经历。若章节梗概与人物卡冲突，调整场景以遵守人物卡与前文事实。"
+        )
+        inst += (
+            "\n【与前文呼应的依据】"
+            "节拍中凡写“措辞/语气与前文一致”“沿用之前的说法”一类要求，必须在同一节拍内指明具体对应"
+            "上面哪一条口癖或句式，并逐字使用列出的上一章发言；不得只写“像之前那样说”。"
+            "没有对应的发言摘录就不要写这类要求，正文也不得自造旧聊天、旧台词或未发生过的对话。"
+            "\n【关键选择场景】涉及人物关键选择的场景，must_happen 中必须有一条同时写出该人物明确的内心判断和决定"
+            "（如“他判断……，决定……”），不能只写外部动作；"
+            "同一场景的 must_not_include 必须写明对方不得察觉这个判断或决定，也不得回头、追问或回应，把反应留给后续场景。"
         )
         if instruction:
             inst += f"\n作者附加要求：{instruction}"
@@ -379,6 +397,7 @@ class WritingService:
 
         inst += (
             "\n【怎么写好这一段】按本章梗概推进剧情，不重复输入的梗概。"
+            "不得复用上一章已出现的描写句子（景物、动作、比喻均算），需要呼应时只承接事实与情绪，不照抄原句。"
             "按剧情重要性分配笔墨：冲突、关键选择、关系转折和决定的后果写清来龙去脉；"
             "普通过场和重复日常动作一句话带过，不要把收拾、做饭、等待拆成连续的微动作清单，只是过渡就直接跳到有意义的结果。"
             "每一段至少推进动作、对话、决定或关系中的一项，用具体的动作、对话和感官细节代替抽象情绪词，"
