@@ -22,6 +22,7 @@ import { useStreamGenerate } from "./hooks/useStreamGenerate";
 import { SceneBeatsPanel } from "./components/SceneBeatsPanel";
 import { SceneReviewBar } from "./components/SceneReviewBar";
 import { ContextPreviewPanel } from "./components/ContextPreviewPanel";
+import { ConstraintMemoryPanel } from "./components/ConstraintMemoryPanel";
 import { VersionHistoryModal } from "./components/VersionHistoryModal";
 import { SelectionToolbar } from "./components/SelectionToolbar";
 import { WritingHeaderBar } from "./components/WritingHeaderBar";
@@ -82,7 +83,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
   const [activeSceneId, setActiveSceneId] = useState<number | null>(null);
   const [disabledContextKeys, setDisabledContextKeys] = useState<string[]>([]);
   const [customContext, setCustomContext] = useState("");
-  const [rightTab, setRightTab] = useState<"beats" | "context" | "memory">("beats");
+  const [rightTab, setRightTab] = useState<"beats" | "context" | "memory" | "guard">("beats");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [content, setContent] = useState("");
   const [autoSavedAt, setAutoSavedAt] = useState<string | null>(null);
@@ -1027,7 +1028,12 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
       {!focusMode && rightPanelOpen && (
         <aside className="flex w-88 shrink-0 flex-col border-l border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
           <div className="flex border-b border-slate-200 p-2 dark:border-slate-800">
-            {([["beats", "① 细纲节拍"], ["context", "② 上下文预览"], ["memory", "③ 本章记忆"]] as const).map(([key, label]) => (
+            {([
+              ["beats", "① 细纲节拍"],
+              ["context", "② 上下文预览"],
+              ["memory", "③ 本章记忆"],
+              ["guard", "④ 约束与记忆"],
+            ] as const).map(([key, label]) => (
               <button
                 key={key}
                 type="button"
@@ -1078,6 +1084,20 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
                 chapterId={effectiveChapterId}
                 chapterStatus={workspace.chapter.status}
                 continuityReviewRequired={workspace.chapter.continuity_review_required}
+              />
+            )}
+            {rightTab === "guard" && (
+              <ConstraintMemoryPanel
+                novelUid={novelUid}
+                chapterId={effectiveChapterId}
+                preview={contextPreview}
+                isLoading={isCtxLoading}
+                disabledKeys={disabledContextKeys}
+                onToggleKey={(key) =>
+                  setDisabledContextKeys((prev) =>
+                    prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]
+                  )
+                }
               />
             )}
           </div>

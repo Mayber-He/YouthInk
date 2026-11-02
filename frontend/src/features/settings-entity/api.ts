@@ -354,6 +354,18 @@ export function useConstraints(
   });
 }
 
+/** 本章写作时实际会注入的约束（与上下文组装器同一口径）。 */
+export function useChapterActiveConstraints(novelUid: string, chapterId: number | null) {
+  return useQuery({
+    queryKey: [...constraintKeys.all(novelUid), "chapter-active", chapterId],
+    queryFn: () =>
+      apiRequest<ConstraintItem[]>(
+        `/api/v1/novels/${novelUid}/chapters/${chapterId}/active-constraints`,
+      ),
+    enabled: Boolean(novelUid && chapterId),
+  });
+}
+
 export function useCreateConstraint(novelUid: string) {
   const qc = useQueryClient();
   return useMutation({
