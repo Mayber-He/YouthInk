@@ -77,6 +77,9 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
   const [supplementReady, setSupplementReady] = useState(false);
   const [supplementSaveError, setSupplementSaveError] = useState<string | null>(null);
   const [critiqueResult, setCritiqueResult] = useState<SelectionCritiqueResult | null>(null);
+  // A：节拍生成完先停住，等作者改完节拍点“开始写”再继续。
+  const [awaitingStart, setAwaitingStart] = useState(false);
+  const pendingScenesRef = useRef<SceneItem[] | null>(null);
   const [pipelineStep, setPipelineStep] = useState<WritingPipelineStep>("idle");
   const [streamModelName, setStreamModelName] = useState("");
   const [repetitionNotice, setRepetitionNotice] = useState<{
@@ -133,6 +136,8 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
         setSupplementOpen(false);
         setSupplementCandidate("");
         setSupplementReady(false);
+        setAwaitingStart(false);
+        pendingScenesRef.current = null;
         prevChapterIdRef.current = workspace.chapter.id;
       }
       if (!activeSceneId && workspace.scenes.length > 0) {
@@ -272,8 +277,53 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
       );
     });
 
+  // A：没有节拍时只生成节拍并停住；作者确认/修改节拍后，再点“开始写”进入正文生成。
+  const prepareChapterWriting = async () => {
+    if (!effectiveChapterId) return;
+    const chapterId = effectiveChapterId;
+    const existingScenes = workspace?.scenes ?? [];
+    if (existingScenes.length > 0) {
+      pendingScenesRef.current = existingScenes;
+      await runWholeChapter(existingScenes);
+      return;
+    }
+
+    setGeneratedWordsCount(0);
+    setReviewResult(null);
+    setReviewError(null);
+    setRepetitionNotice(null);
+    setBoundaryNotice(null);
+    setPipelineStep("assembling");
+    let scenes: SceneItem[] = [];
+    try {
+      scenes = await generateScenesMut.mutateAsync({});
+    } catch (error) {
+      if (currentChapterRef.current !== chapterId) return;
+      setReviewError(error instanceof Error ? error.message : "拆解场景节拍失败，请重试。");
+      setPipelineStep("completed");
+      return;
+    }
+    if (currentChapterRef.current !== chapterId) return;
+    if (scenes.length === 0) {
+      setReviewError("拆解未返回场景节拍，请调整章节梗概后重试。");
+      setPipelineStep("completed");
+      return;
+    }
+    pendingScenesRef.current = scenes;
+    setAwaitingStart(true);
+    setPipelineStep("idle");
+  };
+
+  const handleStartWriting = () => {
+    if (!effectiveChapterId) return;
+    const scenes = pendingScenesRef.current ?? workspace?.scenes ?? [];
+    if (scenes.length === 0) return;
+    setAwaitingStart(false);
+    void runWholeChapter(scenes);
+  };
+
   // 逐场景顺序生成整章：每个场景基于已生成正文续写，减少长文本中的前后矛盾与重复。
-  const runWholeChapter = async () => {
+  const runWholeChapter = async (scenes: SceneItem[]) => {
     if (!effectiveChapterId) return;
     setGeneratedWordsCount(0);
     setReviewResult(null);
@@ -283,19 +333,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
     setPipelineStep("assembling");
     const chapterId = effectiveChapterId;
     const originalContent = content;
-
-    let scenes = workspace?.scenes ?? [];
-    if (scenes.length === 0) {
-      try {
-        scenes = await generateScenesMut.mutateAsync({});
-      } catch (error) {
-        if (currentChapterRef.current !== chapterId) return;
-        setReviewError(error instanceof Error ? error.message : "拆解场景节拍失败，请重试。");
-        setPipelineStep("completed");
-        return;
-      }
-      if (currentChapterRef.current !== chapterId) return;
-    }
+    pendingScenesRef.current = scenes;
 
     // 无场景可用（拆解返回空）时，回退到整章一次生成，避免卡死。
     const plan: Array<{ mode: "scene" | "chapter"; sceneId: number | null }> =
@@ -371,7 +409,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
     if (content.trim()) {
       setConfirmOverwriteOpen(true);
     } else {
-      void runWholeChapter();
+      void prepareChapterWriting();
     }
   };
 
@@ -659,6 +697,17 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
           onDismiss={() => setPipelineStep("idle")}
         />
 
+        {awaitingStart && (
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-800">
+            <span>
+              场景节拍已生成。请先在右侧「① 细纲节拍」修改并保存节拍，确认无误后再开始写正文。
+            </span>
+            <Button size="sm" onClick={handleStartWriting} disabled={isStreaming}>
+              开始写
+            </Button>
+          </div>
+        )}
+
         {streamError && (
           <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
             {streamError}
@@ -857,6 +906,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
                 isStreaming={isStreaming}
                 onSelectScene={setActiveSceneId}
                 onWriteScene={(s: SceneItem) => void executeSceneWrite(s.id)}
+                onStartWriting={handleStartWriting}
               />
             )}
             {rightTab === "context" && (
@@ -905,7 +955,7 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
         onClose={() => setConfirmOverwriteOpen(false)}
         onConfirm={() => {
           setConfirmOverwriteOpen(false);
-          void runWholeChapter();
+          void prepareChapterWriting();
         }}
         title="替换正文确认"
         description="将用全新生成的正文替换本章当前内容（旧内容可在「版本历史」中恢复），是否继续？"

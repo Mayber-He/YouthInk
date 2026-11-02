@@ -21,6 +21,7 @@ interface SceneBeatsPanelProps {
   isStreaming: boolean;
   onSelectScene: (sceneId: number | null) => void;
   onWriteScene: (scene: SceneItem) => void;
+  onStartWriting: () => void;
 }
 
 export const SceneBeatsPanel: React.FC<SceneBeatsPanelProps> = ({
@@ -33,6 +34,7 @@ export const SceneBeatsPanel: React.FC<SceneBeatsPanelProps> = ({
   isStreaming,
   onSelectScene,
   onWriteScene,
+  onStartWriting,
 }) => {
   const createMut = useCreateScene(novelUid, chapterId);
   const updateMut = useUpdateScene(novelUid, chapterId);
@@ -62,18 +64,29 @@ export const SceneBeatsPanel: React.FC<SceneBeatsPanelProps> = ({
         <span className="font-semibold text-slate-800 dark:text-slate-200">
           场景节拍 ({scenes.length})
         </span>
-        <Button
-          size="sm"
-          disabled={genMut.isPending}
-          onClick={() => genMut.mutate({ scene_count: 3, instruction: "" })}
-        >
-          {genMut.isPending ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <Sparkles className="h-3.5 w-3.5" />
-          )}
-          AI 拆解细纲
-        </Button>
+        <div className="flex items-center gap-1.5">
+          <Button
+            size="sm"
+            disabled={genMut.isPending}
+            onClick={() => genMut.mutate({ scene_count: 3, instruction: "" })}
+          >
+            {genMut.isPending ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Sparkles className="h-3.5 w-3.5" />
+            )}
+            AI 拆解细纲
+          </Button>
+          <Button
+            size="sm"
+            disabled={isStreaming || scenes.length === 0}
+            onClick={onStartWriting}
+            title="按当前节拍逐场生成正文"
+          >
+            <Play className="h-3.5 w-3.5" />
+            开始写
+          </Button>
+        </div>
       </div>
 
       {/* @人物 / @地点 快捷引用胶囊（设计文档 6.4） */}
