@@ -182,14 +182,16 @@ class WritingService:
             "不要写成散文式节拍。节拍里可用 @人物名 和 @地点名 标注关联实体。\n"
             "每个场景必须输出以下字段：\n"
             "- goal：本场景要达成的叙事目的（一句话）\n"
-            "- entry_state：进入本场景时的起点状态（人物位置/关系/情绪的简短快照）\n"
+            "- entry_state：进入本场景时的起点状态（从上场终点之后开始，人物位置/关系/情绪的简短快照，不得复述上场的动作或状态）\n"
             "- must_happen：本场必须发生的事件，最多 3 条，每条不超过 25 字，只写事件不写细节\n"
-            "- exit_state：本场结束时的终点状态（为下一场留下的钩子）\n"
+            "- exit_state：本场结束时的终点状态（只写本场结果，不得提前包含下一场的触发事件）\n"
             "- must_not_include：本场禁止出现的素材（留给后续场景的事件、不该提前的信息）\n"
             "- target_words：预估字数\n"
             "【严禁】不要写具体台词或对白、不要写分镜级的具体动作细节、不要写结尾意象或景物升华；"
             "这些留给正文生成阶段。must_happen 用“谁做了什么、发生了什么结果”的事件句，不要展开过程。\n"
             "相邻场景的 must_happen 不得重复同一事件；每个场景都要带来新的事件或状态推进。"
+            "每个场景的 exit_state 不得包含下一场景 must_happen 的触发事件；"
+            "下一场的 entry_state 必须从上一场 exit_state 之后开始，不得复述同一状态或动作。"
         )
         inst += (
             "人物卡中的既有经历和关系是必须遵守的故事事实；不得把已经认识或持续联系的人物安排成初次相识、首次加好友。"
@@ -247,7 +249,9 @@ class WritingService:
         # 相邻场景 must_happen 重复校验：超阈值则带着重复处让模型重拆一次；
         # 仍重复则保留结果并写警告日志（不无限循环）。
         from app.services.scene_planning import (
+            describe_boundary_issues,
             describe_duplicates,
+            find_adjacent_boundary_issues,
             find_adjacent_duplicates,
             format_scene_beat,
         )
@@ -255,20 +259,48 @@ class WritingService:
         def _mh(batch: LlmSceneBatchOutput) -> list[list[str]]:
             return [list(s.must_happen) for s in batch.scenes]
 
-        dups = find_adjacent_duplicates(_mh(parsed))
-        if dups:
-            retry = await _request_scenes(
-                "\n\n上一次拆分存在相邻场景事件重复，请重新拆分。"
-                + describe_duplicates(dups)
+        def _entries(batch: LlmSceneBatchOutput) -> list[str]:
+            return [s.entry_state for s in batch.scenes]
+
+        def _exits(batch: LlmSceneBatchOutput) -> list[str]:
+            return [s.exit_state for s in batch.scenes]
+
+        def _boundary(batch: LlmSceneBatchOutput):
+            return find_adjacent_boundary_issues(
+                _entries(batch), _exits(batch), _mh(batch)
             )
-            if len(find_adjacent_duplicates(_mh(retry))) <= len(dups):
+
+        dups = find_adjacent_duplicates(_mh(parsed))
+        boundary = _boundary(parsed)
+        if dups or boundary:
+            hints: list[str] = []
+            if dups:
+                hints.append(
+                    "上一次拆分存在相邻场景事件重复，请重新拆分。"
+                    + describe_duplicates(dups)
+                )
+            if boundary:
+                hints.append(
+                    "上一次拆分的场景终点状态越过了场景边界，请重新拆分。"
+                    + describe_boundary_issues(boundary)
+                )
+            retry = await _request_scenes("\n\n" + "\n\n".join(hints))
+            retry_issues = len(find_adjacent_duplicates(_mh(retry))) + len(_boundary(retry))
+            if retry_issues <= len(dups) + len(boundary):
                 parsed = retry
-            remaining = find_adjacent_duplicates(_mh(parsed))
-            if remaining:
+            remaining_dups = find_adjacent_duplicates(_mh(parsed))
+            remaining_boundary = _boundary(parsed)
+            if remaining_dups:
                 _scene_logger.warning(
                     "generate_chapter_scenes: adjacent must_happen still overlaps after one re-split "
                     "(chapter_id=%s, pairs=%d)",
-                    chapter_id, len(remaining),
+                    chapter_id, len(remaining_dups),
+                )
+            if remaining_boundary:
+                _scene_logger.warning(
+                    "generate_chapter_scenes: scene boundary still invalid after one re-split "
+                    "(chapter_id=%s, issues=%d)",
+                    chapter_id, len(remaining_boundary),
                 )
 
         char_by_name = {c.name: c.id for c in chars}
@@ -397,6 +429,7 @@ class WritingService:
 
         inst += (
             "\n【怎么写好这一段】按本章梗概推进剧情，不重复输入的梗概。"
+            "开头从已写前文最后一句之后继续，不要重复其最后一段的动作和状态。"
             "不得复用上一章已出现的描写句子（景物、动作、比喻均算），需要呼应时只承接事实与情绪，不照抄原句。"
             "按剧情重要性分配笔墨：冲突、关键选择、关系转折和决定的后果写清来龙去脉；"
             "普通过场和重复日常动作一句话带过，不要把收拾、做饭、等待拆成连续的微动作清单，只是过渡就直接跳到有意义的结果。"

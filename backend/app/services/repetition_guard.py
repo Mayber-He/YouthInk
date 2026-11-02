@@ -2,7 +2,7 @@
 
 Pure functions (no DB / no LLM) so they are unit-testable with fixed samples.
 
-Four independent signals, all configurable via :class:`RepetitionConfig`:
+Five independent signals, all configurable via :class:`RepetitionConfig`:
 
 (a) **Reused spans** – maximal runs of text (>= ``ngram`` characters, default 8) that also
     appear in the previous chapter or in what is already written in this chapter. Dialogue
@@ -17,6 +17,9 @@ Four independent signals, all configurable via :class:`RepetitionConfig`:
 (d) **Recall-reference claims (T17)** – paragraphs claiming "一字不差/一模一样/原话/当时回/
     当时说" must quote the previous chapter verbatim; invented quotes or "…表情" details are
     flagged so the single rewrite can replace them with a summary.
+(e) **Scene seam (T18)** – the new scene's first ~200 characters are compared with the previous
+    scene's last ~300 characters; any shared run of >=6 characters means the scene restarted by
+    re-describing the old ending instead of continuing after it.
 
 Calibration note (real chapters from this project, see docs/loop/PROGRESS.md): whole-text
 8-gram *coverage* barely separates a repeating chapter pair (2.9%) from clean ones (0–1.8%),
@@ -101,12 +104,17 @@ class RepetitionConfig:
     # (c) a must_not_include item is flagged when this fraction of its n-grams appears in the scene.
     forbidden_overlap: float = 0.5
     auto_rewrite: bool = True
+    # (d) T18: compare the new scene's opening with the previous scene's ending.
+    seam_check: bool = True
+    seam_head_chars: int = 200
+    seam_tail_chars: int = 300
+    seam_ngram: int = 6
 
     @classmethod
     def from_env(cls) -> "RepetitionConfig":
         """Env overrides (all optional): YOUTHINK_REPEAT_ENABLED / _AUTO_REWRITE / _NGRAM /
         _MIN_SPAN / _MAX_SPANS / _MAX_COVERAGE / _ACTION_MAX / _FORBIDDEN_OVERLAP / _ACTION_WORDS
-        (comma separated)."""
+        / _SEAM_CHECK / _SEAM_HEAD / _SEAM_TAIL / _SEAM_NGRAM."""
         cfg = cls()
 
         def _flag(name: str, default: bool) -> bool:
@@ -128,6 +136,10 @@ class RepetitionConfig:
         cfg.max_coverage = _num("YOUTHINK_REPEAT_MAX_COVERAGE", cfg.max_coverage, float)
         cfg.action_word_max = _num("YOUTHINK_REPEAT_ACTION_MAX", cfg.action_word_max, int)
         cfg.forbidden_overlap = _num("YOUTHINK_REPEAT_FORBIDDEN_OVERLAP", cfg.forbidden_overlap, float)
+        cfg.seam_check = _flag("YOUTHINK_REPEAT_SEAM_CHECK", cfg.seam_check)
+        cfg.seam_head_chars = max(40, _num("YOUTHINK_REPEAT_SEAM_HEAD", cfg.seam_head_chars, int))
+        cfg.seam_tail_chars = max(40, _num("YOUTHINK_REPEAT_SEAM_TAIL", cfg.seam_tail_chars, int))
+        cfg.seam_ngram = max(4, _num("YOUTHINK_REPEAT_SEAM_NGRAM", cfg.seam_ngram, int))
         words = os.environ.get("YOUTHINK_REPEAT_ACTION_WORDS")
         if words and words.strip():
             cfg.action_phrases = tuple(w.strip() for w in words.split(",") if w.strip())
@@ -183,6 +195,8 @@ class RepetitionReport:
     citable_quotes: list[str] = field(default_factory=list)
     # T17: "一字不差/一模一样" claims whose quotation or expression is NOT in the previous chapter.
     recall_misses: list[RecallMiss] = field(default_factory=list)
+    # T18: wording shared between this scene's opening and the previous scene's ending.
+    seam_spans: list[RepeatedSpan] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -198,6 +212,10 @@ class RepetitionReport:
         for sp in self.spans[:max_items]:
             where = "上一章" if sp.source == "previous_chapter" else "本章前文"
             lines.append(f"- 与{where}重复的原句/片段：「{sp.text}」")
+        for sp in self.seam_spans[:max_items]:
+            lines.append(
+                f"- 本场景开头与上一场景结尾重复：「{sp.text}」；请从上场结束之后的新动作或新状态写起"
+            )
         for ah in self.action_hits[:max_items]:
             lines.append(f"- 固定动作/意象「{ah.phrase}」在本章已出现 {ah.count} 次，请换一种写法或省略")
         for fh in self.forbidden_hits[:max_items]:
@@ -296,6 +314,28 @@ def _dialogue_items(text: str) -> list[tuple[str, str]]:
             if norm:
                 items.append((raw.strip(), norm))
     return items
+
+
+def find_scene_seam(
+    scene_text: str,
+    previous_scene_text: str,
+    *,
+    head_chars: int = 200,
+    tail_chars: int = 300,
+    n: int = 6,
+) -> list[RepeatedSpan]:
+    """T18: wording repeated between the new scene's opening and the previous scene's ending.
+
+    Both sides are character windows (default 200 / 300 raw characters). A shared run of at
+    least ``n`` alphanumeric characters is enough — the live sample repeated
+    "表格垫在行李袋上，" and restarted the scene by re-describing the previous ending.
+    """
+    head = (scene_text or "")[: max(0, head_chars)]
+    tail = (previous_scene_text or "")[-max(0, tail_chars):] if previous_scene_text else ""
+    if not head.strip() or not tail.strip():
+        return []
+    _coverage, spans = find_reused_spans(head, tail, n, "previous_scene_tail")
+    return [sp for sp in spans if sp.length >= n]
 
 
 def find_reused_dialogues(
@@ -571,6 +611,21 @@ def analyze_scene_repetition(
         report.reasons.append(
             "回忆引用无法在上一章原文中找到：" + "、".join(f"「{m.text}」" for m in report.recall_misses)
         )
+
+    if cfg.seam_check and (chapter_so_far or "").strip():
+        report.seam_spans = find_scene_seam(
+            checked_text,
+            chapter_so_far,
+            head_chars=cfg.seam_head_chars,
+            tail_chars=cfg.seam_tail_chars,
+            n=cfg.seam_ngram,
+        )
+        if report.seam_spans:
+            report.reasons.append(
+                f"本场景开头与上一场景结尾有 {len(report.seam_spans)} 处 "
+                f"≥{cfg.seam_ngram} 字的重复片段："
+                + "、".join(f"「{sp.text}」" for sp in report.seam_spans[:3])
+            )
 
     report.triggered = bool(report.reasons)
     return report

@@ -632,3 +632,48 @@ T6 之后哪些 evidence 字段真正进提示词，随开关/模型输出而变
 - 验证：T17 专项 **9 passed**；全量 `cd backend && python -m pytest tests -q` **403 passed / 5 failed**（220.82 秒），5 项与既有基线逐项一致（M2 时序/滚动 3 项、M3 流式 1 项、M5 长书 1 项），无新增失败。模型调用全部 mock/固定样本，未调真实 LLM；测试使用临时库，未写入小说数据，未修改现有小说内容。
 - 改动文件：`backend/app/services/repetition_guard.py`、`repetition_service.py`、`writing_service.py`；新增测试与两个 fixture；`docs/loop/PLAN.md`、`PROGRESS.md`。
 - 局限 / 人工确认：① 豁免按引号内文本逐字匹配，标点/引号样式不同即不豁免；② “表情”校验是词面启发式，只处理含上述触发词的段落，可能漏检或把普通“表情”短语当成虚构细节；③ 未校验重写后是否真的保留了节拍原句，只通过 prompt 约束；④ 未回填或改写既有正文、场景节拍和重复检测记录；⑤ `.gitignore` 中 `docs/loop/` 的既有暂存改动未纳入本次提交。
+
+
+## T18 完成：场景接缝与终点状态（2026-11-02）
+
+### 接缝检测
+
+- `RepetitionConfig` 新增 `seam_check`（默认开）、`seam_head_chars`（200）、`seam_tail_chars`（300）、`seam_ngram`（6）；环境变量 `YOUTHINK_REPEAT_SEAM_CHECK` / `_HEAD` / `_TAIL` / `_NGRAM`，长度下限 40、n-gram 下限 4，非法值回退默认。
+- 新增纯函数 `find_scene_seam`：取新场景前 200 字与本章已写前文末 300 字，按字符 n-gram（默认 6）找最长重复片段；任一片段 ≥6 字即返回，来源标记 `previous_scene_tail`。
+- `analyze_scene_repetition` 在原有台词/跨度/动作/禁写/回忆校验之后执行接缝检测，命中的片段写入 `RepetitionReport.seam_spans` 并追加一条原因，因此复用既有“一次重写”流水线；`describe_for_model` 会把片段列给重写模型，要求“从上场结束之后的新动作或新状态写起”，严重度评分也计入 `seam_spans`。
+- 接缝检测发生在 T17 节拍原句遮蔽之后，节拍要求的逐字呼应不会因接缝规则被误报。
+
+### 写作与规划提示
+
+- 写正文任务指令新增：**“开头从已写前文最后一句之后继续，不要重复其最后一段的动作和状态。”** 场景模式与整章模式共用该指令。
+- 规划提示词明确：`entry_state` 从上一场终点之后开始、不得复述上一场动作/状态；`exit_state` 只写本场结果、不得提前包含下一场触发事件；并新增相邻场景边界硬规则。
+- 新增纯函数 `find_adjacent_boundary_issues`，检查两类问题：
+  - `exit_contains_next_event`：上一场 `exit_state` 包含下一场某条 `must_happen` 的触发事件（规范化后包含，或 3-gram Jaccard ≥0.6）。
+  - `exit_entry_similar`：上一场 `exit_state` 与下一场 `entry_state` 的 3-gram Jaccard ≥0.6。
+- `generate_chapter_scenes` 把原有 `must_happen` 重复检查与上述边界检查合并到同一次重拆请求；重拆结果按“问题总数不增加”决定是否采用，仍不合格则保留并分别写警告日志，不循环重试。
+
+### 测试与样本
+
+- 新增 `backend/tests/test_t18_scene_seam.py`（12 tests），固定样本取真实场景 1/2 终稿 `t18_scene1_final.txt`、`t18_scene2_final.txt` 和 T17 场景 3 初稿。
+- 场景 2→3：真实重复片段“表格垫在行李袋上”被接缝检测捕获，触发重写原因与重写 prompt；流水线恰好重写一次。
+- 场景 1→2：真实“队伍停住”是语义承接（“前面还剩三四个人，队伍停住了”→“前面的队伍彻底不动了”），最长逐字重合只有 5 字，**不达 ≥6 字阈值**；测试明确记录这一盲区。另用“把场景 1 末句逐字放到场景 2 开头”的样本验证阈值触发路径。
+- 覆盖开关关闭、n-gram 10 不触发、200/300 窗口缩短、环境变量读取、重写 prompt 内容；规划侧覆盖触发事件越界、终点/起点同文、干净边界、一次重拆与提示词规则。
+- 计划与正文指令测试：`test_previous_chapter_voice.py` 增补“从已写前文最后一句之后继续”断言。
+
+### 改动文件
+
+- `backend/app/services/repetition_guard.py`、`repetition_service.py`、`scene_planning.py`、`writing_service.py`
+- 新增 `backend/tests/test_t18_scene_seam.py`、`backend/tests/fixtures/t18_scene1_final.txt`、`t18_scene2_final.txt`
+- `backend/tests/test_previous_chapter_voice.py`、`docs/loop/PLAN.md`、`PROGRESS.md`
+
+### 验证
+
+- T18 专项 12 passed；全量 `cd backend && python -m pytest tests -q` **415 passed / 5 failed**（242.03 秒），5 项与既有基线（M2 时序/滚动 3 项、M3 流式 1 项、M5 长书 1 项）逐项一致，无新增失败。模型调用全部 mock/固定样本，未调真实 LLM；测试使用临时库，未写入或修改小说数据。
+- 未修改既有小说正文、场景节拍、记忆或重复检测记录；`.gitignore` 中 `docs/loop/` 的既有暂存改动未纳入本次提交。
+
+### 局限 / 人工确认
+
+- 接缝规则只认**逐字** ≥6 字重合；场景 1→2 的“队伍停住/彻底不动”这类同义状态复述不会被检出，需要靠写作指令或更宽的语义检测。是否降低阈值（会显著增加误报）或增加同义词表，需要你结合真实续写决定。
+- 200/300 字窗口与 6 字阈值目前只按真实场景 2→3 校准，未覆盖全部章节；建议实际续写几章后抽查 `seam_spans` 原因，确认没有把必要的承接动作误判为抄写。
+- 规划边界检查使用 3-gram Jaccard 0.6：能抓到逐字包含与高度同文，但抓不到完全换词的“换皮复述”；重拆提示词的遵从度也只能靠真实模型抽查。
+- 未回填或改写既有场景；不自动修复已保存的 `exit_state`/`entry_state`。

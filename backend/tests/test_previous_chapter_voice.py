@@ -212,3 +212,5 @@ def test_prose_instruction_forbids_reusing_previous_descriptive_sentences(
         )
     assert "不得复用上一章已出现的描写句子" in user_p
     assert "不照抄原句" in user_p
+    # T18: scene continuity starts AFTER the last written sentence, not by replaying it.
+    assert "开头从已写前文最后一句之后继续，不要重复其最后一段的动作和状态。" in user_p

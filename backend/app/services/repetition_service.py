@@ -45,6 +45,7 @@ def _severity(report: RepetitionReport) -> int:
         + len(report.forbidden_hits) * 3
         + len(report.time_hits) * 3
         + len(report.recall_misses) * 3
+        + len(report.seam_spans) * 2
     )
 
 

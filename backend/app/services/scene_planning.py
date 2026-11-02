@@ -6,9 +6,11 @@ schema-compatible we serialize the checklist into the existing ``scenes.beat``
 text column — no DB migration. Downstream (assembler, writing_boundary, write
 prompts) keep reading ``beat`` unchanged.
 
-This module also provides a deterministic adjacent-scene duplication check over
-``must_happen`` using character n-gram overlap (Jaccard over 3-grams), so the
-caller can ask the model to re-split once when two neighbours overlap too much.
+This module also provides deterministic adjacent-scene checks using character
+n-gram overlap (Jaccard over 3-grams): duplicated ``must_happen`` items, an
+``exit_state`` that already contains the next scene's triggering event (T18), and
+an ``exit_state`` too similar to the next scene's ``entry_state``. The caller can
+ask the model to re-split once when any of these fire.
 """
 
 from __future__ import annotations
@@ -101,4 +103,83 @@ def describe_duplicates(pairs: list[DuplicatePair]) -> str:
             f"- 场景{p.index_a + 1} 的「{p.item_a}」与 场景{p.index_b + 1} 的「{p.item_b}」"
             f"（相似度 {p.similarity}）"
         )
+    return "\n".join(lines)
+
+
+@dataclass
+class BoundaryIssue:
+    index_a: int  # 0-based scene index
+    index_b: int  # index_a + 1
+    kind: str     # "exit_contains_next_event" | "exit_entry_similar"
+    text_a: str   # exit_state of scene A
+    text_b: str   # next must_happen item, or entry_state of scene B
+    similarity: float
+
+
+def _norm_boundary(text: str) -> str:
+    return re.sub(r"[^\w]", "", (text or "").lower())
+
+
+def find_adjacent_boundary_issues(
+    entry_states: list[str],
+    exit_states: list[str],
+    must_happen_per_scene: list[list[str]],
+    threshold: float = 0.6,
+) -> list[BoundaryIssue]:
+    """T18: scene A's exit must stop BEFORE scene B's trigger and entry state.
+
+    Two deterministic failures:
+    (1) A's ``exit_state`` contains (or closely paraphrases) an item in B's
+        ``must_happen`` — the model already wrote B's trigger at the end of A.
+    (2) A's ``exit_state`` and B's ``entry_state`` are near-identical — B starts by
+        restating where A ended instead of moving on.
+    """
+    issues: list[BoundaryIssue] = []
+    count = min(len(exit_states), max(0, len(entry_states) - 1), len(must_happen_per_scene) - 1)
+    for i in range(max(0, count)):
+        exit_a = (exit_states[i] or "").strip()
+        entry_b = (entry_states[i + 1] or "").strip()
+        if not exit_a:
+            continue
+        norm_exit = _norm_boundary(exit_a)
+        for item in must_happen_per_scene[i + 1]:
+            item = (item or "").strip()
+            norm_item = _norm_boundary(item)
+            if not norm_item:
+                continue
+            sim = ngram_similarity(exit_a, item)
+            contained = len(norm_item) >= 4 and norm_item in norm_exit
+            if contained or sim >= threshold:
+                issues.append(
+                    BoundaryIssue(i, i + 1, "exit_contains_next_event", exit_a, item, round(sim, 3))
+                )
+        if entry_b:
+            sim = ngram_similarity(exit_a, entry_b)
+            if sim >= threshold:
+                issues.append(
+                    BoundaryIssue(i, i + 1, "exit_entry_similar", exit_a, entry_b, round(sim, 3))
+                )
+    return issues
+
+
+def describe_boundary_issues(issues: list[BoundaryIssue]) -> str:
+    """Human-readable description fed back to the model for a re-split."""
+    if not issues:
+        return ""
+    lines = [
+        "以下相邻场景的终点状态越过场景边界，或与下一场景起点重复，请重新拆分："
+    ]
+    for issue in issues:
+        if issue.kind == "exit_contains_next_event":
+            lines.append(
+                f"- 场景{issue.index_a + 1} 的终点状态「{issue.text_a}」提前包含了"
+                f"场景{issue.index_b + 1} 的触发事件「{issue.text_b}」"
+                f"（相似度 {issue.similarity}）；终点状态必须停在触发事件之前"
+            )
+        else:
+            lines.append(
+                f"- 场景{issue.index_a + 1} 的终点状态「{issue.text_a}」与"
+                f"场景{issue.index_b + 1} 的起点状态「{issue.text_b}」过于相似"
+                f"（相似度 {issue.similarity}）；下一场应从新的状态开始"
+            )
     return "\n".join(lines)
