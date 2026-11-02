@@ -243,7 +243,7 @@ class RepetitionReport:
         """Concrete, quotable list of what to avoid when rewriting (fed back to the model)."""
         lines: list[str] = []
         if self.time_hits:
-            lines.append(f'- 与上一章相隔 {self.story_time_gap_days} 天，正文出现“{"、".join(self.time_hits)}”；请核对日期，不能用这些词指称上一章的事件，改用具体日期或准确的时间间隔。')
+            lines.append(f'- 与上一章相隔 {self.story_time_gap_days} 天，正文出现“{"、".join(self.time_hits)}”；只替换这些被标出的时间词，优先改为“上周/前几天/那天晚上”等相对说法，不要写具体公历日期。')
         for dl in self.dialogues[:max_items]:
             where = "上一章" if dl.source == "previous_chapter" else "本章前文"
             lines.append(f"- 整句台词与{where}重复：「{dl.text}」")
@@ -438,6 +438,27 @@ _APPEARANCE_STOP: frozenset[str] = frozenset({
     "手机", "手上", "手里", "手中", "对方", "时候", "一点", "有些", "没有",
     "别的", "东西", "什么", "一个", "一件", "一根", "一支", "上面", "下面",
 })
+# T23: bare generic body/sensory nouns are not distinctive labels. Substring matching also
+# rejects modifiers of these words ("高个子"/"个子偏高", "头发有点自然卷", "眼睛不算大"), which
+# is what made the v5 chapter flag "个子" three times.
+_APPEARANCE_GENERIC: frozenset[str] = frozenset({
+    "个子", "身高", "身材", "身形", "体形", "体重", "胖瘦",
+    "头发", "发色", "发型", "刘海",
+    "眼睛", "眼神", "目光", "眉眼",
+    "脸", "脸庞", "脸颊", "脸色", "长相", "容貌", "外表",
+    "声音", "嗓音", "语调", "语气",
+    "皮肤", "肤色", "五官",
+    "脖子", "肩膀", "身姿", "体态", "姿势",
+    "神情", "神色", "神态", "表情",
+})
+# T23: tags must be at least 3 characters — except these distinctive 2-character compounds
+# (the v4/v5 sample tracks "眉心", which is too specific to be a generic body noun).
+_SHORT_APPEARANCE_KEEP: frozenset[str] = frozenset({
+    "眉心", "眉骨", "眼角", "眼尾", "唇角", "嘴角", "鼻梁", "鼻尖",
+    "下颌", "梨涡", "酒窝", "虎牙", "泪痣", "锁骨", "指节", "手腕",
+    "脚踝", "耳廓", "睫毛", "瞳孔",
+})
+_MIN_APPEARANCE_CHARS = 3
 # T20-a: clothing and accessories are not "重复外貌标签" even when they contain a body hint
 # (背包/发圈/眼镜/手表 …). Substring matching also rejects descriptive variants like 素色发圈.
 _ACCESSORY_STOP: tuple[str, ...] = (
@@ -460,6 +481,9 @@ def _looks_like_appearance(phrase: str) -> bool:
     phrase = (phrase or "").strip()
     if not phrase or phrase in _APPEARANCE_STOP:
         return False
+    # T23: "个子"/"头发"/"眼睛"/"脸"/"声音" and their modifiers are generic, not labels.
+    if any(generic in phrase for generic in _APPEARANCE_GENERIC):
+        return False
     if any(item in phrase for item in _ACCESSORY_STOP):
         return False
     if any(action in phrase for action in _APPEARANCE_ACTIONS):
@@ -468,15 +492,16 @@ def _looks_like_appearance(phrase: str) -> bool:
 
 
 def extract_appearance_tags(
-    appearance: str, min_chars: int = 2, max_chars: int = 8
+    appearance: str, min_chars: int = _MIN_APPEARANCE_CHARS, max_chars: int = 8
 ) -> list[str]:
-    """T19: short descriptive phrases from a character's appearance card.
+    """T19/T23: short descriptive phrases from a character's appearance card.
 
-    The card is split on punctuation first; each 2–8-character clause is a candidate, and
-    longer clauses contribute their 2–8-character word tokens (jieba) so a distinctive label
-    such as "眉心" is found inside "眉心有一点淡淡的褶". Only body/expression/posture phrases
-    survive; clothing/accessory nouns, obvious non-appearance words and actions are dropped.
-    First-seen order.
+    The card is split on punctuation first; each 3–8-character clause is a candidate, and
+    longer clauses contribute their word tokens (jieba) so a distinctive label such as "眉心"
+    is found inside "眉心有一点淡淡的褶". T23 raises the floor to 3 characters (2-character
+    distinctive compounds such as "眉心" are kept) and drops generic body/sensory nouns.
+    Only body/expression/posture phrases survive; clothing/accessory nouns, obvious
+    non-appearance words and actions are dropped. First-seen order.
     """
     import jieba  # lazy: the other repetition checks never pay the dictionary-load cost
 
@@ -486,7 +511,12 @@ def extract_appearance_tags(
     def _add(phrase: str) -> None:
         phrase = (phrase or "").strip()
         if not (min_chars <= len(phrase) <= max_chars):
-            return
+            # T23: the only exception to the >=3-character floor.
+            if not (
+                phrase in _SHORT_APPEARANCE_KEEP
+                and 2 <= len(phrase) <= max_chars
+            ):
+                return
         if phrase in seen or not _looks_like_appearance(phrase):
             return
         seen.add(phrase)
@@ -564,6 +594,10 @@ def split_must_not_include(beat: str) -> list[str]:
 # ---------------------------------------------------------------- T17: beat quotes / recall
 
 _ANY_QUOTED = re.compile(r"[“\"「『]([^”\"」』\n]+)[”\"」』]")
+# T23: beat-required quotes come only from double quotes (“…” / "…"), never from 「」/『』
+# nicknames and handles such as 「吃一口软糖」.
+_STRAIGHT_QUOTED = re.compile(r"[“\"]([^”\"\n]+)[”\"]")
+_SENTENCE_END = re.compile(r"[。！？!?…]")
 _RECALL_MARKER = re.compile(r"一字不差|一模一样|原话|当时回|当时说")
 _EXPRESSION_FILLERS = ("一个", "这个", "那个", "这种", "那种", "一种", "个")
 
@@ -590,16 +624,30 @@ def extract_quoted_phrases(text: str, min_chars: int = 1) -> list[str]:
 def extract_required_quotes(
     beat: str, *references: str, min_chars: int = 4
 ) -> list[str]:
-    """T17: quotes the beat requires, but only those already verbatim in earlier prose.
+    """T17/T23: quotes the beat requires, but only those already verbatim in earlier prose.
 
     A quote that the beat invents is NOT exempt from the repetition checks; only a genuine
     callback to the previous chapter / already-written chapter qualifies.
+
+    T23 narrows the source: only double-quoted “…” / "…" content counts, and only when it
+    contains sentence-ending punctuation or is at least 6 characters long. Corner-bracket
+    「」/『』 text is usually a nickname or handle (「吃一口软糖」), not a required callback.
     """
     refs = [r for r in references if r]
-    return [
-        q for q in extract_quoted_phrases(beat, min_chars)
-        if any(q in ref for ref in refs)
-    ]
+    out: list[str] = []
+    seen: set[str] = set()
+    for match in _STRAIGHT_QUOTED.finditer(beat or ""):
+        body = match.group(1).strip()
+        norm = _normalise(body)
+        if len(norm) < min_chars or norm in seen:
+            continue
+        if len(norm) < 6 and not _SENTENCE_END.search(body):
+            continue
+        if not any(body in ref for ref in refs):
+            continue
+        seen.add(norm)
+        out.append(body)
+    return out
 
 
 def extract_citable_quotes(

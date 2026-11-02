@@ -577,7 +577,7 @@ class WritingService:
         async def _rewrite(text: str, report) -> str:
             sys_msg = (
                 "你是青春小说的资深编辑。按要求对给定的场景做最小改动重写：只改被标出的重复片段，"
-                "其余内容（尤其是时间表述）保持原样，剧情事件不变；"
+                "除被标出的时间词外其余内容（尤其是其他时间表述）保持原样，剧情事件不变；"
                 "只输出重写后的场景正文，不加标题、说明或前后缀。"
             )
             time_hint = build_time_hint(

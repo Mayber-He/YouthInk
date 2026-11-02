@@ -74,5 +74,5 @@ def time_anchor(previous: str | None, current: str) -> tuple[str, list[str]]:
         warning = '时间锚点无法确定：请补充或核对章节的 story_time（明确日期；跨年或闰年有歧义时补充年份），不得猜补时间。'
         warnings.append(warning)
         lines.append(warning)
-    lines.append('禁止用“昨晚/昨天/今早”指称上一章的事；须按本章与上一章的实际日期改用“前几天/上周”或具体日期，不得把章节相邻当成日期相邻。')
+    lines.append('禁止用“昨晚/昨天/今早”指称上一章的事；须按本章与上一章的实际日期改用“前几天/上周/那天晚上”等相对说法，不要写具体公历日期，不得把章节相邻当成日期相邻。')
     return '\n'.join(lines), warnings

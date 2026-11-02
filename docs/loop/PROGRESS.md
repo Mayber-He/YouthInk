@@ -848,3 +848,48 @@ T6 之后哪些 evidence 字段真正进提示词，随开关/模型输出而变
 - 提示词会把该人物在所有上下文块（含人物卡）中的本名替换成别名，人物卡上的“姓名”字段也会显示为别名；这符合“不提前泄露本名”的目标，但可能让模型误以为角色本名就是别名，需要确认或后续在人物卡块中单独说明。
 - 正文本名检测是纯字面计数，无法区分叙述、对话与他人称呼；重写只要求替换称谓，不保证模型一定不泄露。
 - 未回填既有场景节拍或正文；既有 `repetition_checks` 记录不含 `alias_hits`。
+
+
+## T23 完成：误报与措辞修正（2026-11-02）
+
+### 改动
+
+- 外貌标签（`backend/app/services/repetition_guard.py`）：
+  - 新增通用词停用表 `_APPEARANCE_GENERIC`（个子、身高、头发、眼睛、脸、声音、皮肤、五官、神情、表情等），用子串匹配排除“高个子/个子偏高/头发自然卷/眼睛很亮”一类通用描述。
+  - 标签下限提高到 3 字（`_MIN_APPEARANCE_CHARS`）；仅保留 `_SHORT_APPEARANCE_KEEP` 中的 2 字特征词（眉心、眼角、唇角、梨涡等），保证 v5 的“眉心”仍可检出。
+  - 仍只统计传入的在场人物卡外貌描述（`appearances`），不扩大到全仓库或正文。
+- T17 原句提取（`extract_required_quotes`）：
+  - 只扫描双引号 “…” / "…"，不再把 `「」`/`『』` 内容当作必保原句；`「吃一口软糖」` 这类昵称/网名不再进入 `required_quotes`。
+  - 仅提取含句末标点（。！？!?…）或规范化后不少于 6 字的内容，短口头语不再被误豁免。
+  - `extract_quoted_phrases` 保留原行为，供其他调用/兼容；变化只作用于 T17 必保原句。
+- 重写提示词（`backend/app/services/repetition_service.py`、`writing_service.py`）：
+  - 有 `time_hits` 时，基础指令改为“只替换被标出的时间词；其余时间表述必须原样保留”，并明确优先“上周/前几天/那天晚上”、不要写具体公历日期、不得改成与实际相隔不符的词。
+  - 无 `time_hits` 时保留原来的“时间表述必须原样保留”指令，二者不再同时出现、互相矛盾。
+  - `build_time_hint` 删除“优先使用具体日期或准确间隔”，改为优先相对说法且不写公历日期；仍保留“除被标出的时间词外……原样保留”。
+  - 重写 system prompt 同步改为“除被标出的时间词外其余内容（尤其是其他时间表述）保持原样”。
+  - `repetition_guard.describe_for_model` 的时间项改为“只替换这些被标出的时间词，优先改为上周/前几天/那天晚上，不要写具体公历日期”。
+  - `story_time.time_anchor` 的写作指引改为“前几天/上周/那天晚上”，不再建议“或具体日期”。
+- 新增 `backend/tests/test_t23_false_positives.py`（8 tests）与 fixtures `t23_scene3_beat.txt`、`t23_previous_chapter.txt`（v5 场景 3 节拍与上一章节选）：
+  - v5 外貌卡中“眉心”保留，“个子/高个子/头发/眼睛/脸/声音”不成为标签；正文写三次“高个子”不触发、写三次“眉心”仍触发。
+  - v5 节拍中的 `「吃一口软糖」` 不被提取；只有“含句末标点或 ≥6 字”的双引号内容进入必保原句。
+  - 有时间词与无时间词两种重写指令互斥且各自自洽；`build_time_hint` 不再指向具体公历日期。
+
+### 改动文件
+
+- `backend/app/services/repetition_guard.py`、`backend/app/services/repetition_service.py`、`backend/app/services/writing_service.py`、`backend/app/services/story_time.py`
+- 新增 `backend/tests/test_t23_false_positives.py`、`backend/tests/fixtures/t23_scene3_beat.txt`、`backend/tests/fixtures/t23_previous_chapter.txt`
+- `docs/loop/PLAN.md`、`docs/loop/PROGRESS.md`
+
+### 验证
+
+- T23 专项 `python -m pytest tests/test_t23_false_positives.py -q`：**8 passed**。
+- 相关回归（T23 + T17 + T18 + T19 + T20 + T21 + T22 + 重复检测 + 时间 + 场景清单 + 写作质量 + 提示词）：**161 passed**。
+- 全量 `cd backend && python -m pytest tests -q`：**453 passed / 5 failed**（249.42 秒），5 项与既有基线逐项一致（M2 时序/滚动 3 项、M3 流式 1 项、M5 长书 1 项），无新增失败。
+- 模型调用全部 mock/固定样本，未调真实 LLM；测试使用临时库，未写入或修改小说数据。
+
+### 局限 / 人工确认
+
+- “少于 3 字不计入”为“眉心”等 2 字特征词保留了白名单例外；新出现的 2 字特征词若不在白名单会漏检。
+- 通用词采用子串匹配，“眼睛很亮”这类仍可能具辨识度的描述会被一并排除；如需保留应扩充特征词白名单或改为整词匹配。
+- 时间词替换只约束相对说法与“不写公历日期”，不能保证“上周/前几天”与具体事件先后一致；真实续写仍需抽查。
+- 双引号之外的引号形式（如 `「」` 中的真实台词）不再作为必保原句，若作者确实用 `「」` 写节拍台词，需要改用 “…” 才能获得豁免。
