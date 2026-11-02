@@ -516,6 +516,7 @@ class WritingService:
             record_fn=_record,
             auto_rewrite=auto_rewrite,
             story_time_gap_days=gap,
+            beat=scene.beat if scene else "",
         )
 
     async def check_write_boundary(self, req: StreamWriteRequest) -> str:

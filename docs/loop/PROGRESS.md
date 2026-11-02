@@ -618,3 +618,17 @@ T6 之后哪些 evidence 字段真正进提示词，随开关/模型输出而变
 - **默认行为未变化**：不设置环境变量时仍注入上一章末 1500 字，RAG 去重窗口仍为末 1500 字。因此本次不会自动减少模型抄写，需显式启用配置。
 - 启用 `dialogue_action` 后，注入内容会变短并出现省略号；上一章梗概、人物卡、伏笔与 RAG 不受影响，事实依据仍以梗概为准。
 - 局限 / 人工确认：① 景物词/动作词是固定词表，可能误删或漏删；② 只影响 assembler 的“上一章结尾片段”，`repetition-check`、`check_write_boundary_ex` 等仍读取上一章全文；③ 建议先用一组真实章节对比 `tail` 与 `dialogue_action` 的续写质量，再决定是否把默认改为 `dialogue_action` 或更短窗口。
+
+
+## T17 完成：节拍原句豁免与回忆引用校验（2026-11-02）
+
+- 节拍原句豁免：`analyze_scene_repetition` 新增可选 `beat`，从节拍引号中提取 ≥4 字句子；只有逐字出现在上一章或本章已写正文中的句子才进入 `required_quotes`。做整句台词/字符 n-gram/覆盖率检测前，先用非字母数字占位符遮蔽这些句子，因此节拍要求的上一章原句不再被误判为重复；覆盖率分母仍用未遮蔽正文，避免遮蔽导致比例虚高。
+- 重写提示：`build_rewrite_instruction` 新增【节拍要求的逐字呼应】段，列出 `required_quotes` 并写明必须原样保留；同时把最终句改为“不要照抄被标出的重复项，但节拍逐字呼应必须保留”，避免旧指令与豁免互相矛盾。
+- 回忆引用校验：新增 `find_recall_mismatches`。凡含“一字不差/一模一样/原话/当时回/当时说”的段落，其引号内容（规范化后 ≥4 字）必须在上一章原文中找到；找不到即写入 `recall_misses` 并作为一条重复原因触发一次既有重写流程。另对同段中的“XX表情”短描写做同样校验，因为真实样本里的“歪头的小表情”没有加引号；该扩展用于覆盖用户指定的检出项。
+- 重写提示附【上一章可引用的原句清单】（最多 60 条，排除已判为重复且非节拍要求的句子），并写明“不确定就概括，不得补写表情或台词”。`recall_misses` 也进入 `describe_for_model` 和严重度评分。
+- 接线：`writing_service.check_scene_repetition` 把 `scene.beat` 传给流水线；`run_repetition_pipeline` 新增可选 `beat`，初次与重写后分析共用。响应 `report` 新增 `required_quotes`、`citable_quotes`、`recall_misses`。
+- 固定样本：`backend/tests/fixtures/t17_scene3_initial.txt`（真实场景 3 初稿，1,227 字）与 `t17_ch1_excerpt.txt`（第 1 章相关原文）。新增 `backend/tests/test_t17_beat_quotes.py`。
+- 测试覆盖：节拍原句在上一章/本章前文中被豁免；仅差一个字的引号不豁免；场景 3 初稿的“不行才要看嘛”“歪头的小表情”被检出，“我拍得不行”不误报；真实引号与“转圈的表情”不误报；重写 prompt 同时含节拍呼应段、可引用清单与“不确定就概括”句；流水线只重写一次；HTTP 接口正确把 `scene.beat` 带入检测和 prompt。
+- 验证：T17 专项 **9 passed**；全量 `cd backend && python -m pytest tests -q` **403 passed / 5 failed**（220.82 秒），5 项与既有基线逐项一致（M2 时序/滚动 3 项、M3 流式 1 项、M5 长书 1 项），无新增失败。模型调用全部 mock/固定样本，未调真实 LLM；测试使用临时库，未写入小说数据，未修改现有小说内容。
+- 改动文件：`backend/app/services/repetition_guard.py`、`repetition_service.py`、`writing_service.py`；新增测试与两个 fixture；`docs/loop/PLAN.md`、`PROGRESS.md`。
+- 局限 / 人工确认：① 豁免按引号内文本逐字匹配，标点/引号样式不同即不豁免；② “表情”校验是词面启发式，只处理含上述触发词的段落，可能漏检或把普通“表情”短语当成虚构细节；③ 未校验重写后是否真的保留了节拍原句，只通过 prompt 约束；④ 未回填或改写既有正文、场景节拍和重复检测记录；⑤ `.gitignore` 中 `docs/loop/` 的既有暂存改动未纳入本次提交。

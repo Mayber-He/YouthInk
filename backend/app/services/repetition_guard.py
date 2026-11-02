@@ -2,17 +2,21 @@
 
 Pure functions (no DB / no LLM) so they are unit-testable with fixed samples.
 
-Three independent signals, all configurable via :class:`RepetitionConfig`:
+Four independent signals, all configurable via :class:`RepetitionConfig`:
 
 (a) **Reused spans** – maximal runs of text (>= ``ngram`` characters, default 8) that also
     appear in the previous chapter or in what is already written in this chapter. Dialogue
     and chat lines are compared WITHOUT their speaker label (``「吃一口软糖」：``), otherwise
-    every chat line would "match" on the label alone.
+    every chat line would "match" on the label alone. T17: quotes the current beat explicitly
+    requires are exempt, but only when the same words already exist verbatim in earlier prose.
 (b) **Stock action phrases** – configurable list ("手指悬", "盯着", "扣在桌上", "风扇",
     "屏幕暗下去" …) counted across (already written chapter text + this scene). A phrase is
     flagged once its chapter total reaches ``action_word_max``.
 (c) **must_not_include overlap** – items the scene plan forbade; a hit means the scene wrote
     material that belongs to a later scene.
+(d) **Recall-reference claims (T17)** – paragraphs claiming "一字不差/一模一样/原话/当时回/
+    当时说" must quote the previous chapter verbatim; invented quotes or "…表情" details are
+    flagged so the single rewrite can replace them with a summary.
 
 Calibration note (real chapters from this project, see docs/loop/PROGRESS.md): whole-text
 8-gram *coverage* barely separates a repeating chapter pair (2.9%) from clean ones (0–1.8%),
@@ -156,6 +160,12 @@ class ReusedDialogue:
 
 
 @dataclass
+class RecallMiss:
+    text: str          # the claimed quotation / expression as written in the new scene
+    kind: str          # "quoted" | "expression"
+
+
+@dataclass
 class RepetitionReport:
     triggered: bool = False
     reasons: list[str] = field(default_factory=list)
@@ -166,6 +176,13 @@ class RepetitionReport:
     forbidden_hits: list[ForbiddenHit] = field(default_factory=list)
     time_hits: list[str] = field(default_factory=list)
     story_time_gap_days: int | None = None
+    # T17: beat lines that are verified verbatim in earlier prose are exempt from the
+    # dialogue/span checks, but must be preserved by the rewrite.
+    required_quotes: list[str] = field(default_factory=list)
+    # T17: previous-chapter lines the rewrite may quote verbatim.
+    citable_quotes: list[str] = field(default_factory=list)
+    # T17: "一字不差/一模一样" claims whose quotation or expression is NOT in the previous chapter.
+    recall_misses: list[RecallMiss] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -185,6 +202,11 @@ class RepetitionReport:
             lines.append(f"- 固定动作/意象「{ah.phrase}」在本章已出现 {ah.count} 次，请换一种写法或省略")
         for fh in self.forbidden_hits[:max_items]:
             lines.append(f"- 本场景禁止出现的素材「{fh.item}」被写入了，请删除或留给后续场景")
+        for rm in self.recall_misses[:max_items]:
+            lines.append(
+                f"- 回忆引用无法在上一章原文中逐字找到：「{rm.text}」；"
+                "请改成概括，不得补写表情或台词"
+            )
         return "\n".join(lines)
 
 
@@ -212,13 +234,24 @@ def _ngram_set(text: str, n: int) -> set[str]:
 
 
 def find_reused_spans(
-    new_text: str, reference: str, n: int = 8, source: str = "previous_chapter"
+    new_text: str,
+    reference: str,
+    n: int = 8,
+    source: str = "previous_chapter",
+    denominator_text: str | None = None,
 ) -> tuple[float, list[RepeatedSpan]]:
-    """Return (coverage ratio, maximal reused spans) of ``new_text`` versus ``reference``."""
+    """Return (coverage ratio, maximal reused spans) of ``new_text`` versus ``reference``.
+
+    ``denominator_text`` lets callers mask exempted lines out of ``new_text`` without shrinking
+    the coverage denominator (T17 uses it so beat-required quotes do not inflate coverage).
+    """
     ref_grams = _ngram_set(reference, n)
     if not ref_grams:
         return 0.0, []
-    total = covered = 0
+    total = 0
+    if denominator_text is not None:
+        total = sum(len(s) for _raw, s, _idx in _units(denominator_text))
+    covered = 0
     spans: list[RepeatedSpan] = []
     seen: set[str] = set()
     for raw, s, idx in _units(new_text):
@@ -227,7 +260,8 @@ def find_reused_spans(
             if s[i : i + n] in ref_grams:
                 for j in range(i, i + n):
                     mark[j] = True
-        total += len(s)
+        if denominator_text is None:
+            total += len(s)
         covered += sum(mark)
         i = 0
         while i < len(s):
@@ -331,6 +365,130 @@ def split_must_not_include(beat: str) -> list[str]:
     return []
 
 
+# ---------------------------------------------------------------- T17: beat quotes / recall
+
+_ANY_QUOTED = re.compile(r"[“\"「『]([^”\"」』\n]+)[”\"」』]")
+_RECALL_MARKER = re.compile(r"一字不差|一模一样|原话|当时回|当时说")
+_EXPRESSION_FILLERS = ("一个", "这个", "那个", "这种", "那种", "一种", "个")
+
+
+def _normalise(text: str) -> str:
+    """Compare Chinese prose while ignoring whitespace and punctuation."""
+    return "".join(c.lower() for c in (text or "") if c.isalnum())
+
+
+def extract_quoted_phrases(text: str, min_chars: int = 1) -> list[str]:
+    """Quoted bodies in ``text`` (quote marks removed), in first-seen order."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for match in _ANY_QUOTED.finditer(text or ""):
+        body = match.group(1).strip()
+        norm = _normalise(body)
+        if len(norm) < min_chars or norm in seen:
+            continue
+        seen.add(norm)
+        out.append(body)
+    return out
+
+
+def extract_required_quotes(
+    beat: str, *references: str, min_chars: int = 4
+) -> list[str]:
+    """T17: quotes the beat requires, but only those already verbatim in earlier prose.
+
+    A quote that the beat invents is NOT exempt from the repetition checks; only a genuine
+    callback to the previous chapter / already-written chapter qualifies.
+    """
+    refs = [r for r in references if r]
+    return [
+        q for q in extract_quoted_phrases(beat, min_chars)
+        if any(q in ref for ref in refs)
+    ]
+
+
+def extract_citable_quotes(
+    previous_chapter: str, min_chars: int = 4, max_items: int = 60
+) -> list[str]:
+    """T17: verbatim lines from the previous chapter that a rewrite may quote."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw, norm in _dialogue_items(previous_chapter):
+        if len(norm) < min_chars or norm in seen:
+            continue
+        seen.add(norm)
+        out.append(raw)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _mask_quotes(text: str, quotes: list[str]) -> str:
+    """Replace required quotes with a non-alnum placeholder so n-gram checks ignore them."""
+    masked = text or ""
+    for quote in sorted((q for q in quotes if q), key=len, reverse=True):
+        masked = masked.replace(quote, "□" * len(quote))
+    return masked
+
+
+def _expression_phrases(paragraph: str) -> list[str]:
+    """Extract short '…表情' descriptions so invented expressions can be checked too."""
+    out: list[str] = []
+    for segment in re.split(r"[，。；：！？\n]", paragraph or ""):
+        pos = segment.find("表情")
+        if pos < 0:
+            continue
+        cut = -1
+        for marker in _EXPRESSION_FILLERS:
+            found = segment.rfind(marker, 0, pos)
+            if found >= 0:
+                cut = max(cut, found + len(marker))
+        phrase = (segment[cut:pos + 2] if cut >= 0 else segment[max(0, pos - 8):pos + 2]).strip()
+        phrase = phrase.lstrip("的了着")
+        norm = _normalise(phrase)
+        if len(norm) >= 3 and phrase not in out:
+            out.append(phrase)
+    return out
+
+
+def find_recall_mismatches(scene_text: str, previous_chapter: str) -> list[RecallMiss]:
+    """T17: verify '一字不差/一模一样/原话/当时回/当时说' claims against the previous chapter.
+
+    In any paragraph carrying one of those markers, every quoted body of >=4 characters must
+    exist verbatim (after removing punctuation/whitespace) in the previous chapter. Short
+    '…表情' descriptions in the same paragraph are checked the same way, because the live sample
+    fabricated "歪头的小表情" without putting it in quotes.
+    """
+    if not (previous_chapter or "").strip():
+        return []
+    reference = _normalise(previous_chapter)
+    paragraphs = [p for p in re.split(r"\n\s*\n", scene_text or "") if p.strip()]
+    if len(paragraphs) <= 1:
+        paragraphs = [p for p in (scene_text or "").splitlines() if p.strip()]
+
+    misses: list[RecallMiss] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(text: str, kind: str) -> None:
+        text = (text or "").strip()
+        key = (kind, _normalise(text))
+        if not key[1] or key in seen:
+            return
+        if key[1] in reference:
+            return
+        seen.add(key)
+        misses.append(RecallMiss(text=text, kind=kind))
+
+    for paragraph in paragraphs:
+        if not _RECALL_MARKER.search(paragraph):
+            continue
+        for quote in _QUOTED.findall(paragraph):
+            if len(_normalise(quote)) >= 4:
+                _add(quote, "quoted")
+        for expression in _expression_phrases(paragraph):
+            _add(expression, "expression")
+    return misses
+
+
 # ---------------------------------------------------------------- main entry
 
 def analyze_scene_repetition(
@@ -341,8 +499,14 @@ def analyze_scene_repetition(
     must_not_include: list[str] | None = None,
     config: RepetitionConfig | None = None,
     story_time_gap_days: int | None = None,
+    beat: str = "",
 ) -> RepetitionReport:
-    """Run all three checks on a freshly generated scene and decide whether it is over threshold."""
+    """Run all checks on a freshly generated scene and decide whether it is over threshold.
+
+    ``beat`` (T17) lets quotes the scene plan explicitly requires be exempted from the
+    dialogue/span checks — but only when the same words already exist verbatim in the previous
+    chapter or in the already-written part of this chapter.
+    """
     cfg = config or RepetitionConfig()
     report = RepetitionReport()
     if not cfg.enabled or not (scene_text or "").strip():
@@ -355,15 +519,25 @@ def analyze_scene_repetition(
             f'与上一章相隔 {story_time_gap_days} 天，疑似相对时间错位：' + '、'.join(report.time_hits)
         )
 
-    cov_prev, spans_prev = find_reused_spans(scene_text, previous_chapter, cfg.ngram, "previous_chapter")
-    cov_here, spans_here = find_reused_spans(scene_text, chapter_so_far, cfg.ngram, "chapter_so_far")
+    report.required_quotes = extract_required_quotes(beat, previous_chapter, chapter_so_far)
+    report.citable_quotes = extract_citable_quotes(previous_chapter)
+    checked_text = _mask_quotes(scene_text, report.required_quotes)
+
+    cov_prev, spans_prev = find_reused_spans(
+        checked_text, previous_chapter, cfg.ngram, "previous_chapter",
+        denominator_text=scene_text,
+    )
+    cov_here, spans_here = find_reused_spans(
+        checked_text, chapter_so_far, cfg.ngram, "chapter_so_far",
+        denominator_text=scene_text,
+    )
     report.coverage = round(max(cov_prev, cov_here), 4)
     all_spans = sorted(spans_prev + spans_here, key=lambda sp: sp.length, reverse=True)
     report.spans = all_spans
 
     report.dialogues = (
-        find_reused_dialogues(scene_text, previous_chapter, cfg.min_dialogue_len, "previous_chapter")
-        + find_reused_dialogues(scene_text, chapter_so_far, cfg.min_dialogue_len, "chapter_so_far")
+        find_reused_dialogues(checked_text, previous_chapter, cfg.min_dialogue_len, "previous_chapter")
+        + find_reused_dialogues(checked_text, chapter_so_far, cfg.min_dialogue_len, "chapter_so_far")
     )
     if len(report.dialogues) >= cfg.max_reused_dialogues:
         report.reasons.append(f"有 {len(report.dialogues)} 句台词与前文/上一章整句重复")
@@ -391,6 +565,12 @@ def analyze_scene_repetition(
     ]
     if report.forbidden_hits:
         report.reasons.append("写入了本场景禁止出现的素材：" + "、".join(h.item for h in report.forbidden_hits))
+
+    report.recall_misses = find_recall_mismatches(scene_text, previous_chapter)
+    if report.recall_misses:
+        report.reasons.append(
+            "回忆引用无法在上一章原文中找到：" + "、".join(f"「{m.text}」" for m in report.recall_misses)
+        )
 
     report.triggered = bool(report.reasons)
     return report

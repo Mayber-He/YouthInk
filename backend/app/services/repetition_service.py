@@ -44,6 +44,7 @@ def _severity(report: RepetitionReport) -> int:
         + len(report.action_hits)
         + len(report.forbidden_hits) * 3
         + len(report.time_hits) * 3
+        + len(report.recall_misses) * 3
     )
 
 
@@ -80,24 +81,62 @@ def build_time_hint(
     return "\n".join(lines)
 
 
+def _norm_text(text: str) -> str:
+    return "".join(c.lower() for c in (text or "") if c.isalnum())
+
+
 def build_rewrite_instruction(report: RepetitionReport, *, time_hint: str = "") -> str:
-    """T13: conservative rewrite — only the flagged spans change, everything else is kept."""
+    """T13/T17: conservative rewrite — only the flagged spans change, everything else is kept."""
     parts = [
         "下面这一场景正文存在与前文重复的问题。请做最小改动：只改写下列被标出的重复片段，"
         "其余字词、语序、人物动作和剧情必须原样保留；不得新增、删除或调换任何情节。",
         "尤其是时间表述（如“那天晚上”“上周”“隔了几天”等）必须原样保留，不得改成"
         "“前一晚/前晚/昨天/前天”等其他说法。",
     ]
+    if report.required_quotes:
+        parts.append(
+            "【节拍要求的逐字呼应】\n"
+            "以下句子是节拍要求的逐字呼应，必须原样保留，不得改写、删除或替换：\n"
+            + "\n".join(f"- 「{q}」" for q in report.required_quotes)
+        )
     if time_hint:
         parts.append(time_hint)
     described = report.describe_for_model().strip()
     if described:
         parts.append("需要改写的具体重复项：\n" + described)
-    parts.append(
+
+    # T17: give the model a closed list it may quote from when recalling the previous chapter.
+    # Lines already flagged as repeated are NOT offered as citable (except beat-required ones).
+    blocked = {_norm_text(d.text) for d in report.dialogues}
+    required_norm = {_norm_text(q) for q in report.required_quotes}
+    citable = [
+        q for q in report.citable_quotes
+        if _norm_text(q) not in blocked or _norm_text(q) in required_norm
+    ]
+    if citable:
+        parts.append(
+            "【上一章可引用的原句清单】\n"
+            "回忆上一章内容时，只能逐字引用下列原句，不得把它们拼成新台词：\n"
+            + "\n".join(f"- 「{q}」" for q in citable)
+            + "\n不确定就概括，不得补写表情或台词。"
+        )
+    else:
+        parts.append(
+            "【上一章可引用的原句清单】\n"
+            "上一章没有可逐字引用的原句。不确定就概括，不得补写表情或台词。"
+        )
+
+    tail = (
         "改写要求：只替换被标出的重复片段本身，同一句里未被标出的字词不得改动；"
-        "不要照抄上列任何原句；已在前文出现过的台词不要再说一遍，改为推进新的信息或用动作带过；"
+        "不要照抄上列被标出的重复项；"
+    )
+    if report.required_quotes:
+        tail += "但【节拍要求的逐字呼应】中的句子必须原样保留，不得改写或删除；"
+    tail += (
+        "已在前文出现过的台词不要再说一遍，改为推进新的信息或用动作带过；"
         "保留原文最后一句的收尾方式，不要另加结尾。只输出修改后的完整场景正文，不要解释。"
     )
+    parts.append(tail)
     return "\n".join(parts)
 
 
@@ -112,6 +151,7 @@ async def run_repetition_pipeline(
     record_fn: RecordFn | None = None,
     auto_rewrite: bool | None = None,
     story_time_gap_days: int | None = None,
+    beat: str = "",
 ) -> dict:
     """Run the full flow. Returns a dict matching ``RepetitionCheckResponse``."""
     allow_rewrite = config.auto_rewrite if auto_rewrite is None else auto_rewrite
@@ -125,6 +165,7 @@ async def run_repetition_pipeline(
             must_not_include=must_not_include,
             config=config,
             story_time_gap_days=story_time_gap_days,
+            beat=beat,
         )
 
     def _record(stage: str, action: str, rep: RepetitionReport) -> int | None:
