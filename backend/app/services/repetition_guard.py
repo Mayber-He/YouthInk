@@ -20,10 +20,11 @@ Six independent signals, all configurable via :class:`RepetitionConfig`:
 (e) **Scene seam (T18)** – the new scene's first ~200 characters are compared with the previous
     scene's last ~300 characters; any shared run of >=6 characters means the scene restarted by
     re-describing the old ending instead of continuing after it.
-(f) **Appearance tags (T19)** – 2–8-character descriptive phrases taken from present characters'
-    appearance cards (punctuation-split clauses and word-level sub-phrases) whose total count in
-    chapter-so-far + new scene reaches ``appearance_max_count``. The rewrite keeps the earliest
-    occurrence and rewrites/deletes the rest.
+(f) **Appearance tags (T19/T20)** – 2–8-character body/expression/posture phrases taken from
+    present characters' appearance cards (punctuation-split clauses and word-level sub-phrases)
+    whose total count in chapter-so-far + new scene reaches ``appearance_max_count``. Clothing and
+    accessories (白衬衫/发圈/校徽 …) are excluded. The rewrite keeps the earliest occurrence and
+    rewrites/deletes the rest.
 
 Calibration note (real chapters from this project, see docs/loop/PROGRESS.md): whole-text
 8-gram *coverage* barely separates a repeating chapter pair (2.9%) from clean ones (0–1.8%),
@@ -403,19 +404,30 @@ def count_action_phrases(
     return hits
 
 
-# T19: appearance cards are free text; keep only short phrases that name a body/clothing/
-# posture feature. This deliberately favours recall and may still flag a generic noun.
+# T19/T20: appearance cards are free text; keep only short body/expression/posture phrases.
+# Clothing/accessory nouns are excluded by the stop list below (T20-a).
 _APPEARANCE_HINTS: tuple[str, ...] = (
-    "眉", "眼", "脸", "面", "鼻", "嘴", "唇", "耳", "发", "皮肤",
-    "五官", "手", "肩", "背", "腰", "腿", "脚", "身", "个子", "高挑", "瘦", "胖",
-    "衣", "衫", "裙", "裤", "鞋", "袜", "帽", "围巾", "眼镜", "袖", "领",
-    "扣", "束", "扎", "戴", "穿", "姿",
+    "眉", "眼", "脸", "颊", "额头", "鼻", "嘴", "唇", "下巴", "耳", "发",
+    "皮肤", "肤", "五官", "手", "指", "肩", "背", "腰", "腿", "脚", "身",
+    "胸", "腹", "脖", "颈", "喉", "个子", "高挑", "瘦", "胖",
+    "姿", "神情", "神色", "神态", "表情", "目光", "眼神", "睫毛", "瞳",
 )
 # Non-appearance words that contain an appearance hint character (e.g. 手机 contains 手).
 _APPEARANCE_STOP: frozenset[str] = frozenset({
     "手机", "手上", "手里", "手中", "对方", "时候", "一点", "有些", "没有",
     "别的", "东西", "什么", "一个", "一件", "一根", "一支", "上面", "下面",
 })
+# T20-a: clothing and accessories are not "重复外貌标签" even when they contain a body hint
+# (背包/发圈/眼镜/手表 …). Substring matching also rejects descriptive variants like 素色发圈.
+_ACCESSORY_STOP: tuple[str, ...] = (
+    "发圈", "发带", "发夹", "发卡", "发箍", "发绳", "发簪", "发饰",
+    "背包", "书包", "挎包", "手袋", "手提包", "钱包", "手机",
+    "眼镜", "墨镜", "耳环", "耳钉", "耳罩",
+    "手表", "手链", "手镯", "手套", "手帕",
+    "校徽", "徽章", "胸针", "项链", "围巾", "领带", "领结", "腰带", "皮带",
+    "衬衫", "外套", "夹克", "卫衣", "毛衣", "校服", "裙子", "裤子", "短裤",
+    "鞋子", "袜子", "帽子", "袖口", "领口", "扣子", "拉链", "口袋",
+)
 # Actions that happen to contain a body-part character (抬眼/低头) are not appearance labels.
 _APPEARANCE_ACTIONS: tuple[str, ...] = (
     "低头", "抬头", "回头", "转头", "抬眼", "垂眼", "眯眼",
@@ -426,6 +438,8 @@ _APPEARANCE_ACTIONS: tuple[str, ...] = (
 def _looks_like_appearance(phrase: str) -> bool:
     phrase = (phrase or "").strip()
     if not phrase or phrase in _APPEARANCE_STOP:
+        return False
+    if any(item in phrase for item in _ACCESSORY_STOP):
         return False
     if any(action in phrase for action in _APPEARANCE_ACTIONS):
         return False
@@ -439,8 +453,9 @@ def extract_appearance_tags(
 
     The card is split on punctuation first; each 2–8-character clause is a candidate, and
     longer clauses contribute their 2–8-character word tokens (jieba) so a distinctive label
-    such as "眉心" is found inside "眉心有一点淡淡的褶". Only body/clothing/posture phrases
-    survive, and obvious non-appearance words/actions are dropped. First-seen order.
+    such as "眉心" is found inside "眉心有一点淡淡的褶". Only body/expression/posture phrases
+    survive; clothing/accessory nouns, obvious non-appearance words and actions are dropped.
+    First-seen order.
     """
     import jieba  # lazy: the other repetition checks never pay the dictionary-load cost
 

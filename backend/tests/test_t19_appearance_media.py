@@ -40,16 +40,29 @@ MEDIA_RULE = (
 
 # --- pure extraction / counting ---
 
-def test_short_appearance_phrases_ignore_actions_and_non_appearance_nouns() -> None:
+def test_short_appearance_phrases_ignore_clothing_actions_and_other_nouns() -> None:
     tags = extract_appearance_tags(APPEARANCE)
     assert "眉心" in tags
-    assert "白衬衫" in tags
     assert "站姿笔直" in tags
     assert all(2 <= len(tag) <= 8 for tag in tags)
     # A 9-character clause is not itself a tag; "低头" and "手机" are not appearance labels.
     assert "眉心有一点淡淡的褶" not in tags
     assert "低头" not in tags
     assert "手机" not in tags
+    # T20-a: clothing/accessories are not appearance tags.
+    assert "白衬衫" not in tags
+    assert "素色发圈" not in tags
+    assert "发圈" not in tags
+
+
+def test_body_and_demeanor_phrases_survive_but_accessories_do_not() -> None:
+    tags = extract_appearance_tags(
+        "个子高挑，眼下的青色很淡，站姿笔直，白衬衫，素色发圈，校徽别在胸前。"
+    )
+    assert "站姿笔直" in tags
+    assert "眼下的青色很淡" in tags or "眼下" in tags
+    for accessory in ("白衬衫", "素色发圈", "发圈", "校徽"):
+        assert accessory not in tags
 
 
 def test_v4_meixi_repeat_is_detected_in_chapter_so_far_plus_scene() -> None:
@@ -64,6 +77,8 @@ def test_v4_meixi_repeat_is_detected_in_chapter_so_far_plus_scene() -> None:
     assert hit.count == 3
     assert hit.scene_count == 1
     assert any("外貌标签重复" in reason and "眉心×3" in reason for reason in report.reasons)
+    # T20-a: the repeated white shirt is clothing, not a body/expression label.
+    assert all(h.phrase != "白衬衫" for h in report.appearance_hits)
     assert report.triggered
 
 
