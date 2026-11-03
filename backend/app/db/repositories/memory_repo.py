@@ -5,11 +5,15 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from collections import Counter
+
 import jieba
 
 from app.core.exceptions import AppError
 from app.schemas.memory import (
     BatchQueueActionRequest,
+    ChapterMemoryItem,
+    DisableableMemoryCategory,
     ForeshadowCreate,
     ForeshadowResponse,
     ForeshadowUpdate,
@@ -21,6 +25,14 @@ from app.schemas.memory import (
 )
 
 _SAFE_TOKEN_RE = re.compile(r"[\w\u4e00-\u9fff]+")
+
+_DISABLE_TABLE_MAP: dict[str, str] = {
+    "fact": "facts",
+    "char_state": "character_state_changes",
+    "cognitive": "cognitive_records",
+    "relationship": "relationship_changes",
+    "foreshadowing": "foreshadowing",
+}
 
 
 def tokenize_for_fts(text: str) -> str:
@@ -252,11 +264,236 @@ class MemoryRepository:
                         summary_text=self._format_queue_summary(cat, r),
                         source_quote=str(r["source_quote"] or ""),
                         status=str(r["status"] if cat == "fact" else r["confirm_status"]),
+                        is_disabled=(
+                            bool(r["is_disabled"]) if "is_disabled" in r.keys() else False
+                        ),
                         raw_payload=dict(r),
                         created_at=str(r["created_at"]),
                     )
                 )
         return items
+
+    def list_chapter_memory_items(self, chapter_id: int) -> list[ChapterMemoryItem]:
+        """List every current (non-stale) memory created by one chapter.
+
+        Disabled rows stay in the list so the author can restore them. Conflict
+        flags use the simple deterministic rule requested by the author:
+        multiple effective relationship rows for one character pair, or multiple
+        effective cognitive records for one knower.
+        """
+        chapter_meta = self._chapter_meta()
+        char_names = {
+            int(r["id"]): str(r["name"])
+            for r in self.conn.execute("SELECT id, name FROM characters").fetchall()
+        }
+        pair_conflicts, cognitive_conflicts = self._conflict_keys()
+        items: list[ChapterMemoryItem] = []
+
+        def add(
+            cat: DisableableMemoryCategory,
+            row: sqlite3.Row,
+            *,
+            content: str,
+            status: str,
+            cid: int | None,
+            meta: dict[str, object] | None = None,
+            conflict: bool = False,
+            conflict_reason: str = "",
+        ) -> None:
+            title, idx, story_time = chapter_meta.get(cid or 0, ("", None, ""))
+            disabled = bool(row["is_disabled"])
+            items.append(
+                ChapterMemoryItem(
+                    item_type=cat,
+                    id=int(row["id"]),
+                    chapter_id=cid,
+                    chapter_title=title,
+                    chapter_display_index=idx,
+                    story_time=story_time,
+                    content=content,
+                    source_quote=str(row["source_quote"] or ""),
+                    status=status,
+                    is_disabled=disabled,
+                    is_effective=status in ("confirmed", "locked") and not disabled,
+                    conflict=conflict and not disabled,
+                    conflict_reason=conflict_reason if conflict and not disabled else "",
+                    meta=meta or {},
+                    created_at=str(row["created_at"] or ""),
+                )
+            )
+
+        for r in self.conn.execute(
+            "SELECT * FROM facts WHERE chapter_id = ? AND is_stale = 0 "
+            "AND status != 'discarded' ORDER BY id DESC",
+            (chapter_id,),
+        ).fetchall():
+            add(
+                "fact", r,
+                content=str(r["content"]),
+                status=str(r["status"]),
+                cid=r["chapter_id"],
+                meta={"fact_type": r["fact_type"]},
+            )
+
+        for r in self.conn.execute(
+            """
+            SELECT cs.*, ch.name AS char_name
+            FROM character_state_changes cs
+            JOIN characters ch ON ch.id = cs.character_id
+            WHERE cs.chapter_id = ? AND cs.is_stale = 0
+              AND cs.confirm_status != 'discarded'
+            ORDER BY cs.id DESC
+            """,
+            (chapter_id,),
+        ).fetchall():
+            add(
+                "char_state", r,
+                content=f"{r['char_name']}：{r['field']} → {r['value']}",
+                status=str(r["confirm_status"]),
+                cid=r["chapter_id"],
+                meta={
+                    "character_id": r["character_id"],
+                    "character_name": str(r["char_name"]),
+                    "field": str(r["field"]),
+                },
+            )
+
+        for r in self.conn.execute(
+            "SELECT * FROM cognitive_records WHERE chapter_id = ? AND is_stale = 0 "
+            "AND confirm_status != 'discarded' ORDER BY id DESC",
+            (chapter_id,),
+        ).fetchall():
+            knower_ids = self._parse_int_list(r["knower_ids"])
+            conflict = int(r["id"]) in cognitive_conflicts
+            add(
+                "cognitive", r,
+                content=str(r["secret"]),
+                status=str(r["confirm_status"]),
+                cid=r["chapter_id"],
+                meta={
+                    "knower_ids": knower_ids,
+                    "knower_names": [char_names.get(k, str(k)) for k in knower_ids],
+                    "learned_by": str(r["learned_by"] or ""),
+                },
+                conflict=conflict,
+                conflict_reason="同一人物存在多条生效认知记录" if conflict else "",
+            )
+
+        for r in self.conn.execute(
+            """
+            SELECT rc.*, ca.name AS char_a_name, cb.name AS char_b_name
+            FROM relationship_changes rc
+            JOIN characters ca ON ca.id = rc.char_a_id
+            JOIN characters cb ON cb.id = rc.char_b_id
+            WHERE rc.chapter_id = ? AND rc.is_stale = 0
+              AND rc.confirm_status != 'discarded'
+            ORDER BY rc.id DESC
+            """,
+            (chapter_id,),
+        ).fetchall():
+            a_id, b_id = int(r["char_a_id"]), int(r["char_b_id"])
+            pair = (min(a_id, b_id), max(a_id, b_id))
+            conflict = pair in pair_conflicts
+            add(
+                "relationship", r,
+                content=(
+                    f"{r['char_a_name']} ↔ {r['char_b_name']}：{r['rel_type']}"
+                    f"（亲密度 {r['intimacy']}）"
+                ),
+                status=str(r["confirm_status"]),
+                cid=r["chapter_id"],
+                meta={
+                    "char_a_id": a_id,
+                    "char_a_name": str(r["char_a_name"]),
+                    "char_b_id": b_id,
+                    "char_b_name": str(r["char_b_name"]),
+                    "rel_type": str(r["rel_type"]),
+                    "intimacy": r["intimacy"],
+                    "publicity": str(r["publicity"] or ""),
+                },
+                conflict=conflict,
+                conflict_reason="同一对人物存在多条生效关系" if conflict else "",
+            )
+
+        for r in self.conn.execute(
+            "SELECT * FROM foreshadowing WHERE planted_chapter_id = ? AND is_stale = 0 "
+            "AND confirm_status != 'discarded' ORDER BY id DESC",
+            (chapter_id,),
+        ).fetchall():
+            add(
+                "foreshadowing", r,
+                content=str(r["description"]),
+                status=str(r["confirm_status"]),
+                cid=r["planted_chapter_id"],
+                meta={"foreshadow_status": str(r["status"])},
+            )
+
+        return items
+
+    def set_memory_item_disabled(
+        self, item_type: DisableableMemoryCategory, item_id: int, is_disabled: bool
+    ) -> None:
+        """Toggle author-facing injection without touching confirm_status or rows."""
+        table = _DISABLE_TABLE_MAP.get(item_type)
+        if table is None:
+            raise AppError("MEMORY_ITEM_NOT_DISABLEABLE", "该记忆类型不支持停用", status_code=400)
+        self._require_current_memory_item(table, item_id)
+        result = self.conn.execute(
+            f"UPDATE {table} SET is_disabled = ? WHERE id = ? AND is_stale = 0",
+            (1 if is_disabled else 0, item_id),
+        )
+        if result.rowcount == 0:
+            raise AppError(
+                "MEMORY_ITEM_STALE", "该记忆条目已失效，请刷新后处理最新抽取结果", status_code=409
+            )
+
+    def _conflict_keys(self) -> tuple[set[tuple[int, int]], set[int]]:
+        pair_counts: Counter[tuple[int, int]] = Counter()
+        for r in self.conn.execute(
+            "SELECT char_a_id, char_b_id FROM relationship_changes "
+            "WHERE confirm_status = 'confirmed' AND is_stale = 0 AND is_disabled = 0"
+        ).fetchall():
+            a_id, b_id = int(r["char_a_id"]), int(r["char_b_id"])
+            pair_counts[(min(a_id, b_id), max(a_id, b_id))] += 1
+        pair_conflicts = {pair for pair, count in pair_counts.items() if count > 1}
+
+        knower_counts: Counter[int] = Counter()
+        ids_by_knower: dict[int, set[int]] = {}
+        for r in self.conn.execute(
+            "SELECT id, knower_ids FROM cognitive_records "
+            "WHERE confirm_status = 'confirmed' AND is_stale = 0 AND is_disabled = 0"
+        ).fetchall():
+            for knower in set(self._parse_int_list(r["knower_ids"])):
+                knower_counts[knower] += 1
+                ids_by_knower.setdefault(knower, set()).add(int(r["id"]))
+        cognitive_conflicts: set[int] = set()
+        for knower, count in knower_counts.items():
+            if count > 1:
+                cognitive_conflicts.update(ids_by_knower[knower])
+        return pair_conflicts, cognitive_conflicts
+
+    @staticmethod
+    def _parse_int_list(raw: object) -> list[int]:
+        try:
+            values = json.loads(str(raw or "[]"))
+        except (TypeError, ValueError):
+            return []
+        if not isinstance(values, list):
+            return []
+        return [int(v) for v in values if isinstance(v, (int, str)) and str(v).isdigit()]
+
+    def _chapter_meta(self) -> dict[int, tuple[str, int, str]]:
+        rows = self.conn.execute(
+            """
+            SELECT c.id, c.title, c.story_time FROM chapters c
+            JOIN arcs a ON a.id = c.arc_id JOIN volumes v ON v.id = a.volume_id
+            ORDER BY v.sort_order ASC, a.sort_order ASC, c.sort_order ASC, c.id ASC
+            """
+        ).fetchall()
+        return {
+            int(r["id"]): (str(r["title"] or f"第{idx}章"), idx, str(r["story_time"] or ""))
+            for idx, r in enumerate(rows, start=1)
+        }
 
     @staticmethod
     def _format_queue_summary(cat: MemoryItemCategory, r: sqlite3.Row) -> str:

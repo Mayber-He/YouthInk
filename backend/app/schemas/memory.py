@@ -9,6 +9,10 @@ MemoryItemCategory = Literal[
     "fact", "char_state", "cognitive", "relationship", "foreshadowing",
     "constraint_check",
 ]
+# 可逐条停用的记忆类型。约束检查是对正文的判断，不提供停用。
+DisableableMemoryCategory = Literal[
+    "fact", "char_state", "cognitive", "relationship", "foreshadowing",
+]
 ConfirmStatus = Literal["pending", "confirmed", "locked", "discarded"]
 ForeshadowStatus = Literal["planted", "hinted", "recovered", "abandoned"]
 SummaryLevel = Literal["chapter", "arc", "volume", "novel"]
@@ -23,6 +27,7 @@ class PendingQueueItem(BaseModel):
     summary_text: str
     source_quote: str = ""
     status: str
+    is_disabled: bool = False
     raw_payload: dict[str, object]
     created_at: str
 
@@ -30,6 +35,30 @@ class PendingQueueItem(BaseModel):
 class PendingItemUpdateRequest(BaseModel):
     action: Literal["confirm", "discard", "edit"]
     updated_text: str | None = None
+
+
+class MemoryItemDisableRequest(BaseModel):
+    is_disabled: bool
+
+
+class ChapterMemoryItem(BaseModel):
+    """一条记忆的展示信息，供作者在面板中查看、停用与恢复。"""
+
+    item_type: DisableableMemoryCategory
+    id: int
+    chapter_id: int | None = None
+    chapter_title: str = ""
+    chapter_display_index: int | None = None
+    story_time: str = ""
+    content: str
+    source_quote: str = ""
+    status: str
+    is_disabled: bool = False
+    is_effective: bool = False
+    conflict: bool = False
+    conflict_reason: str = ""
+    meta: dict[str, object] = Field(default_factory=dict)
+    created_at: str = ""
 
 
 class BatchQueueActionRequest(BaseModel):

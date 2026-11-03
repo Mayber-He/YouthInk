@@ -530,30 +530,37 @@ def _migrate_novel_memory_revision_columns(conn: sqlite3.Connection) -> None:
             "continuity_dirty_from_chapter_id": "INTEGER",
         },
         "summaries": {"source_hash": "TEXT"},
+        # is_disabled：作者手动停用某条记忆。与 is_stale（被新抽取结果替代、单向）
+        # 分开记录，停用可随时恢复，且不会删除原始记录。
         "facts": {
             "source_hash": "TEXT",
             "origin": "TEXT NOT NULL DEFAULT 'legacy'",
             "is_stale": "INTEGER NOT NULL DEFAULT 0",
+            "is_disabled": "INTEGER NOT NULL DEFAULT 0",
         },
         "character_state_changes": {
             "source_hash": "TEXT",
             "origin": "TEXT NOT NULL DEFAULT 'legacy'",
             "is_stale": "INTEGER NOT NULL DEFAULT 0",
+            "is_disabled": "INTEGER NOT NULL DEFAULT 0",
         },
         "cognitive_records": {
             "source_hash": "TEXT",
             "origin": "TEXT NOT NULL DEFAULT 'legacy'",
             "is_stale": "INTEGER NOT NULL DEFAULT 0",
+            "is_disabled": "INTEGER NOT NULL DEFAULT 0",
         },
         "relationship_changes": {
             "source_hash": "TEXT",
             "origin": "TEXT NOT NULL DEFAULT 'legacy'",
             "is_stale": "INTEGER NOT NULL DEFAULT 0",
+            "is_disabled": "INTEGER NOT NULL DEFAULT 0",
         },
         "foreshadowing": {
             "source_hash": "TEXT",
             "origin": "TEXT NOT NULL DEFAULT 'legacy'",
             "is_stale": "INTEGER NOT NULL DEFAULT 0",
+            "is_disabled": "INTEGER NOT NULL DEFAULT 0",
         },
         "constraint_checks": {
             "source_hash": "TEXT",

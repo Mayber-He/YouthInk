@@ -1,8 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/http";
 import type {
+  ChapterMemoryItem,
   ConsistencyReviewResponse,
   ConsistencyReviewSummary,
+  DisableableMemoryCategory,
   FinalizeChapterResponse,
   ForeshadowItem,
   ForeshadowStatus,
@@ -11,6 +13,24 @@ import type {
   RagSearchResponse,
   SummaryItem,
 } from "./types";
+
+export function fetchConsistencyReviews(
+  novelUid: string,
+  chapterId: number
+): Promise<ConsistencyReviewSummary[]> {
+  return apiRequest<ConsistencyReviewSummary[]>(
+    `/api/v1/novels/${novelUid}/chapters/${chapterId}/consistency-reviews`
+  );
+}
+
+export function fetchConsistencyReview(
+  novelUid: string,
+  reviewId: number
+): Promise<ConsistencyReviewResponse> {
+  return apiRequest<ConsistencyReviewResponse>(
+    `/api/v1/novels/${novelUid}/consistency-reviews/${reviewId}`
+  );
+}
 
 export function usePendingQueue(
   novelUid: string | null,
@@ -30,6 +50,43 @@ export function usePendingQueue(
       );
     },
     enabled: Boolean(novelUid),
+  });
+}
+
+export function useChapterMemoryItems(
+  novelUid: string | null,
+  chapterId: number | null
+) {
+  return useQuery({
+    queryKey: ["chapter-memory", novelUid, chapterId],
+    queryFn: () =>
+      apiRequest<ChapterMemoryItem[]>(
+        `/api/v1/novels/${novelUid}/memory/items?chapter_id=${chapterId}`
+      ),
+    enabled: Boolean(novelUid && chapterId),
+  });
+}
+
+export function useSetMemoryItemDisabled(novelUid: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: {
+      item_type: DisableableMemoryCategory;
+      id: number;
+      is_disabled: boolean;
+    }) =>
+      apiRequest<{ status: string; is_disabled: boolean }>(
+        `/api/v1/novels/${novelUid}/memory/items/${payload.item_type}/${payload.id}`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ is_disabled: payload.is_disabled }),
+        }
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["chapter-memory", novelUid] });
+      qc.invalidateQueries({ queryKey: ["pending-queue", novelUid] });
+      qc.invalidateQueries({ queryKey: ["context-preview", novelUid] });
+    },
   });
 }
 
@@ -96,6 +153,7 @@ export function useFinalizeChapter(novelUid: string, chapterId: number) {
       qc.invalidateQueries({ queryKey: ["chapter-workspace", novelUid, chapterId] });
       qc.invalidateQueries({ queryKey: ["outline", novelUid] });
       qc.invalidateQueries({ queryKey: ["pending-queue", novelUid] });
+      qc.invalidateQueries({ queryKey: ["chapter-memory", novelUid] });
       qc.invalidateQueries({ queryKey: ["summaries", novelUid] });
       qc.invalidateQueries({ queryKey: ["foreshadowing", novelUid] });
       qc.invalidateQueries({ queryKey: ["novels", novelUid] });
@@ -250,9 +308,6 @@ export function useConsistencyReviews(novelUid: string | null, chapterId: number
   return useQuery({
     queryKey: ["consistency-reviews", novelUid, chapterId],
     enabled: !!novelUid && !!chapterId,
-    queryFn: () =>
-      apiRequest<ConsistencyReviewSummary[]>(
-        `/api/v1/novels/${novelUid}/chapters/${chapterId}/consistency-reviews`
-      ),
+    queryFn: () => fetchConsistencyReviews(novelUid!, chapterId!),
   });
 }

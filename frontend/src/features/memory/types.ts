@@ -6,6 +6,11 @@ export type MemoryItemCategory =
   | "foreshadowing"
   | "constraint_check";
 
+export type DisableableMemoryCategory = Exclude<
+  MemoryItemCategory,
+  "constraint_check"
+>;
+
 export type ForeshadowStatus = "planted" | "hinted" | "recovered" | "abandoned";
 export type SummaryLevel = "chapter" | "arc" | "volume" | "novel";
 
@@ -62,7 +67,26 @@ export interface PendingQueueItem {
   summary_text: string;
   source_quote: string;
   status: string;
+  is_disabled: boolean;
   raw_payload: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface ChapterMemoryItem {
+  item_type: DisableableMemoryCategory;
+  id: number;
+  chapter_id: number | null;
+  chapter_title: string;
+  chapter_display_index: number | null;
+  story_time: string;
+  content: string;
+  source_quote: string;
+  status: string;
+  is_disabled: boolean;
+  is_effective: boolean;
+  conflict: boolean;
+  conflict_reason: string;
+  meta: Record<string, unknown>;
   created_at: string;
 }
 

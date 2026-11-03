@@ -4,7 +4,9 @@ import {
   CheckCheck,
   CheckSquare,
   ExternalLink,
+  EyeOff,
   RefreshCw,
+  RotateCcw,
   Search,
   X,
 } from "lucide-react";
@@ -17,6 +19,7 @@ import {
   usePendingQueue,
   useRagSearch,
   useRebuildMemoryIndex,
+  useSetMemoryItemDisabled,
   useUpdatePendingItem,
 } from "./api";
 import type { MemoryItemCategory, PendingQueueItem } from "./types";
@@ -54,6 +57,7 @@ export const PendingQueueSection: React.FC<PendingQueueSectionProps> = ({
     statusFilter
   );
   const updateMut = useUpdatePendingItem(novelUid);
+  const disableMut = useSetMemoryItemDisabled(novelUid);
   const batchMut = useBatchPendingAction(novelUid);
   const ragMut = useRagSearch(novelUid);
   const rebuildMut = useRebuildMemoryIndex(novelUid);
@@ -181,6 +185,7 @@ export const PendingQueueSection: React.FC<PendingQueueSectionProps> = ({
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
                     <Badge tone={meta.tone}>{meta.label}</Badge>
+                    {item.is_disabled && <Badge tone="default">已停用·不注入</Badge>}
                     {item.chapter_id && (
                       <button
                         type="button"
@@ -206,6 +211,36 @@ export const PendingQueueSection: React.FC<PendingQueueSectionProps> = ({
                         编辑
                       </Button>
                     )}
+                    {item.status === "confirmed" &&
+                      item.item_type !== "constraint_check" && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={disableMut.isPending}
+                          onClick={() =>
+                            disableMut.mutate({
+                              item_type: item.item_type as Exclude<
+                                MemoryItemCategory,
+                                "constraint_check"
+                              >,
+                              id: item.id,
+                              is_disabled: !item.is_disabled,
+                            })
+                          }
+                        >
+                          {item.is_disabled ? (
+                            <>
+                              <RotateCcw className="h-3.5 w-3.5" />
+                              恢复注入
+                            </>
+                          ) : (
+                            <>
+                              <EyeOff className="h-3.5 w-3.5" />
+                              停用注入
+                            </>
+                          )}
+                        </Button>
+                      )}
                     {item.status !== "confirmed" && (
                       <Button
                         size="sm"

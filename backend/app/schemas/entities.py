@@ -73,6 +73,8 @@ class CharacterTimelineSnapshot(BaseModel):
     up_to_chapter_sort: float | None = None
     effective_appearance: str
     current_states: dict[str, str]
+    # 每个状态字段的来源章节，供写作上下文标注（第N章·story_time）。
+    state_sources: dict[str, dict[str, object]] = Field(default_factory=dict)
     relationships: list[dict[str, object]]
     known_secrets: list[dict[str, object]]
 

@@ -454,7 +454,7 @@ class ConsistencyReviewService:
             SELECT f.id, f.content FROM facts f
             LEFT JOIN chapters c ON c.id = f.chapter_id
             WHERE f.status IN ('confirmed', 'locked')
-              AND f.is_stale = 0
+              AND f.is_stale = 0 AND f.is_disabled = 0
               AND (c.sort_order IS NULL OR c.sort_order <= ?)
               AND (c.id IS NULL OR (f.origin = 'manual' OR (f.source_hash = c.content_hash AND c.status = 'final' AND c.continuity_review_required = 0)))
             ORDER BY f.id DESC LIMIT 15

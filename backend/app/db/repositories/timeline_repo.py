@@ -26,7 +26,8 @@ def build_character_timeline_snapshot(
 
     state_rows = conn.execute(
         f"""
-        SELECT s.field, s.value, c.sort_order, s.id
+        SELECT s.field, s.value, s.chapter_id, c.sort_order, c.story_time,
+               s.id, s.is_disabled
         FROM character_state_changes s
         JOIN chapters c ON c.id = s.chapter_id
         WHERE s.character_id = ? AND s.confirm_status = 'confirmed' AND s.is_stale = 0
@@ -38,10 +39,22 @@ def build_character_timeline_snapshot(
     ).fetchall()
 
     current_states: dict[str, str] = {}
+    state_sources: dict[str, dict[str, object]] = {}
+    seen_fields: set[str] = set()
     for r in state_rows:
         fld = str(r["field"])
-        if fld not in current_states:
-            current_states[fld] = str(r["value"])
+        if fld in seen_fields:
+            continue
+        seen_fields.add(fld)
+        # 最新一条被作者停用时不回退到更早的旧状态。
+        if r["is_disabled"]:
+            continue
+        current_states[fld] = str(r["value"])
+        state_sources[fld] = {
+            "chapter_id": int(r["chapter_id"]),
+            "chapter_sort_order": r["sort_order"],
+            "story_time": str(r["story_time"] or ""),
+        }
 
     effective_appearance = char.appearance
     if "appearance" in current_states:
@@ -56,7 +69,8 @@ def build_character_timeline_snapshot(
     )
     rel_rows = conn.execute(
         f"""
-        SELECT r.*, c.sort_order, ca.name AS char_a_name, cb.name AS char_b_name
+        SELECT r.*, c.sort_order, c.story_time,
+               ca.name AS char_a_name, cb.name AS char_b_name
         FROM relationship_changes r
         JOIN chapters c ON c.id = r.chapter_id
         JOIN characters ca ON ca.id = r.char_a_id
@@ -78,6 +92,9 @@ def build_character_timeline_snapshot(
         if pair in seen_pairs:
             continue
         seen_pairs.add(pair)
+        # 同一对人物只看最新一条；最新一条被停用时不再回退到旧关系。
+        if r["is_disabled"]:
+            continue
         relationships.append(
             {
                 "char_a_id": a_id,
@@ -88,6 +105,9 @@ def build_character_timeline_snapshot(
                 "intimacy": r["intimacy"],
                 "publicity": r["publicity"],
                 "change_reason": r["change_reason"],
+                "chapter_id": int(r["chapter_id"]),
+                "chapter_sort_order": r["sort_order"],
+                "story_time": str(r["story_time"] or ""),
             }
         )
 
@@ -96,10 +116,12 @@ def build_character_timeline_snapshot(
     )
     cog_rows = conn.execute(
         f"""
-        SELECT cg.secret, cg.knower_ids, cg.learned_by, c.title AS chapter_title
+        SELECT cg.secret, cg.knower_ids, cg.learned_by, cg.chapter_id,
+               c.title AS chapter_title, c.sort_order, c.story_time
         FROM cognitive_records cg
         LEFT JOIN chapters c ON c.id = cg.chapter_id
         WHERE cg.confirm_status = 'confirmed' AND cg.is_stale = 0
+          AND cg.is_disabled = 0
           AND (cg.chapter_id IS NULL OR cg.origin = 'manual' OR
                (cg.origin = 'extracted' AND cg.source_hash = c.content_hash
                 AND c.status = 'final' AND c.continuity_review_required = 0))
@@ -117,7 +139,10 @@ def build_character_timeline_snapshot(
                 {
                     "secret": str(cg["secret"]),
                     "learned_by": cg["learned_by"],
+                    "chapter_id": cg["chapter_id"],
                     "chapter_title": cg["chapter_title"],
+                    "chapter_sort_order": cg["sort_order"],
+                    "story_time": str(cg["story_time"] or ""),
                 }
             )
 
@@ -126,6 +151,7 @@ def build_character_timeline_snapshot(
         up_to_chapter_sort=up_to_chapter_sort,
         effective_appearance=effective_appearance,
         current_states=current_states,
+        state_sources=state_sources,
         relationships=relationships,
         known_secrets=known_secrets,
     )

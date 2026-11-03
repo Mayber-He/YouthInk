@@ -32,6 +32,27 @@ _FORBIDDEN_LINE_RE = re.compile(r"^\s*本场禁止出现\s*[:：]")
 _PRESENT_LINE_RE = re.compile(r"^\s*在场人物\s*[:：](.*)$", re.MULTILINE)
 
 
+def _chapter_display_indices(conn: sqlite3.Connection) -> dict[int, int]:
+    rows = conn.execute(
+        """
+        SELECT c.id FROM chapters c
+        JOIN arcs a ON a.id = c.arc_id JOIN volumes v ON v.id = a.volume_id
+        ORDER BY v.sort_order ASC, a.sort_order ASC, c.sort_order ASC, c.id ASC
+        """
+    ).fetchall()
+    return {int(r["id"]): idx for idx, r in enumerate(rows, start=1)}
+
+
+def _memory_provenance(
+    display_index: int | None, story_time: str, *, fallback: str = "（来源未标注）"
+) -> str:
+    """Prefix memory lines with 第N章 + that chapter's story_time."""
+    if display_index is None:
+        return fallback
+    when = (story_time or "").strip()
+    return f"（第{display_index}章·{when}）" if when else f"（第{display_index}章）"
+
+
 class ContextAssembler:
     """Builds transparent, toggleable context blocks for chapter/scene generation."""
 
@@ -65,6 +86,7 @@ class ContextAssembler:
         all_locs = self._entity_repo.list_locations()
         char_name_by_id = {c.id: c.name for c in all_chars}
         loc_name_by_id = {l.id: l.name for l in all_locs}
+        chapter_indices = _chapter_display_indices(self._conn)
 
         active_char_ids: set[int] = set()
         active_loc_ids: set[int] = set()
@@ -163,13 +185,21 @@ class ContextAssembler:
             if not c:
                 continue
             snap = self._entity_repo.get_character_timeline_snapshot(cid, ch.sort_order)
+            state_parts: list[str] = []
+            for field_name, value in snap.current_states.items():
+                source = snap.state_sources.get(field_name, {})
+                state_parts.append(
+                    f"{_memory_provenance(chapter_indices.get(int(source.get('chapter_id') or 0)), str(source.get('story_time') or ''))}"
+                    f" {field_name}:{value}"
+                )
             state_str = (
-                "；".join(f"{k}:{v}" for k, v in snap.current_states.items())
+                "；".join(state_parts)
                 or "无结构化状态变更记录；以本章起点为准，沿用人物卡基准状态与前文已写事件，不要据此另造新状态"
             )
             rel_str = (
                 "；".join(
-                    f"{r['char_a_name']}↔{r['char_b_name']}({r['rel_type']})"
+                    f"{_memory_provenance(chapter_indices.get(int(r.get('chapter_id') or 0)), str(r.get('story_time') or ''))}"
+                    f" {r['char_a_name']}↔{r['char_b_name']}({r['rel_type']})"
                     for r in snap.relationships
                 )
                 or "未记录结构化关系状态；请依据人物卡中的既有经历与前文判断，不得据此推断为初见或不熟"
@@ -182,7 +212,11 @@ class ContextAssembler:
                 f"说话风格：{c.speech_style} | 当前状态：{state_str} | 关系：{rel_str}"
             )
             if snap.known_secrets:
-                sec_list = "；".join(str(s["secret"]) for s in snap.known_secrets)
+                sec_list = "；".join(
+                    f"{_memory_provenance(chapter_indices.get(int(s.get('chapter_id') or 0)), str(s.get('story_time') or ''))}"
+                    f" {s['secret']}"
+                    for s in snap.known_secrets
+                )
                 known_secrets_lines.append(f"• 【{c.name}】已知秘密：{sec_list}")
             else:
                 known_secrets_lines.append(
@@ -359,10 +393,11 @@ class ContextAssembler:
         # 6. 计划伏笔与已确认事实
         fs_rows = self._conn.execute(
             """
-            SELECT f.description, f.status FROM foreshadowing f
+            SELECT f.description, f.status, f.planted_chapter_id AS chapter_id, c.story_time
+            FROM foreshadowing f
             LEFT JOIN chapters c ON c.id = f.planted_chapter_id
             WHERE f.confirm_status = 'confirmed' AND f.status IN ('planted', 'hinted')
-              AND f.is_stale = 0
+              AND f.is_stale = 0 AND f.is_disabled = 0
               AND (f.origin = 'manual' OR f.planted_chapter_id IS NULL OR
                    (f.origin = 'extracted' AND f.source_hash = c.content_hash
                     AND c.status = 'final' AND c.continuity_review_required = 0))
@@ -371,10 +406,10 @@ class ContextAssembler:
         ).fetchall()
         fact_rows = self._conn.execute(
             """
-            SELECT f.content FROM facts f
+            SELECT f.content, f.chapter_id, c.story_time FROM facts f
             LEFT JOIN chapters c ON c.id = f.chapter_id
             WHERE f.status IN ('confirmed', 'locked')
-              AND f.is_stale = 0
+              AND f.is_stale = 0 AND f.is_disabled = 0
               AND (f.chapter_id IS NULL OR f.origin = 'manual' OR
                    (f.origin = 'extracted' AND f.source_hash = c.content_hash
                     AND c.status = 'final' AND c.continuity_review_required = 0))
@@ -391,8 +426,14 @@ class ContextAssembler:
         )
         fs_rows = select_memory_rows(fs_rows, summary_texts, "description", 4)
         fact_rows = select_memory_rows(fact_rows, summary_texts, "content", 6)
-        fs_lines = [f"• [伏笔-{r['status']}] {r['description']}" for r in fs_rows] + [
-            f"• [已确认事实] {r['content']}" for r in fact_rows
+        fs_lines = [
+            f"• {_memory_provenance(chapter_indices.get(int(r['chapter_id'] or 0)), str(r['story_time'] or ''))}"
+            f" [伏笔-{r['status']}] {r['description']}"
+            for r in fs_rows
+        ] + [
+            f"• {_memory_provenance(chapter_indices.get(int(r['chapter_id'] or 0)), str(r['story_time'] or ''), fallback='（通用设定）')}"
+            f" [已确认事实] {r['content']}"
+            for r in fact_rows
         ]
         blocks.append(
             self._make_block(

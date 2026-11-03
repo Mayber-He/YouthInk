@@ -12,11 +12,14 @@ from app.api.deps import (
 from app.db.repositories.memory_repo import MemoryRepository
 from app.schemas.memory import (
     BatchQueueActionRequest,
+    ChapterMemoryItem,
+    DisableableMemoryCategory,
     FinalizeChapterResponse,
     ForeshadowCreate,
     ForeshadowResponse,
     ForeshadowUpdate,
     MemoryItemCategory,
+    MemoryItemDisableRequest,
     PendingItemUpdateRequest,
     PendingQueueItem,
     RagSearchResponse,
@@ -81,6 +84,27 @@ def batch_update_pending(
     """Batch confirm or discard multiple pending memory items."""
     updated = repo.batch_update_pending(payload)
     return {"updated_count": updated}
+
+
+@router.get("/memory/items", response_model=list[ChapterMemoryItem])
+def list_memory_items(
+    chapter_id: int = Query(..., description="只列出该章抽取/录入的记忆"),
+    repo: MemoryRepository = Depends(get_memory_repo),
+) -> list[ChapterMemoryItem]:
+    """List a chapter's memory items, including disabled ones, with conflict hints."""
+    return repo.list_chapter_memory_items(chapter_id)
+
+
+@router.put("/memory/items/{item_type}/{item_id}")
+def set_memory_item_disabled(
+    item_type: DisableableMemoryCategory,
+    item_id: int,
+    payload: MemoryItemDisableRequest,
+    repo: MemoryRepository = Depends(get_memory_repo),
+) -> dict[str, object]:
+    """Disable or restore one memory item without deleting it."""
+    repo.set_memory_item_disabled(item_type, item_id, payload.is_disabled)
+    return {"status": "ok", "is_disabled": payload.is_disabled}
 
 
 @router.get("/memory/foreshadowing", response_model=list[ForeshadowResponse])

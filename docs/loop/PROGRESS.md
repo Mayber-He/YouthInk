@@ -1271,3 +1271,43 @@ Embedding 模型：bge-m3-onnx-fp32 1024 维 version=bge-m3-onnx-fp32-1024-v1 re
 - 前端：`src/features/app-settings/TaskAndEmbeddingTab.tsx`、`src/features/memory/types.ts`、`src/features/memory/PendingQueueSection.tsx`
 - 测试：`tests/test_embedding_onnx.py`、`tests/test_refinalization_transaction.py`、`tests/test_consistency_review.py`、`tests/test_m4_m5_memory_and_stress.py`
 - 文档：`docs/loop/embedding_survey.md`（新增第 9 节）、`docs/loop/PROGRESS.md`（本节）
+
+## 2026-11-03 记忆逐条停用、注入来源标注与定稿前提示
+
+目标：让作者能更快发现并处理记忆问题。本轮不新增检测规则、不改生成与提示词逻辑、不调用真实 LLM、不修改小说数据。
+
+### 原本就有
+
+- 同一对人物在写作上下文中只注入最新一条关系：`build_character_timeline_snapshot` 已按 `chapter.sort_order DESC, id DESC` 排序并按人物对去重，旧关系仍保留在库中。
+- 待确认队列已有确认/编辑/丢弃接口，定稿按钮已有抽取状态提示。
+- 一致性审查已有列表与详情接口（`GET /chapters/{id}/consistency-reviews`、`GET /consistency-reviews/{id}`）。
+
+### 新增
+
+- `facts`、`character_state_changes`、`cognitive_records`、`relationship_changes`、`foreshadowing` 增加 `is_disabled` 列（启动迁移自动补列，默认 0）。停用只改该列，不动 `confirm_status`/`status`，也不删除记录，可随时恢复。
+- `GET /api/v1/novels/{uid}/memory/items?chapter_id=N`：列出该章当前记忆（含已停用），返回内容、来源章节、`story_time`、是否生效、是否可能冲突。冲突规则仅为：同一对人物存在多条生效关系，或同一人物存在多条生效认知；不调用模型。
+- `PUT /api/v1/novels/{uid}/memory/items/{item_type}/{id}`：请求体 `{"is_disabled": true|false}`，逐条停用/恢复；约束检查不在可停用类型内。
+- 写作上下文注入过滤 `is_disabled=1` 的事实、状态、认知、关系、伏笔。最新一条状态/关系被停用时不回退到更早的旧记录。
+- 上下文中的事实、状态、认知、伏笔统一加 `（第N章·该章story_time）` 前缀；无章节来源的事实标为 `（通用设定）`，其他无来源标为 `（来源未标注）`。
+- 记忆面板新增“本章新增记忆”分组列表：按事实/状态/认知/关系/伏笔分组，显示来源章节与故事时间，带停用/恢复按钮；“可能冲突”条目用红色边框和说明标出。待确认队列的已确认条目也提供停用/恢复入口。
+- 定稿前读取本章最新一次一致性审查；若存在 `violation`，弹确认框逐条列出意见，用户可选择取消或仍然定稿。没有 violation 时不弹；预检失败不阻塞定稿。
+
+### 未做及原因
+
+- 未把“可能冲突”做成语义判断或自动合并：按需求只使用“同人物/同人物对多条生效记录”的简单规则，避免新增检测逻辑。
+- 未在一致性审查上下文中加入来源前缀：本次只要求写作上下文；审查仍复用同一套停用过滤与最新关系去重。
+- 未新增前端测试：仓库当前没有前端测试框架，前端仅执行 `npm run typecheck`。
+
+### 测试与检查
+
+- 新增 `tests/test_memory_disable_and_provenance.py`：使用重写导出的 rel 6/7/8、状态记忆 23、伏笔 18 等价夹具，覆盖最新关系只注入一条、来源前缀、冲突提示、五类记忆停用/恢复、停用最新关系不回退、失效条目拒绝停用；**10 passed**。
+- 全量 `python -m pytest tests -q`：**484 passed, 5 failed**。5 项失败与 HEAD 基线逐项相同（M2 时序/滚动 3 项、M3 流式 1 项、M5 长书 1 项），均与本轮改动无关。
+- 在真实小说库副本上执行迁移，五张表均成功补出 `is_disabled` 列；未改动原库。
+- `cd frontend && npm run typecheck`：通过。
+- 未调用真实 LLM；未修改小说正文、记忆或设定数据。
+
+### 改动文件
+
+- 后端：`app/db/init_schema.py`、`app/db/repositories/memory_repo.py`、`app/db/repositories/timeline_repo.py`、`app/schemas/entities.py`、`app/schemas/memory.py`、`app/api/v1/memory.py`、`app/services/context/assembler.py`、`app/services/memory/consistency.py`
+- 前端：`src/features/memory/MemoryChapterPanel.tsx`、`src/features/memory/PendingQueueSection.tsx`、`src/features/memory/api.ts`、`src/features/memory/types.ts`
+- 测试：`tests/test_memory_disable_and_provenance.py`
