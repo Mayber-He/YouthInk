@@ -1,29 +1,26 @@
 """bge-m3 ONNX embedding encoder (CPU, lazily loaded, globally reused).
 
-The legacy 256-dim hashed encoder is kept as an explicit, test/reindex-only helper.
-Production code never falls back to it: a missing or broken model raises
+Production code has no fallback encoder: a missing or broken model raises
 ``EmbeddingModelUnavailable`` and callers surface that error to the user.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
-import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from typing import Protocol
 
-import jieba
-
 logger = logging.getLogger(__name__)
 
 EMBEDDING_MODEL_ID = "bge-m3-onnx-fp32"
 EMBEDDING_VERSION = "bge-m3-onnx-fp32-1024-v1"
 EMBEDDING_DIM = 1024
+# Kept only to recognise index files written by the removed 256-dim hash encoder;
+# no code generates vectors in this space anymore.
 LEGACY_EMBEDDING_MODEL_ID = "hash-ngram-256"
 LEGACY_EMBEDDING_VERSION = "hash-ngram-256-v1"
 LEGACY_EMBEDDING_DIM = 256
@@ -361,36 +358,6 @@ def get_embedding_runtime_status(probe: bool = False) -> EmbeddingRuntimeStatus:
         tokenizer_path=str(config.tokenizer_path),
         max_length=config.max_length,
     )
-
-
-def encode_text_legacy_hash_sync(text: str, dim: int = LEGACY_EMBEDDING_DIM) -> list[float]:
-    """Legacy hash encoder, kept only for comparison/tests and old-vector inspection.
-
-    Production writes/reads must not call this: mixing 256-dim hash vectors with
-    1024-dim bge-m3 vectors is rejected by the vector store.
-    """
-    if not text or not text.strip():
-        return [0.0] * dim
-    vec = [0.0] * dim
-    cleaned = text.strip()
-    words = [w.strip() for w in jieba.cut_for_search(cleaned) if len(w.strip()) > 0]
-    for word in words:
-        digest = hashlib.md5(word.encode("utf-8")).digest()
-        idx = int.from_bytes(digest[:2], "little") % dim
-        sign = 1.0 if (digest[2] & 1) == 0 else -1.0
-        vec[idx] += sign * (1.5 if len(word) >= 2 else 0.8)
-    for i in range(len(cleaned) - 1):
-        bigram = cleaned[i : i + 2]
-        if bigram.isspace():
-            continue
-        digest = hashlib.md5(bigram.encode("utf-8")).digest()
-        idx = int.from_bytes(digest[:2], "little") % dim
-        sign = 1.0 if (digest[3] & 1) == 0 else -1.0
-        vec[idx] += sign * 0.6
-    norm = math.sqrt(sum(v * v for v in vec))
-    if norm > 1e-9:
-        vec = [v / norm for v in vec]
-    return vec
 
 
 def cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:

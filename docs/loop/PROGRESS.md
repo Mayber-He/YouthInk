@@ -1311,3 +1311,43 @@ Embedding 模型：bge-m3-onnx-fp32 1024 维 version=bge-m3-onnx-fp32-1024-v1 re
 - 后端：`app/db/init_schema.py`、`app/db/repositories/memory_repo.py`、`app/db/repositories/timeline_repo.py`、`app/schemas/entities.py`、`app/schemas/memory.py`、`app/api/v1/memory.py`、`app/services/context/assembler.py`、`app/services/memory/consistency.py`
 - 前端：`src/features/memory/MemoryChapterPanel.tsx`、`src/features/memory/PendingQueueSection.tsx`、`src/features/memory/api.ts`、`src/features/memory/types.ts`
 - 测试：`tests/test_memory_disable_and_provenance.py`
+
+## 2026-11-03 移除旧的 256 维哈希向量编码器
+
+目标：清理已废弃的哈希编码路径，向量编码只保留 bge-m3 ONNX；不改变检索与生成行为，不调用真实 LLM，不修改小说数据。
+
+### 改动
+
+- `app/services/embedding/encoder.py`：删除 `encode_text_legacy_hash_sync`，以及仅为它服务的 `hashlib` / `math` / `jieba` 导入。保留 `LEGACY_EMBEDDING_MODEL_ID/VERSION/DIM` 常量，仅用于 `vector_store` 识别既有 256 维旧索引并提示重建。
+- `scripts/reindex_embeddings.py`：`--compare-query` 移除旧哈希一侧，只输出当前 bge-m3 编码的 top3；模型不可用时直接跳过查询。dry-run、`--apply`、备份、失败恢复、数量/维度/元数据校验逻辑未改。
+- `tests/conftest.py`：测试假编码器改为自带的确定性字符 bigram 哈希（1024 维、L2 归一化、空文本零向量），不再依赖 jieba；既有测试结果不变。
+- 新增 `tests/test_embedding_encoder_cleanup.py`：锁定旧函数已删除、编码模块不再导入 jieba/hashlib、假编码器确定性与归一化、`--compare-query` 只走当前编码器且模型不可用时跳过。
+- 保留 `memory_repo.py`、`init_schema.py`、`repetition_guard.py` 的 jieba 用法及 `requirements.txt` 依赖。
+- 文档：`docs/design.md` 向量分块章节、`docs/development.md` 4.4 补充“单一向量空间，旧哈希编码器已移除”。
+
+### 验证
+
+- 整理前基线：`python -m pytest tests -q -p deny_network` **508 passed / 5 failed**。
+- 整理后全量：**514 passed / 5 failed**（+6 为新增测试），失败项与基线逐项一致：M2 时序/滚动 3 项、M3 流式 1 项、M5 长书 1 项，无新增失败。
+- 定向：`test_embedding_encoder_cleanup.py` + `test_embedding_onnx.py` + `test_m4_m5_memory_and_stress.py` **22 passed / 1 failed**（即已知 M5）。
+- 后端以临时 `YOUTHINK_DATA_DIR` 启动：`GET /api/health` 返回 `{"status":"ok","version":"0.1.0"}`；未触碰真实小说库。
+- 向量编码：`encoder.py` 已无 jieba/hashlib，生产路径只调用 `OnnxEmbeddingEncoder`（bge-m3 ONNX，1024 维）。`test_real_model_semantics_if_available` 在本次全量中实际运行并通过（未 skip）。
+- 未调用真实 LLM；未执行 `--apply`；未修改小说正文、记忆或向量文件。
+
+### jieba 剩余调用
+
+- FTS5 预分词：`app/db/repositories/memory_repo.py`（建索引与查询）、`app/db/init_schema.py`（旧 FTS 表回填）。
+- 外貌标签提取：`app/services/repetition_guard.py`（`extract_appearance_tags` 中延迟导入）。
+- 依赖：`requirements.txt` 继续保留 `jieba>=0.42.1`。
+- 向量编码路径已不再使用 jieba。
+
+### 改动文件
+
+- 后端：`app/services/embedding/encoder.py`、`scripts/reindex_embeddings.py`、`tests/conftest.py`
+- 测试：新增 `tests/test_embedding_encoder_cleanup.py`
+- 文档：`docs/design.md`、`docs/development.md`、`docs/loop/PROGRESS.md`
+
+### 遗留 / 说明
+
+- 既有 256 维旧索引文件不会被自动删除或迁移；`vector_store` 仍能识别并提示重建，重建请使用 `scripts/reindex_embeddings.py --apply`。
+- `docs/loop/embedding_survey.md` 是历史调查记录，保留当时的哈希编码描述，未按本次清理改写。
