@@ -190,11 +190,12 @@ class NovelRepository:
 
     def _count_pending_confirmations(self) -> int:
         queries = [
-            "SELECT COUNT(*) FROM facts WHERE status = 'pending'",
-            "SELECT COUNT(*) FROM character_state_changes WHERE confirm_status = 'pending'",
-            "SELECT COUNT(*) FROM cognitive_records WHERE confirm_status = 'pending'",
-            "SELECT COUNT(*) FROM relationship_changes WHERE confirm_status = 'pending'",
-            "SELECT COUNT(*) FROM foreshadowing WHERE confirm_status = 'pending'",
+            "SELECT COUNT(*) FROM facts WHERE status = 'pending' AND is_stale = 0",
+            "SELECT COUNT(*) FROM character_state_changes WHERE confirm_status = 'pending' AND is_stale = 0",
+            "SELECT COUNT(*) FROM cognitive_records WHERE confirm_status = 'pending' AND is_stale = 0",
+            "SELECT COUNT(*) FROM relationship_changes WHERE confirm_status = 'pending' AND is_stale = 0",
+            "SELECT COUNT(*) FROM foreshadowing WHERE confirm_status = 'pending' AND is_stale = 0",
+            "SELECT COUNT(*) FROM constraint_checks WHERE confirm_status = 'pending' AND is_stale = 0",
         ]
         total = 0
         for q in queries:

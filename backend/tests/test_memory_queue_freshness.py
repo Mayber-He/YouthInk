@@ -6,6 +6,7 @@ import pytest
 from app.core.exceptions import AppError
 from app.db.init_schema import init_novel_db
 from app.db.repositories.memory_repo import MemoryRepository
+from app.db.repositories.novel_repo import NovelRepository
 from app.schemas.memory import BatchQueueActionRequest, ForeshadowUpdate, PendingItemUpdateRequest
 
 
@@ -45,6 +46,24 @@ def repo():
 
 def row(repo, kind):
     return repo.conn.execute(f"SELECT * FROM {SPECS[kind][0]} WHERE id=1").fetchone()
+
+
+@pytest.mark.parametrize("kind", SPECS)
+@pytest.mark.parametrize("status,is_stale,expected", [
+    ("pending", 0, 1),
+    ("pending", 1, 0),
+    ("confirmed", 0, 0),
+    ("discarded", 0, 0),
+])
+def test_novel_pending_count_matches_visible_queue(repo, kind, status, is_stale, expected):
+    for table, _, _ in SPECS.values():
+        repo.conn.execute(f"UPDATE {table} SET is_stale=1")
+    table, status_col, _ = SPECS[kind]
+    repo.conn.execute(f"UPDATE {table} SET {status_col}=?, is_stale=?", (status, is_stale))
+
+    detail = NovelRepository(repo.conn, "test").get_novel_detail()
+    assert detail.pending_confirm_count == expected
+    assert detail.pending_confirm_count == len(repo.list_pending_queue())
 
 
 @pytest.mark.parametrize("kind", SPECS)
