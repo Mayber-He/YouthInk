@@ -64,6 +64,62 @@ export interface PromptTemplateItem {
   updated_at: string | null;
 }
 
+export interface LanguageMetrics {
+  char_count: number;
+  paragraph_count: number;
+  sentence_count: number;
+  avg_paragraph_chars: number;
+  single_line_para_ratio: number;
+  avg_sentence_chars: number;
+  short_sentence_pct: number;
+  medium_sentence_pct: number;
+  long_sentence_pct: number;
+  dialogue_ratio_pct: number;
+  colloquial_per_kchars: number;
+  rhetoric_per_kchars: number;
+}
+
+export interface StyleProfile {
+  version: string;
+  source_type: "builtin_preset" | "reference_excerpt" | "user_custom";
+  language: {
+    colloquial_level: string;
+    sentence_length_ratio: string;
+    rhetoric_density: string;
+    paragraph_rhythm: string;
+    metrics: LanguageMetrics;
+  };
+  narrative: {
+    pov_mode: string;
+    info_release: string;
+    scene_to_summary_ratio: string;
+    transition_style: string;
+  };
+  dialogue: {
+    dialogue_rhythm: string;
+    subtext_technique: string;
+    interaction_texture: string;
+  };
+  emotion: {
+    action_and_detail: string;
+    inner_monologue_ratio: string;
+    whitespace_and_restraint: string;
+  };
+  pacing: {
+    opening_setup: string;
+    conflict_progression: string;
+    turning_point: string;
+    closing_hook: string;
+  };
+  genre_traits: {
+    genre_name: string;
+    core_appeal: string;
+    characteristic_techniques: string;
+    genre_taboos: string[];
+  };
+  anti_ai_rules: string[];
+}
+
 export interface StyleTemplate {
   id: number;
   name: string;
@@ -77,8 +133,41 @@ export interface StyleTemplate {
   pacing: string;
   example_paras: string[];
   forbidden_exprs: string[];
+  style_profile?: StyleProfile | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface StyleTemplateCreateInput {
+  name: string;
+  pov?: string;
+  tense_feel?: string;
+  tone?: string;
+  sentence_pref?: string;
+  dialogue_ratio?: string;
+  desc_focus?: string;
+  pacing?: string;
+  example_paras?: string[];
+  forbidden_exprs?: string[];
+  style_profile?: StyleProfile | null;
+}
+
+export type StyleTemplateUpdateInput = Partial<StyleTemplateCreateInput>;
+
+export interface StyleProfileAnalyzeInput {
+  reference_text: string;
+  genre: string;
+  template_name?: string;
+  save_as_template?: boolean;
+  target_template_id?: number | null;
+  use_llm?: boolean;
+}
+
+export interface StyleProfileAnalyzeResult {
+  style_profile: StyleProfile;
+  derived_template_fields: Record<string, string>;
+  saved_template_id: number | null;
+  analysis_notes: string[];
 }
 
 export interface TrustModeSettings {

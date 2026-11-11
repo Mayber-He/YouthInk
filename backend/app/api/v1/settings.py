@@ -19,9 +19,14 @@ from app.schemas.settings import (
     PromptTemplateUpdate,
     StyleTemplateCreate,
     StyleTemplateResponse,
+    StyleTemplateUpdate,
     TaskAssignmentResponse,
     TaskAssignmentUpdate,
     TrustModeSettings,
+)
+from app.schemas.style_profile import (
+    StyleProfileAnalyzeRequest,
+    StyleProfileAnalyzeResponse,
 )
 from app.services.embedding.encoder import EMBEDDING_MODEL_ID
 from app.services.embedding.manager import (
@@ -29,6 +34,10 @@ from app.services.embedding.manager import (
     trigger_embedding_download,
 )
 from app.services.llm.client import complete_chat
+from app.services.prompt.style_profile import (
+    analyze_reference_excerpt,
+    analyze_reference_excerpt_with_llm,
+)
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -61,7 +70,9 @@ def update_profile(
     return repo.update_llm_profile(profile_id, payload)
 
 
-@router.delete("/llm-profiles/{profile_id}", status_code=status.HTTP_204_NO_CONTENT,
+@router.delete(
+    "/llm-profiles/{profile_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
     response_model=None,  # 显式禁用：避免新版 FastAPI 从 `-> None` 注解推断 response_model 导致 204 断言失败
 )
 def delete_profile(
@@ -164,6 +175,79 @@ def create_style(
     repo: SettingsRepository = Depends(get_settings_repo),
 ) -> StyleTemplateResponse:
     return repo.create_style_template(payload)
+
+
+@router.post("/style-templates/analyze", response_model=StyleProfileAnalyzeResponse)
+async def analyze_style_excerpt(
+    payload: StyleProfileAnalyzeRequest,
+    repo: SettingsRepository = Depends(get_settings_repo),
+) -> StyleProfileAnalyzeResponse:
+    if payload.use_llm:
+        base_url = api_key = model = None
+        try:
+            _, base_url, model, api_key = repo.get_credentials_for_task("extract")
+        except AppError:
+            pass
+        profile, derived, notes = await analyze_reference_excerpt_with_llm(
+            reference_text=payload.reference_text,
+            genre=payload.genre,
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+        )
+    else:
+        profile, derived, notes = analyze_reference_excerpt(
+            reference_text=payload.reference_text,
+            genre=payload.genre,
+        )
+        notes.append("本次采用纯本地量化统计 + 规则映射（未调用大模型）。")
+    saved_id: int | None = None
+    if payload.target_template_id is not None:
+        updated = repo.update_style_template(
+            payload.target_template_id,
+            StyleTemplateUpdate(
+                pov=str(derived["pov"]),
+                tense_feel=str(derived["tense_feel"]),
+                tone=str(derived["tone"]),
+                sentence_pref=str(derived["sentence_pref"]),
+                dialogue_ratio=str(derived["dialogue_ratio"]),
+                desc_focus=str(derived["desc_focus"]),
+                pacing=str(derived["pacing"]),
+                style_profile=profile,
+            ),
+        )
+        saved_id = updated.id
+    elif payload.save_as_template:
+        tpl_name = (payload.template_name or f"{payload.genre}参考文风档案").strip()
+        created = repo.create_style_template(
+            StyleTemplateCreate(
+                name=tpl_name,
+                pov=str(derived["pov"]),
+                tense_feel=str(derived["tense_feel"]),
+                tone=str(derived["tone"]),
+                sentence_pref=str(derived["sentence_pref"]),
+                dialogue_ratio=str(derived["dialogue_ratio"]),
+                desc_focus=str(derived["desc_focus"]),
+                pacing=str(derived["pacing"]),
+                style_profile=profile,
+            )
+        )
+        saved_id = created.id
+    return StyleProfileAnalyzeResponse(
+        style_profile=profile,
+        derived_template_fields=derived,
+        saved_template_id=saved_id,
+        analysis_notes=notes,
+    )
+
+
+@router.put("/style-templates/{template_id:int}", response_model=StyleTemplateResponse)
+def update_style(
+    template_id: int,
+    payload: StyleTemplateUpdate,
+    repo: SettingsRepository = Depends(get_settings_repo),
+) -> StyleTemplateResponse:
+    return repo.update_style_template(template_id, payload)
 
 
 @router.get("/trust-mode", response_model=TrustModeSettings)

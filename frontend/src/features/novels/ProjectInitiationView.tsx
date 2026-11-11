@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Check, Save, Sparkles } from "lucide-react";
+import { Check, Save, Sliders, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { useStyleTemplates } from "@/features/app-settings/api";
@@ -17,6 +17,7 @@ export const ProjectInitiationView: React.FC<ProjectInitiationViewProps> = ({
   const { data: styles = [] } = useStyleTemplates();
   const updateMut = useUpdateNovel(novel.novel_uid);
   const setActiveSection = useUiStore((s) => s.setActiveSection);
+  const openSettingsModal = useUiStore((s) => s.openSettingsModal);
 
   const [title, setTitle] = useState(novel.title);
   const [genre, setGenre] = useState(novel.genre ?? "校园");
@@ -51,6 +52,9 @@ export const ProjectInitiationView: React.FC<ProjectInitiationViewProps> = ({
     setStyleTemplateId(novel.style_template_id);
   }, [novel]);
 
+  const selectedStyle = styles.find((s) => s.id === styleTemplateId) ?? styles[0];
+  const activeProfile = selectedStyle?.style_profile ?? null;
+
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     await updateMut.mutateAsync({
@@ -84,7 +88,7 @@ export const ProjectInitiationView: React.FC<ProjectInitiationViewProps> = ({
             <Badge tone="indigo">{novel.novel_uid}</Badge>
           </div>
           <p className="mt-0.5 text-xs text-slate-500">
-            立项信息将作为全书核心设定（第 ③ 层 Prompt）注入后续每一次世界观、大纲与正文生成。
+            立项信息与结构化六维文风档案将作为全书核心设定注入后续世界观、大纲与正文生成。
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -126,9 +130,19 @@ export const ProjectInitiationView: React.FC<ProjectInitiationViewProps> = ({
             />
           </div>
           <div>
-            <label className="font-semibold text-slate-700 dark:text-slate-300">
-              关联风格模板
-            </label>
+            <div className="flex items-center justify-between">
+              <label className="font-semibold text-slate-700 dark:text-slate-300">
+                关联风格模板
+              </label>
+              <button
+                type="button"
+                onClick={() => openSettingsModal("styles")}
+                className="inline-flex items-center gap-1 text-[11px] font-medium text-indigo-600 hover:underline dark:text-indigo-400 cursor-pointer"
+              >
+                <Sliders className="h-3 w-3" />
+                样本学习 / 编辑档案
+              </button>
+            </div>
             <select
               value={styleTemplateId ?? ""}
               onChange={(e) =>
@@ -178,6 +192,79 @@ export const ProjectInitiationView: React.FC<ProjectInitiationViewProps> = ({
               ))}
             </select>
           </div>
+
+          {activeProfile && (
+            <div className="sm:col-span-3 rounded-xl border border-indigo-200/70 bg-indigo-50/40 p-3.5 dark:border-indigo-900/50 dark:bg-indigo-950/20">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="font-bold text-indigo-950 dark:text-indigo-200">
+                    当前生效六维文风档案：{selectedStyle?.name}
+                  </span>
+                  <Badge tone="indigo">
+                    对白目标 {activeProfile.language.metrics.dialogue_ratio_pct}% · 短句{" "}
+                    {activeProfile.language.metrics.short_sentence_pct}%
+                  </Badge>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => openSettingsModal("styles")}
+                  className="text-[11px] font-medium text-indigo-600 hover:underline dark:text-indigo-400 cursor-pointer"
+                >
+                  导入参考小说片段或自定义六维特征 →
+                </button>
+              </div>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-3 text-[11px]">
+                <div className="rounded-lg bg-white/80 p-2 dark:bg-slate-900/70">
+                  <span className="font-semibold text-slate-700 dark:text-slate-200">
+                    1. 语言表达：
+                  </span>
+                  <span className="text-slate-600 dark:text-slate-400">
+                    {activeProfile.language.colloquial_level}；{activeProfile.language.sentence_length_ratio}
+                  </span>
+                </div>
+                <div className="rounded-lg bg-white/80 p-2 dark:bg-slate-900/70">
+                  <span className="font-semibold text-slate-700 dark:text-slate-200">
+                    2. 叙事方式：
+                  </span>
+                  <span className="text-slate-600 dark:text-slate-400">
+                    {activeProfile.narrative.scene_to_summary_ratio}
+                  </span>
+                </div>
+                <div className="rounded-lg bg-white/80 p-2 dark:bg-slate-900/70">
+                  <span className="font-semibold text-slate-700 dark:text-slate-200">
+                    3. 人物对话：
+                  </span>
+                  <span className="text-slate-600 dark:text-slate-400">
+                    {activeProfile.dialogue.subtext_technique}
+                  </span>
+                </div>
+                <div className="rounded-lg bg-white/80 p-2 dark:bg-slate-900/70">
+                  <span className="font-semibold text-slate-700 dark:text-slate-200">
+                    4. 情绪表达：
+                  </span>
+                  <span className="text-slate-600 dark:text-slate-400">
+                    {activeProfile.emotion.action_and_detail}
+                  </span>
+                </div>
+                <div className="rounded-lg bg-white/80 p-2 dark:bg-slate-900/70">
+                  <span className="font-semibold text-slate-700 dark:text-slate-200">
+                    5. 章节节奏：
+                  </span>
+                  <span className="text-slate-600 dark:text-slate-400">
+                    {activeProfile.pacing.conflict_progression}
+                  </span>
+                </div>
+                <div className="rounded-lg bg-white/80 p-2 dark:bg-slate-900/70">
+                  <span className="font-semibold text-slate-700 dark:text-slate-200">
+                    6. 题材特征：
+                  </span>
+                  <span className="text-slate-600 dark:text-slate-400">
+                    {activeProfile.genre_traits.characteristic_techniques}
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="space-y-4 rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">

@@ -17,19 +17,29 @@ import {
   useRestoreChapterVersion,
   useSaveChapterContent,
   useCritiqueSelection,
+  useReviewChapterStyle,
+  useRewriteChapterStyleSpans,
 } from "./api";
 import { useStreamGenerate } from "./hooks/useStreamGenerate";
 import { SceneBeatsPanel } from "./components/SceneBeatsPanel";
 import { SceneReviewBar } from "./components/SceneReviewBar";
 import { ContextPreviewPanel } from "./components/ContextPreviewPanel";
 import { ConstraintMemoryPanel } from "./components/ConstraintMemoryPanel";
+import { StyleReviewPanel } from "./components/StyleReviewPanel";
 import { VersionHistoryModal } from "./components/VersionHistoryModal";
 import { SelectionToolbar } from "./components/SelectionToolbar";
 import { WritingHeaderBar } from "./components/WritingHeaderBar";
 import { WritingPipelineBar, type WritingPipelineStep } from "./components/WritingPipelineBar";
 import { ConfirmModal } from "@/components/ui/ConfirmModal";
 import { appendSceneText } from "./sceneFlow";
-import type { AiSmellHit, RewriteActionType, SceneItem, SelectionCritiqueResult } from "./types";
+import type {
+  AiSmellHit,
+  RewriteActionType,
+  SceneItem,
+  SelectionCritiqueResult,
+  StyleReviewResult,
+  StyleSpanIssue,
+} from "./types";
 
 interface RepetitionNotice {
   tone: "info" | "warn";
@@ -79,11 +89,16 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
   const repetitionMut = useCheckSceneRepetition(novelUid, effectiveChapterId ?? 0);
   const restoreMut = useRestoreChapterVersion(novelUid, effectiveChapterId ?? 0);
   const smellMut = useAiSmellScan(novelUid, effectiveChapterId);
+  const styleReviewMut = useReviewChapterStyle(novelUid, effectiveChapterId);
+  const styleRewriteMut = useRewriteChapterStyleSpans(novelUid, effectiveChapterId);
 
   const [activeSceneId, setActiveSceneId] = useState<number | null>(null);
   const [disabledContextKeys, setDisabledContextKeys] = useState<string[]>([]);
   const [customContext, setCustomContext] = useState("");
-  const [rightTab, setRightTab] = useState<"beats" | "context" | "memory" | "guard">("beats");
+  const [rightTab, setRightTab] = useState<"beats" | "context" | "memory" | "guard" | "style">("beats");
+  const [styleReviewResult, setStyleReviewResult] = useState<StyleReviewResult | null>(null);
+  const [styleReviewError, setStyleReviewError] = useState<string | null>(null);
+  const [styleRewriteBanner, setStyleRewriteBanner] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [content, setContent] = useState("");
   const [autoSavedAt, setAutoSavedAt] = useState<string | null>(null);
@@ -161,6 +176,9 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
         setPipelineStep("idle");
         setReviewResult(null);
         setReviewError(null);
+        setStyleReviewResult(null);
+        setStyleReviewError(null);
+        setStyleRewriteBanner(null);
         setSelectionRange({ start: 0, end: 0, text: "" });
         setSupplementOpen(false);
         setSupplementCandidate("");
@@ -736,10 +754,10 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
     saveMut.mutate({ content: updated, source: "ai", create_new_version: true });
   };
 
-  const handleApplyReviewRewrite = async (issueIndex: number): Promise<boolean> => {
+  const handleApplyReviewRewrite = async (issueIndices: number[]): Promise<boolean> => {
     if (!effectiveChapterId || !reviewResult || isStreaming || saveMut.isPending || revisionMut.isPending) return false;
     const result = await revisionMut.mutateAsync({
-      reviewId: reviewResult.id, issueIndex, expectedContent: content,
+      reviewId: reviewResult.id, issueIndices, expectedContent: content,
     });
     if (currentChapterRef.current !== effectiveChapterId) return true;
     setContent(result.latest_content);
@@ -758,6 +776,85 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
       end: hit.end_index,
       text: content.slice(hit.start_index, hit.end_index),
     });
+  };
+
+  const handleRunStyleReview = async () => {
+    if (!effectiveChapterId) return;
+    setRightTab("style");
+    setStyleReviewError(null);
+    setStyleRewriteBanner(null);
+    try {
+      const res = await styleReviewMut.mutateAsync({ text: content, sceneId: activeSceneId });
+      if (currentChapterRef.current !== effectiveChapterId) return;
+      setStyleReviewResult(res);
+    } catch (e) {
+      setStyleReviewError(e instanceof Error ? e.message : "文风诊脉请求失败");
+    }
+  };
+
+  const handleRewriteAllStyleSpans = async () => {
+    if (!effectiveChapterId || !styleReviewResult) return;
+    setStyleReviewError(null);
+    setStyleRewriteBanner(null);
+    try {
+      const res = await styleRewriteMut.mutateAsync({
+        text: content,
+        maxSpans: 6,
+        saveToChapter: true,
+      });
+      if (currentChapterRef.current !== effectiveChapterId) return;
+      setContent(res.rewritten_text);
+      setStyleRewriteBanner(
+        `已完成外科手术式局部微改：成功替换 ${res.replaced_count} 处病灶片段` +
+          (res.skipped_count > 0
+            ? `（跳过 ${res.skipped_count} 处以保护关键设定/锚点）`
+            : "，已存为新版本。")
+      );
+      const refreshed = await styleReviewMut.mutateAsync({
+        text: res.rewritten_text,
+        sceneId: activeSceneId,
+      });
+      if (currentChapterRef.current === effectiveChapterId) {
+        setStyleReviewResult(refreshed);
+      }
+    } catch (e) {
+      setStyleReviewError(e instanceof Error ? e.message : "局部微改请求失败");
+    }
+  };
+
+  const handleApplySingleStyleSpan = (issue: StyleSpanIssue) => {
+    if (!effectiveChapterId || !issue.suggested_rewrite.trim()) return;
+    const idx = content.indexOf(issue.evidence_quote);
+    if (idx === -1) {
+      setStyleReviewError("未在当前正文中找到该原句（可能已被修改），请重新运行文风诊脉。");
+      return;
+    }
+    const updated =
+      content.slice(0, idx) +
+      issue.suggested_rewrite +
+      content.slice(idx + issue.evidence_quote.length);
+    setContent(updated);
+    saveMut.mutate({ content: updated, source: "ai", create_new_version: true });
+    setStyleRewriteBanner("已仅替换该处病灶片段，并保存为新版本。");
+    setStyleReviewResult((prev) =>
+      prev
+        ? {
+            ...prev,
+            issues: prev.issues.filter((it) => it.evidence_quote !== issue.evidence_quote),
+          }
+        : prev
+    );
+  };
+
+  const handleFocusStyleSpan = (quote: string) => {
+    const el = textareaRef.current;
+    if (!el || !quote) return;
+    const start = content.indexOf(quote);
+    if (start === -1) return;
+    const end = start + quote.length;
+    el.focus();
+    el.setSelectionRange(start, end);
+    setSelectionRange({ start, end, text: quote });
   };
 
   if (allChapters.length === 0) {
@@ -792,10 +889,12 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
           activeSceneId={activeSceneId}
           isStreaming={isStreaming}
           isScanningSmell={smellMut.isPending}
+          isReviewingStyle={styleReviewMut.isPending}
           onSelectChapter={setSelectedChapterId}
           onSelectScene={setActiveSceneId}
           onWriteWholeChapter={handleWriteWholeChapter}
           onStopStream={() => { stopStream(); setPipelineStep("idle"); }}
+          onRunStyleReview={() => void handleRunStyleReview()}
           onScanSmell={async () => {
             setSmellError(null);
             setHasScannedSmell(false);
@@ -1044,18 +1143,19 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
 
       {!focusMode && rightPanelOpen && (
         <aside className="flex w-88 shrink-0 flex-col border-l border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
-          <div className="flex border-b border-slate-200 p-2 dark:border-slate-800">
+          <div className="flex flex-wrap border-b border-slate-200 p-2 gap-1 dark:border-slate-800">
             {([
               ["beats", "① 细纲节拍"],
-              ["context", "② 上下文预览"],
-              ["memory", "③ 本章记忆"],
-              ["guard", "④ 约束与记忆"],
+              ["context", "② 上下文"],
+              ["memory", "③ 记忆"],
+              ["guard", "④ 约束"],
+              ["style", "⑤ 文风诊断"],
             ] as const).map(([key, label]) => (
               <button
                 key={key}
                 type="button"
                 onClick={() => setRightTab(key)}
-                className={`flex-1 rounded-lg py-1.5 text-xs font-medium transition-colors cursor-pointer ${
+                className={`flex-1 rounded-lg py-1.5 px-1 text-xs font-medium transition-colors cursor-pointer ${
                   rightTab === key
                     ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-300"
                     : "text-slate-500 hover:bg-slate-100 dark:text-slate-400"
@@ -1116,6 +1216,19 @@ export const WritingWorkbench: React.FC<{ novelUid: string }> = ({ novelUid }) =
                     prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]
                   )
                 }
+              />
+            )}
+            {rightTab === "style" && (
+              <StyleReviewPanel
+                review={styleReviewResult}
+                isReviewing={styleReviewMut.isPending}
+                isRewriting={styleRewriteMut.isPending}
+                error={styleReviewError}
+                rewriteBanner={styleRewriteBanner}
+                onRunReview={() => void handleRunStyleReview()}
+                onRewriteAllSpans={() => void handleRewriteAllStyleSpans()}
+                onApplySingleSpan={handleApplySingleStyleSpan}
+                onFocusSpan={handleFocusStyleSpan}
               />
             )}
           </div>

@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Literal
 from pydantic import BaseModel, Field
 
+from app.schemas.style_profile import StyleProfile
+
 TaskCategory = Literal["writing", "planning", "extract"]
 
 
@@ -88,6 +90,21 @@ class StyleTemplateCreate(BaseModel):
     pacing: str = "慢热细腻"
     example_paras: list[str] = Field(default_factory=list)
     forbidden_exprs: list[str] = Field(default_factory=list)
+    style_profile: StyleProfile | None = None
+
+
+class StyleTemplateUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    pov: str | None = None
+    tense_feel: str | None = None
+    tone: str | None = None
+    sentence_pref: str | None = None
+    dialogue_ratio: str | None = None
+    desc_focus: str | None = None
+    pacing: str | None = None
+    example_paras: list[str] | None = None
+    forbidden_exprs: list[str] | None = None
+    style_profile: StyleProfile | None = None
 
 
 class StyleTemplateResponse(StyleTemplateCreate):

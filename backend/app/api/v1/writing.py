@@ -30,6 +30,12 @@ from app.schemas.writing import (
     SelectionCritiqueRequest,
     SelectionCritiqueResponse,
 )
+from app.schemas.style_profile import (
+    StyleReviewRequest,
+    StyleReviewResponse,
+    StyleSpanRewriteRequest,
+    StyleSpanRewriteResponse,
+)
 from app.services.ai_smell import scan_ai_smell
 from app.services.context.assembler import ContextAssembler
 from app.services.writing_service import WritingService
@@ -182,6 +188,34 @@ async def critique_selection(
     svc: WritingService = Depends(get_writing_service),
 ) -> SelectionCritiqueResponse:
     return await svc.critique_selection(chapter_id, payload.selected_text)
+
+
+@router.post("/chapters/{chapter_id}/style-review", response_model=StyleReviewResponse)
+def review_chapter_style(
+    chapter_id: int,
+    payload: StyleReviewRequest,
+    svc: WritingService = Depends(get_writing_service),
+) -> StyleReviewResponse:
+    return svc.review_chapter_style(
+        chapter_id=chapter_id,
+        text=payload.text,
+        scene_id=payload.scene_id,
+    )
+
+
+@router.post("/chapters/{chapter_id}/style-rewrite-spans", response_model=StyleSpanRewriteResponse)
+def rewrite_chapter_style_spans(
+    chapter_id: int,
+    payload: StyleSpanRewriteRequest,
+    svc: WritingService = Depends(get_writing_service),
+) -> StyleSpanRewriteResponse:
+    return svc.rewrite_chapter_style_spans(
+        chapter_id=chapter_id,
+        text=payload.text,
+        issue_indices=payload.issue_indices,
+        max_spans=payload.max_spans,
+        save_to_chapter=payload.save_to_chapter,
+    )
 
 # --- Export (TXT / Markdown) ---
 

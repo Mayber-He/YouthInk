@@ -11,6 +11,8 @@ import type {
   RepetitionCheckResult,
   SceneItem,
   SelectionCritiqueResult,
+  StyleReviewResult,
+  StyleSpanRewriteResult,
 } from "./types";
 
 export const editorKeys = {
@@ -208,3 +210,47 @@ export function useCritiqueSelection(novelUid: string, chapterId: number) {
   });
 }
 
+export function useReviewChapterStyle(novelUid: string, chapterId: number | null) {
+  return useMutation({
+    mutationFn: (input: { text?: string; sceneId?: number | null }) =>
+      apiRequest<StyleReviewResult>(
+        `/api/v1/novels/${novelUid}/chapters/${chapterId}/style-review`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            text: input.text,
+            scene_id: input.sceneId ?? null,
+          }),
+        }
+      ),
+  });
+}
+
+export function useRewriteChapterStyleSpans(novelUid: string, chapterId: number | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: {
+      text?: string;
+      issueIndices?: number[];
+      maxSpans?: number;
+      saveToChapter?: boolean;
+    }) =>
+      apiRequest<StyleSpanRewriteResult>(
+        `/api/v1/novels/${novelUid}/chapters/${chapterId}/style-rewrite-spans`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            text: input.text,
+            issue_indices: input.issueIndices,
+            max_spans: input.maxSpans ?? 6,
+            save_to_chapter: input.saveToChapter ?? true,
+          }),
+        }
+      ),
+    onSuccess: () => {
+      if (chapterId) {
+        qc.invalidateQueries({ queryKey: editorKeys.workspace(novelUid, chapterId) });
+      }
+    },
+  });
+}

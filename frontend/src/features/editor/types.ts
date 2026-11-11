@@ -1,6 +1,6 @@
-/** Types for M3 Editor, Scene Beats, Version History, Context Preview, and AI Smell. */
+/** Types for M3 Editor, Scene Beats, Version History, Context Preview, AI Smell, and Style Review. */
 
-import type { ChapterItem } from "@/types/api";
+import type { ChapterItem, LanguageMetrics } from "@/types/api";
 
 export interface SceneItem {
   id: number;
@@ -70,10 +70,6 @@ export interface AiSmellScanResult {
 /** T5: 场景正文生成后的确定性重复检测结果。 */
 export interface RepetitionCheckResult {
   triggered: boolean;
-  // none 未超阈值 | rewritten 已自动重写一次且复检通过
-  // | kept_with_warning 重写后仍超标（或关闭了自动重写），保留文本并警告
-  // | rewrite_failed 自动重写失败，保留原文
-  // | supplemented 关键选择场景已按开关补写一句内心判断
   action: "none" | "rewritten" | "kept_with_warning" | "rewrite_failed" | "supplemented";
   final_text: string;
   reasons: string[];
@@ -89,11 +85,44 @@ export type RewriteActionType =
   | "polish"
   | "tone_shift";
 
-
 export interface SelectionCritiqueResult {
   has_issue: boolean;
   issue_type: string | null;
   issue_label: string | null;
   description: string;
   suggestion: string;
+}
+
+export interface StyleSpanIssue {
+  issue_type: string;
+  dimension: string;
+  severity: "high" | "medium" | "low";
+  paragraph_index: number;
+  evidence_quote: string;
+  reason: string;
+  rewrite_directive: string;
+  suggested_rewrite: string;
+}
+
+export interface StyleReviewResult {
+  chapter_id: number;
+  total_issues: number;
+  dimension_scores: Record<string, number>;
+  pacing_mode: string;
+  issues: StyleSpanIssue[];
+  metrics: LanguageMetrics;
+  summary: string;
+}
+
+export interface StyleSpanRewriteResult {
+  original_text: string;
+  rewritten_text: string;
+  replaced_count: number;
+  skipped_count: number;
+  replacements: Array<{
+    issue_type: string;
+    original_span: string;
+    replacement_span: string;
+  }>;
+  warnings: string[];
 }

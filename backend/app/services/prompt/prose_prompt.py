@@ -15,8 +15,14 @@ Behaviour is controlled by ``PROSE_PROMPT_V2`` (default ON). Set env
 
 from __future__ import annotations
 
+import json
 import os
 import re
+
+from app.services.prompt.style_profile import (
+    render_style_profile_prompt_block,
+    select_dynamic_scene_pacing,
+)
 
 # 句末标点（含中英文），用于按句截取核心设定。
 _SENT_END = re.compile(r"(?<=[。！？!?；;])")
@@ -108,13 +114,14 @@ def style_layer(
     example_paras: list[str] | None = None,
     has_style_note: bool = False,
     max_examples: int = 2,
+    style_profile: object = None,
 ) -> str:
     """Build the style layer.
 
-    * With NO author ``style_note``: full template (as before) plus forbidden + examples.
+    * With NO author ``style_note``: full template (as before) plus forbidden + examples + Style Profile.
     * WITH an author ``style_note``: the template's descriptive fields are skipped (the
-      author's note takes precedence) but ``forbidden_exprs`` and up to ``max_examples``
-      example paragraphs are STILL injected — previously they were dropped entirely.
+      author's note takes precedence) but ``forbidden_exprs``, up to ``max_examples``
+      example paragraphs, and any user-learned/custom ``style_profile`` are STILL injected.
     """
     parts: list[str] = []
     if not has_style_note and style_name:
@@ -124,6 +131,23 @@ def style_layer(
             f"基调：{tone} | 句式：{sentence_pref} | 对话比例：{dialogue_ratio}\n"
             f"描写侧重：{desc_focus} | 节奏：{pacing}"
         )
+    if style_profile:
+        prof_dict: dict | None = None
+        if isinstance(style_profile, str):
+            try:
+                prof_dict = json.loads(style_profile)
+            except Exception:
+                prof_dict = None
+        elif isinstance(style_profile, dict):
+            prof_dict = style_profile
+        elif hasattr(style_profile, "model_dump"):
+            prof_dict = style_profile.model_dump()  # type: ignore[union-attr]
+        if isinstance(prof_dict, dict) and prof_dict:
+            src_type = prof_dict.get("source_type", "builtin_preset")
+            if not has_style_note or src_type in ("reference_excerpt", "user_custom"):
+                prof_block = render_style_profile_prompt_block(prof_dict)
+                if prof_block:
+                    parts.append(prof_block)
     forb = [f for f in (forbidden_exprs or []) if f]
     if forb:
         parts.append("禁用套话表达：" + "、".join(forb))

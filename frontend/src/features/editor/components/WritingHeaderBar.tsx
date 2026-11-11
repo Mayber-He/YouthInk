@@ -9,6 +9,7 @@ import {
   Save,
   SearchCheck,
   ShieldCheck,
+  Sparkles,
   Square,
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
@@ -27,11 +28,13 @@ interface WritingHeaderBarProps {
   activeSceneId: number | null;
   isStreaming: boolean;
   isScanningSmell?: boolean;
+  isReviewingStyle?: boolean;
   onSelectChapter: (chapterId: number) => void;
   onSelectScene: (sceneId: number) => void;
   onWriteWholeChapter: () => void;
   onStopStream: () => void;
   onScanSmell: () => void;
+  onRunStyleReview?: () => void;
   onRunConsistencyReview: () => void;
   onOpenHistory: () => void;
   onSaveNewVersion: () => void;
@@ -48,11 +51,13 @@ export const WritingHeaderBar: React.FC<WritingHeaderBarProps> = ({
   activeSceneId,
   isStreaming,
   isScanningSmell = false,
+  isReviewingStyle = false,
   onSelectChapter,
   onSelectScene,
   onWriteWholeChapter,
   onStopStream,
   onScanSmell,
+  onRunStyleReview,
   onRunConsistencyReview,
   onOpenHistory,
   onSaveNewVersion,
@@ -100,6 +105,18 @@ export const WritingHeaderBar: React.FC<WritingHeaderBarProps> = ({
             <Button size="sm" onClick={onWriteWholeChapter}>
               <Play className="h-3.5 w-3.5" />
               流式写本章
+            </Button>
+          )}
+
+          {onRunStyleReview && (
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={isReviewingStyle}
+              onClick={onRunStyleReview}
+            >
+              <Sparkles className="h-3.5 w-3.5 text-indigo-600" />
+              {isReviewingStyle ? "诊脉中..." : "文风诊脉"}
             </Button>
           )}
 

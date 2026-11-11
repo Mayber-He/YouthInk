@@ -16,10 +16,12 @@ from app.schemas.settings import (
     PromptTemplateItem,
     StyleTemplateCreate,
     StyleTemplateResponse,
+    StyleTemplateUpdate,
     TaskAssignmentResponse,
     TaskAssignmentUpdate,
     TrustModeSettings,
 )
+from app.schemas.style_profile import StyleProfile
 
 
 class SettingsRepository:
@@ -201,14 +203,25 @@ class SettingsRepository:
         rows = self._conn.execute("SELECT * FROM style_templates ORDER BY is_builtin DESC, id ASC").fetchall()
         return [self._row_to_style(r) for r in rows]
 
+    def get_style_template(self, template_id: int) -> StyleTemplateResponse:
+        row = self._conn.execute("SELECT * FROM style_templates WHERE id = ?", (template_id,)).fetchone()
+        if not row:
+            raise AppError("STYLE_NOT_FOUND", f"未找到风格模板 (id={template_id})", status_code=404)
+        return self._row_to_style(row)
+
     def create_style_template(self, payload: StyleTemplateCreate) -> StyleTemplateResponse:
+        profile_json = (
+            json.dumps(payload.style_profile.model_dump(), ensure_ascii=False)
+            if payload.style_profile is not None
+            else json.dumps(StyleProfile(source_type="user_custom").model_dump(), ensure_ascii=False)
+        )
         try:
             cur = self._conn.execute(
                 """
                 INSERT INTO style_templates (
                     name, is_builtin, pov, tense_feel, tone, sentence_pref,
-                    dialogue_ratio, desc_focus, pacing, example_paras, forbidden_exprs
-                ) VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    dialogue_ratio, desc_focus, pacing, example_paras, forbidden_exprs, profile_json
+                ) VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     payload.name.strip(),
@@ -221,12 +234,55 @@ class SettingsRepository:
                     payload.pacing,
                     json.dumps(payload.example_paras, ensure_ascii=False),
                     json.dumps(payload.forbidden_exprs, ensure_ascii=False),
+                    profile_json,
                 ),
             )
         except sqlite3.IntegrityError as exc:
             raise AppError("DUPLICATE_STYLE_NAME", f"风格模板已存在: {payload.name}", status_code=409) from exc
-        row = self._conn.execute("SELECT * FROM style_templates WHERE id = ?", (cur.lastrowid,)).fetchone()
-        return self._row_to_style(row)
+        return self.get_style_template(int(cur.lastrowid))
+
+    def update_style_template(self, template_id: int, payload: StyleTemplateUpdate) -> StyleTemplateResponse:
+        row = self._conn.execute("SELECT * FROM style_templates WHERE id = ?", (template_id,)).fetchone()
+        if not row:
+            raise AppError("STYLE_NOT_FOUND", f"未找到风格模板 (id={template_id})", status_code=404)
+        name = payload.name.strip() if payload.name is not None else str(row["name"])
+        pov = payload.pov if payload.pov is not None else str(row["pov"] or "")
+        tense_feel = payload.tense_feel if payload.tense_feel is not None else str(row["tense_feel"] or "")
+        tone = payload.tone if payload.tone is not None else str(row["tone"] or "")
+        sentence_pref = payload.sentence_pref if payload.sentence_pref is not None else str(row["sentence_pref"] or "")
+        dialogue_ratio = payload.dialogue_ratio if payload.dialogue_ratio is not None else str(row["dialogue_ratio"] or "")
+        desc_focus = payload.desc_focus if payload.desc_focus is not None else str(row["desc_focus"] or "")
+        pacing = payload.pacing if payload.pacing is not None else str(row["pacing"] or "")
+        example_paras = (
+            json.dumps(payload.example_paras, ensure_ascii=False)
+            if payload.example_paras is not None
+            else str(row["example_paras"] or "[]")
+        )
+        forbidden_exprs = (
+            json.dumps(payload.forbidden_exprs, ensure_ascii=False)
+            if payload.forbidden_exprs is not None
+            else str(row["forbidden_exprs"] or "[]")
+        )
+        profile_json = (
+            json.dumps(payload.style_profile.model_dump(), ensure_ascii=False)
+            if payload.style_profile is not None
+            else str(row["profile_json"] or "{}")
+        )
+        self._conn.execute(
+            """
+            UPDATE style_templates
+            SET name = ?, pov = ?, tense_feel = ?, tone = ?, sentence_pref = ?,
+                dialogue_ratio = ?, desc_focus = ?, pacing = ?, example_paras = ?,
+                forbidden_exprs = ?, profile_json = ?, updated_at = datetime('now')
+            WHERE id = ?
+            """,
+            (
+                name, pov, tense_feel, tone, sentence_pref,
+                dialogue_ratio, desc_focus, pacing, example_paras,
+                forbidden_exprs, profile_json, template_id,
+            ),
+        )
+        return self.get_style_template(template_id)
 
     # --- App Settings (Trust Mode, etc.) ---
 
@@ -266,6 +322,15 @@ class SettingsRepository:
 
     @staticmethod
     def _row_to_style(row: sqlite3.Row) -> StyleTemplateResponse:
+        raw_profile = row["profile_json"] if "profile_json" in row.keys() else "{}"
+        parsed_profile: StyleProfile | None = None
+        if raw_profile:
+            try:
+                data = json.loads(raw_profile)
+                if isinstance(data, dict) and data:
+                    parsed_profile = StyleProfile.model_validate(data)
+            except Exception:
+                parsed_profile = None
         return StyleTemplateResponse(
             id=int(row["id"]),
             name=str(row["name"]),
@@ -279,6 +344,7 @@ class SettingsRepository:
             pacing=str(row["pacing"] or ""),
             example_paras=json.loads(row["example_paras"] or "[]"),
             forbidden_exprs=json.loads(row["forbidden_exprs"] or "[]"),
+            style_profile=parsed_profile,
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
         )

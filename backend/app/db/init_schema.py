@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS style_templates (
     pacing          TEXT,
     example_paras   TEXT,
     forbidden_exprs TEXT,
+    profile_json    TEXT    NOT NULL DEFAULT '{}',
     created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
 );
@@ -218,18 +219,25 @@ CREATE TABLE IF NOT EXISTS character_state_changes (
 CREATE INDEX IF NOT EXISTS idx_char_state ON character_state_changes(character_id, field, chapter_id);
 
 CREATE TABLE IF NOT EXISTS cognitive_records (
-    id              INTEGER PRIMARY KEY,
-    secret          TEXT    NOT NULL,
-    knower_ids      TEXT    NOT NULL,
-    chapter_id      INTEGER REFERENCES chapters(id) ON DELETE CASCADE,
-    learned_by      TEXT,
-    source_hash     TEXT,
-    origin          TEXT    NOT NULL DEFAULT 'legacy',
-    is_stale        INTEGER NOT NULL DEFAULT 0,
-    source_quote    TEXT,
-    confirm_status  TEXT    NOT NULL DEFAULT 'pending'
-                        CHECK(confirm_status IN ('pending','confirmed','discarded')),
-    created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+    id                  INTEGER PRIMARY KEY,
+    secret              TEXT    NOT NULL,
+    knower_ids          TEXT    NOT NULL,
+    chapter_id          INTEGER REFERENCES chapters(id) ON DELETE CASCADE,
+    learned_by          TEXT,
+    memory_type         TEXT    NOT NULL DEFAULT 'secret'
+                            CHECK(memory_type IN ('secret','daily','schedule')),
+    time_scope          TEXT    NOT NULL DEFAULT '',
+    schedule_status     TEXT    NOT NULL DEFAULT 'pending'
+                            CHECK(schedule_status IN ('pending','completed','cancelled','expired')),
+    related_record_id   INTEGER REFERENCES cognitive_records(id) ON DELETE SET NULL,
+    source_hash         TEXT,
+    origin              TEXT    NOT NULL DEFAULT 'legacy',
+    is_stale            INTEGER NOT NULL DEFAULT 0,
+    is_disabled         INTEGER NOT NULL DEFAULT 0,
+    source_quote        TEXT,
+    confirm_status      TEXT    NOT NULL DEFAULT 'pending'
+                            CHECK(confirm_status IN ('pending','confirmed','discarded')),
+    created_at          TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS relationship_changes (
@@ -441,14 +449,18 @@ DEFAULT_APP_SETTINGS: dict[str, object] = {
 def init_global_db(conn: sqlite3.Connection) -> None:
     """Create tables and seed built-in style templates & default settings in global.db."""
     conn.executescript(GLOBAL_DB_SCHEMA)
+    existing_cols = {str(r[1]) for r in conn.execute('PRAGMA table_info("style_templates")')}
+    if "profile_json" not in existing_cols:
+        conn.execute("ALTER TABLE style_templates ADD COLUMN profile_json TEXT NOT NULL DEFAULT '{}'")
     with conn:
         for tpl in BUILTIN_STYLE_TEMPLATES:
+            profile_str = json.dumps(tpl.get("style_profile", {}), ensure_ascii=False)
             conn.execute(
                 """
                 INSERT OR IGNORE INTO style_templates (
                     name, is_builtin, pov, tense_feel, tone, sentence_pref,
-                    dialogue_ratio, desc_focus, pacing, example_paras, forbidden_exprs
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    dialogue_ratio, desc_focus, pacing, example_paras, forbidden_exprs, profile_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     tpl["name"],
@@ -462,7 +474,16 @@ def init_global_db(conn: sqlite3.Connection) -> None:
                     tpl["pacing"],
                     json.dumps(tpl["example_paras"], ensure_ascii=False),
                     json.dumps(tpl["forbidden_exprs"], ensure_ascii=False),
+                    profile_str,
                 ),
+            )
+            conn.execute(
+                """
+                UPDATE style_templates
+                SET profile_json = ?
+                WHERE name = ? AND is_builtin = 1 AND (profile_json IS NULL OR profile_json = '' OR profile_json = '{}')
+                """,
+                (profile_str, tpl["name"]),
             )
         for key, val in DEFAULT_APP_SETTINGS.items():
             conn.execute(
@@ -549,6 +570,10 @@ def _migrate_novel_memory_revision_columns(conn: sqlite3.Connection) -> None:
             "origin": "TEXT NOT NULL DEFAULT 'legacy'",
             "is_stale": "INTEGER NOT NULL DEFAULT 0",
             "is_disabled": "INTEGER NOT NULL DEFAULT 0",
+            "memory_type": "TEXT NOT NULL DEFAULT 'secret'",
+            "time_scope": "TEXT NOT NULL DEFAULT ''",
+            "schedule_status": "TEXT NOT NULL DEFAULT 'pending'",
+            "related_record_id": "INTEGER",
         },
         "relationship_changes": {
             "source_hash": "TEXT",

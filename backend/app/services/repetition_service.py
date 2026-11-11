@@ -20,8 +20,18 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import asdict
 from typing import Awaitable, Callable
+
+_DANGLING_PARA_HEAD_RE = re.compile(r"(?m)^([ \t\u3000]*)[了着过地的][，、]\s*")
+
+
+def clean_dangling_seam_particles(text: str) -> str:
+    """Remove dangling aspect particles (e.g. '了，江澈...') left at paragraph heads after span deletion."""
+    if not text:
+        return text
+    return _DANGLING_PARA_HEAD_RE.sub(r"\1", text)
 
 from app.services.repetition_guard import (
     TIME_WORD_DAYS,
@@ -223,7 +233,7 @@ async def run_repetition_pipeline(
         check_ids.append(cid)
 
     try:
-        rewritten = (await rewrite_fn(scene_text, first) or "").strip()
+        rewritten = clean_dangling_seam_particles((await rewrite_fn(scene_text, first) or "").strip())
     except Exception as exc:
         logger.warning("scene rewrite failed: %s", exc)
         rewritten = ""

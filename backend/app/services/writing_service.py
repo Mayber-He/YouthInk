@@ -105,6 +105,7 @@ class WritingService:
                 forbidden_exprs=list(style.forbidden_exprs),
                 example_paras=list(style.example_paras),
                 has_style_note=has_note,
+                style_profile=style.style_profile,
             )
         else:
             layer2 = ""
@@ -500,6 +501,18 @@ class WritingService:
         )
 
         if v2:
+            from app.services.prompt.style_profile import select_dynamic_scene_pacing
+            active_beat = (
+                (target_scene.beat if target_scene else ch.synopsis)
+                if (req.mode == "scene" and req.scene_id is not None)
+                else (ch.synopsis or "")
+            )
+            _mode, pacing_directive = select_dynamic_scene_pacing(
+                active_beat,
+                scene_index=scene_idx if (req.mode == "scene" and req.scene_id is not None) else 1,
+                total_scenes=max(1, len(scenes)),
+            )
+            inst += f"\n{pacing_directive}"
             # 场景模式按场景序号轮换收尾方式；整章模式用 1（章末同样落在对话/动作/决定）。
             inst += ending_rule(scene_idx if (req.mode == "scene" and req.scene_id is not None) else 1)
 
@@ -873,4 +886,67 @@ class WritingService:
             chapter_id=chapter_id,
         )
         return await parse_and_validate_json(res.content, SelectionCritiqueResponse)
+
+    def review_chapter_style(
+        self,
+        chapter_id: int,
+        text: str | None = None,
+        scene_id: int | None = None,
+    ):
+        """Run targeted post-generation AI style review on chapter or scene prose."""
+        from app.services.style_review import diagnose_chapter_style
+
+        ws = self._writing_repo.get_chapter_workspace(chapter_id)
+        target_text = text if text is not None else ws.latest_content
+        beat = ws.chapter.synopsis or ""
+        if scene_id is not None:
+            sc = next((s for s in ws.scenes if s.id == scene_id), None)
+            if sc:
+                beat = sc.beat
+        novel = self._novel_repo.get_novel_detail()
+        styles = self._settings_repo.list_style_templates()
+        style = next((s for s in styles if s.id == novel.style_template_id), None)
+        return diagnose_chapter_style(
+            target_text,
+            chapter_id=chapter_id,
+            beat=beat,
+            style_profile=style.style_profile if style else None,
+        )
+
+    def rewrite_chapter_style_spans(
+        self,
+        chapter_id: int,
+        text: str | None = None,
+        issue_indices: list[int] | None = None,
+        max_spans: int = 5,
+        save_to_chapter: bool = False,
+    ):
+        """Surgically rewrite only unqualified AI-style spans while preserving plot and surrounding text."""
+        from app.services.style_review import (
+            apply_surgical_span_rewrites,
+            diagnose_chapter_style,
+        )
+
+        ws = self._writing_repo.get_chapter_workspace(chapter_id)
+        target_text = text if text is not None else ws.latest_content
+        review = diagnose_chapter_style(
+            target_text,
+            chapter_id=chapter_id,
+            beat=ws.chapter.synopsis or "",
+        )
+        res = apply_surgical_span_rewrites(
+            target_text,
+            review.issues,
+            issue_indices=issue_indices,
+            max_spans=max_spans,
+        )
+        if save_to_chapter and res.replaced_count > 0:
+            self._writing_repo.save_chapter_content(
+                chapter_id,
+                content=res.rewritten_text,
+                source="ai",
+                create_new_version=True,
+            )
+        return res
+
 

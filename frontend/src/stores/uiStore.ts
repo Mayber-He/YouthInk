@@ -11,7 +11,7 @@ interface UiState {
   focusMode: boolean;
   darkMode: boolean;
   settingsModalOpen: boolean;
-  settingsInitialTab: "profiles" | "tasks" | "embedding" | "prompts" | "trust";
+  settingsInitialTab: "profiles" | "tasks" | "embedding" | "prompts" | "trust" | "styles";
 
   openNovel: (novelUid: string) => void;
   closeNovel: () => void;
@@ -20,7 +20,7 @@ interface UiState {
   toggleRightPanel: () => void;
   toggleFocusMode: () => void;
   toggleDarkMode: () => void;
-  openSettingsModal: (tab?: "profiles" | "tasks" | "embedding" | "prompts" | "trust") => void;
+  openSettingsModal: (tab?: "profiles" | "tasks" | "embedding" | "prompts" | "trust" | "styles") => void;
   closeSettingsModal: () => void;
 }
 

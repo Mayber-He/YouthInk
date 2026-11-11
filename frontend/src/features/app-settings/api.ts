@@ -10,7 +10,11 @@ import type {
   LlmProfileCreateInput,
   LlmProfileUpdateInput,
   PromptTemplateItem,
+  StyleProfileAnalyzeInput,
+  StyleProfileAnalyzeResult,
   StyleTemplate,
+  StyleTemplateCreateInput,
+  StyleTemplateUpdateInput,
   TaskModelAssignments,
   TrustModeSettings,
 } from "@/types/api";
@@ -149,6 +153,51 @@ export function useStyleTemplates() {
     queryKey: settingsKeys.styles,
     queryFn: () =>
       apiRequest<StyleTemplate[]>("/api/v1/settings/style-templates"),
+  });
+}
+
+export function useCreateStyleTemplate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: StyleTemplateCreateInput) =>
+      apiRequest<StyleTemplate>("/api/v1/settings/style-templates", {
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: settingsKeys.styles });
+    },
+  });
+}
+
+export function useUpdateStyleTemplate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, input }: { id: number; input: StyleTemplateUpdateInput }) =>
+      apiRequest<StyleTemplate>(`/api/v1/settings/style-templates/${id}`, {
+        method: "PUT",
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: settingsKeys.styles });
+    },
+  });
+}
+
+export function useAnalyzeStyleExcerpt() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: StyleProfileAnalyzeInput) =>
+      apiRequest<StyleProfileAnalyzeResult>(
+        "/api/v1/settings/style-templates/analyze",
+        {
+          method: "POST",
+          body: JSON.stringify(input),
+        }
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: settingsKeys.styles });
+    },
   });
 }
 

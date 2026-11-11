@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.schemas.style_profile import StyleProfile
+
 DEFAULT_FORBIDDEN_EXPRESSIONS: list[str] = [
     "不由得",
     "嘴角勾起一抹弧度",
@@ -15,6 +17,8 @@ DEFAULT_FORBIDDEN_EXPRESSIONS: list[str] = [
     "不知为何",
     "莫名地",
 ]
+
+DEFAULT_CAMPUS_PROFILE: dict[str, Any] = StyleProfile().model_dump()
 
 BUILTIN_STYLE_TEMPLATES: list[dict[str, Any]] = [
     {
@@ -32,6 +36,7 @@ BUILTIN_STYLE_TEMPLATES: list[dict[str, Any]] = [
             "操场边的自动贩卖机吐出一罐冰镇柠檬茶，铝罐外壁很快凝出一层细密的水珠。他什么也没说，只是把拉环拉开半寸，推到她手边。"
         ],
         "forbidden_exprs": DEFAULT_FORBIDDEN_EXPRESSIONS,
+        "style_profile": DEFAULT_CAMPUS_PROFILE,
     },
     {
         "name": "细腻暗恋",
@@ -48,6 +53,7 @@ BUILTIN_STYLE_TEMPLATES: list[dict[str, Any]] = [
             "有些名字在心里念了上千遍，真正喊出口的时候，却轻得像粉笔灰落在讲台边沿。"
         ],
         "forbidden_exprs": DEFAULT_FORBIDDEN_EXPRESSIONS,
+        "style_profile": DEFAULT_CAMPUS_PROFILE,
     },
     {
         "name": "轻松欢脱",
@@ -64,6 +70,7 @@ BUILTIN_STYLE_TEMPLATES: list[dict[str, Any]] = [
             "旁边的周牧慢条斯理地端起餐盘：「不抢，我刚跟阿姨打听过了，后厨还有一锅刚出炉的。」"
         ],
         "forbidden_exprs": DEFAULT_FORBIDDEN_EXPRESSIONS,
+        "style_profile": DEFAULT_CAMPUS_PROFILE,
     },
     {
         "name": "青春疼痛",
@@ -80,5 +87,6 @@ BUILTIN_STYLE_TEMPLATES: list[dict[str, Any]] = [
             "后来她才明白，十七岁许下的诺言不是假的，只是那时候的他们还不知道，时间比誓言重得多。"
         ],
         "forbidden_exprs": DEFAULT_FORBIDDEN_EXPRESSIONS,
+        "style_profile": DEFAULT_CAMPUS_PROFILE,
     },
 ]

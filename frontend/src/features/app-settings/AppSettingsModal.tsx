@@ -4,14 +4,17 @@ import { useUiStore } from "@/stores/uiStore";
 import { LlmProfilesTab } from "./LlmProfilesTab";
 import { TaskAndEmbeddingTab } from "./TaskAndEmbeddingTab";
 import { PromptTemplatesTab } from "./PromptTemplatesTab";
+import { StyleProfilesTab } from "./StyleProfilesTab";
 
 export const AppSettingsModal: React.FC = () => {
   const { settingsModalOpen, settingsInitialTab, closeSettingsModal } = useUiStore();
-  const [tab, setTab] = useState<"profiles" | "tasks" | "prompts">("profiles");
+  const [tab, setTab] = useState<"profiles" | "tasks" | "prompts" | "styles">("profiles");
 
   useEffect(() => {
     if (settingsInitialTab === "prompts") {
       setTab("prompts");
+    } else if (settingsInitialTab === "styles") {
+      setTab("styles");
     } else if (
       settingsInitialTab === "tasks" ||
       settingsInitialTab === "embedding" ||
@@ -27,15 +30,16 @@ export const AppSettingsModal: React.FC = () => {
     <Modal
       open={settingsModalOpen}
       onClose={closeSettingsModal}
-      title="全局设置 · 模型档案、任务分配、Embedding 与 Prompt 模板"
+      title="全局设置 · 模型档案、任务分配、Prompt 模板与六维文风档案"
       maxWidthClass="max-w-4xl"
     >
-      <div className="mb-5 flex gap-2 border-b border-slate-200 pb-3 dark:border-slate-800">
+      <div className="mb-5 flex flex-wrap gap-2 border-b border-slate-200 pb-3 dark:border-slate-800">
         {(
           [
             { id: "profiles", label: "① 模型档案与连接测试" },
             { id: "tasks", label: "② 任务分配 / 信任模式 / Embedding" },
             { id: "prompts", label: "③ Prompt 模板管理" },
+            { id: "styles", label: "④ 文风档案与样本学习" },
           ] as const
         ).map((item) => (
           <button
@@ -56,6 +60,7 @@ export const AppSettingsModal: React.FC = () => {
       {tab === "profiles" && <LlmProfilesTab />}
       {tab === "tasks" && <TaskAndEmbeddingTab />}
       {tab === "prompts" && <PromptTemplatesTab />}
+      {tab === "styles" && <StyleProfilesTab />}
     </Modal>
   );
 };
