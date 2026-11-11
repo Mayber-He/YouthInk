@@ -4,6 +4,7 @@ import {
   Check,
   CheckCircle2,
   EyeOff,
+  RefreshCw,
   RotateCcw,
   Sparkles,
   X,
@@ -18,6 +19,7 @@ import {
   useConsistencyReviews,
   useFinalizeChapter,
   usePendingQueue,
+  useReextractChapterMemories,
   useSetMemoryItemDisabled,
   useSummaries,
   useUpdatePendingItem,
@@ -27,6 +29,7 @@ import type {
   ConsistencyIssue,
   DisableableMemoryCategory,
   FinalizeChapterResponse,
+  ReextractChapterMemoryResponse,
 } from "./types";
 
 interface MemoryChapterPanelProps {
@@ -39,9 +42,22 @@ interface MemoryChapterPanelProps {
 const CATEGORY_LABEL: Record<string, string> = {
   fact: "事实",
   char_state: "人物状态",
-  cognitive: "认知秘密",
+  cognitive: "人物记忆",
   relationship: "人物关系",
   foreshadowing: "伏笔",
+};
+
+const MEMORY_TYPE_LABEL: Record<string, string> = {
+  daily: "日常认知",
+  schedule: "临时安排",
+  secret: "秘密认知",
+};
+
+const SCHEDULE_STATUS_LABEL: Record<string, string> = {
+  pending: "待办",
+  completed: "已完成",
+  cancelled: "已取消",
+  expired: "已过期",
 };
 
 const CATEGORY_ORDER: DisableableMemoryCategory[] = [
@@ -68,6 +84,7 @@ export const MemoryChapterPanel: React.FC<MemoryChapterPanelProps> = ({
   continuityReviewRequired,
 }) => {
   const finalizeMut = useFinalizeChapter(novelUid, chapterId);
+  const reextractMut = useReextractChapterMemories(novelUid, chapterId);
   const { data: summaries = [] } = useSummaries(novelUid, "chapter");
   const { data: pendingItems = [] } = usePendingQueue(
     novelUid,
@@ -84,6 +101,9 @@ export const MemoryChapterPanel: React.FC<MemoryChapterPanelProps> = ({
     null
   );
   const [finalizeError, setFinalizeError] = useState<string | null>(null);
+  const [reextractResult, setReextractResult] =
+    useState<ReextractChapterMemoryResponse | null>(null);
+  const [reextractError, setReextractError] = useState<string | null>(null);
   const [finalizeWarning, setFinalizeWarning] = useState<{
     issues: ConsistencyIssue[];
     stale: boolean;
@@ -104,11 +124,26 @@ export const MemoryChapterPanel: React.FC<MemoryChapterPanelProps> = ({
 
   const runFinalize = async () => {
     setFinalizeError(null);
+    setReextractResult(null);
+    setReextractError(null);
     try {
       const res = await finalizeMut.mutateAsync();
       setLastResult(res);
     } catch (error) {
       setFinalizeError(error instanceof Error ? error.message : "定稿失败，请重试。");
+    }
+  };
+
+  const handleReextract = async () => {
+    setReextractError(null);
+    setReextractResult(null);
+    try {
+      const res = await reextractMut.mutateAsync();
+      setReextractResult(res);
+    } catch (error) {
+      setReextractError(
+        error instanceof Error ? error.message : "重新提取记忆失败，请重试。"
+      );
     }
   };
 
@@ -151,6 +186,27 @@ export const MemoryChapterPanel: React.FC<MemoryChapterPanelProps> = ({
       <Badge tone="emerald">生效中</Badge>
     );
 
+    const memType =
+      item.item_type === "cognitive"
+        ? String(item.meta.memory_type || "secret")
+        : "";
+    const schedStatus =
+      item.item_type === "cognitive"
+        ? String(item.meta.schedule_status || "pending")
+        : "";
+    const timeScope =
+      item.item_type === "cognitive"
+        ? String(item.meta.time_scope || "")
+        : "";
+    const knowerNames =
+      item.item_type === "cognitive" && Array.isArray(item.meta.knower_names)
+        ? (item.meta.knower_names as string[])
+        : [];
+    const learnedBy =
+      item.item_type === "cognitive"
+        ? String(item.meta.learned_by || "")
+        : "";
+
     return (
       <div
         key={`${item.item_type}-${item.id}`}
@@ -162,6 +218,24 @@ export const MemoryChapterPanel: React.FC<MemoryChapterPanelProps> = ({
       >
         <div className="flex flex-wrap items-center gap-1.5">
           {statusBadge}
+          {item.item_type === "cognitive" && memType && (
+            <Badge
+              tone={
+                memType === "daily"
+                  ? "indigo"
+                  : memType === "schedule"
+                    ? "amber"
+                    : "rose"
+              }
+            >
+              {MEMORY_TYPE_LABEL[memType] || "秘密认知"}
+            </Badge>
+          )}
+          {item.item_type === "cognitive" && memType === "schedule" && (
+            <Badge tone={schedStatus === "pending" ? "amber" : "emerald"}>
+              安排：{SCHEDULE_STATUS_LABEL[schedStatus] || schedStatus}
+            </Badge>
+          )}
           {item.conflict && (
             <Badge tone="rose">
               <AlertTriangle className="h-3 w-3" /> 可能冲突
@@ -213,6 +287,16 @@ export const MemoryChapterPanel: React.FC<MemoryChapterPanelProps> = ({
         >
           {item.content}
         </p>
+        {item.item_type === "cognitive" &&
+          (knowerNames.length > 0 || timeScope || learnedBy) && (
+            <p className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-slate-600 dark:text-slate-300">
+              {knowerNames.length > 0 && (
+                <span>知情者：{knowerNames.join("、")}</span>
+              )}
+              {timeScope && <span>适用时间：{timeScope}</span>}
+              {learnedBy && <span>获知方式：{learnedBy}</span>}
+            </p>
+          )}
         <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
           来源：{sourceChapter} · {storyTime}
         </p>
@@ -242,23 +326,74 @@ export const MemoryChapterPanel: React.FC<MemoryChapterPanelProps> = ({
           </Badge>
         </div>
 
-        <Button
-          size="sm"
-          className="mt-3 w-full"
-          onClick={handleFinalize}
-          disabled={finalizeMut.isPending}
-        >
-          <Sparkles className="h-3.5 w-3.5" />
-          {finalizeMut.isPending
-            ? "正在定稿入库..."
-            : chapterStatus === "final"
-              ? "重新定稿并更新记忆库"
-              : "一键定稿并入库"}
-        </Button>
+        <div className="mt-3 flex flex-col gap-2">
+          <Button
+            size="sm"
+            className="w-full"
+            onClick={handleFinalize}
+            disabled={finalizeMut.isPending || reextractMut.isPending}
+          >
+            <Sparkles className="h-3.5 w-3.5" />
+            {finalizeMut.isPending
+              ? "正在定稿入库..."
+              : chapterStatus === "final"
+                ? "重新定稿并更新记忆库"
+                : "一键定稿并入库"}
+          </Button>
+
+          {chapterStatus === "final" && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full"
+              onClick={handleReextract}
+              disabled={reextractMut.isPending || finalizeMut.isPending}
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              {reextractMut.isPending
+                ? "正在重新提取记忆..."
+                : "重新提取记忆（仅替换自动提取，保留手动记录）"}
+            </Button>
+          )}
+        </div>
 
         {finalizeError && (
           <div className="mt-2.5 rounded-lg bg-rose-50 p-2 text-[11px] text-rose-700 dark:bg-rose-950/40 dark:text-rose-300">
             定稿失败：{finalizeError}
+          </div>
+        )}
+
+        {reextractError && (
+          <div className="mt-2.5 rounded-lg bg-rose-50 p-2 text-[11px] text-rose-700 dark:bg-rose-950/40 dark:text-rose-300">
+            重新提取失败：{reextractError}
+          </div>
+        )}
+
+        {reextractResult && (
+          <div className="mt-2.5 rounded-lg bg-white/90 p-2 text-[11px] text-slate-600 dark:bg-slate-900 dark:text-slate-300">
+            {reextractResult.extraction_status === "failed" ? (
+              <div className="font-medium text-rose-700 dark:text-rose-300">
+                ⚠️ 重新提取失败，已保留本章原有自动提取与手动记忆记录。
+              </div>
+            ) : (
+              <div>
+                <div className="flex items-center gap-1 font-medium text-emerald-700 dark:text-emerald-400">
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                  重新提取完成（已保留手动记录，不改动正文与向量索引）
+                </div>
+                <div className="mt-1">
+                  自动确认：{reextractResult.auto_confirmed_count} 项 · 待人工确认：
+                  {reextractResult.pending_count} 项
+                </div>
+              </div>
+            )}
+            {reextractResult.warnings && reextractResult.warnings.length > 0 && (
+              <ul className="mt-1.5 list-disc space-y-0.5 pl-4 text-amber-700 dark:text-amber-300">
+                {reextractResult.warnings.map((w, idx) => (
+                  <li key={idx}>{w}</li>
+                ))}
+              </ul>
+            )}
           </div>
         )}
 
@@ -280,9 +415,17 @@ export const MemoryChapterPanel: React.FC<MemoryChapterPanelProps> = ({
             )}
             {lastResult.extraction_status === "partial" && (
               <div className="mt-1.5 rounded bg-amber-50 px-2 py-1 font-medium text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
-                ⚠️ 本章记忆抽取部分失败：部分条目因格式不符或引文不在正文中已被丢弃，请核对下方结果。
+                ⚠️ 本章记忆抽取部分完成：部分条目因格式不符、知情者未知或引文不在正文中已被跳过。
               </div>
             )}
+            {lastResult.extraction_warnings &&
+              lastResult.extraction_warnings.length > 0 && (
+                <ul className="mt-1.5 list-disc space-y-0.5 pl-4 text-amber-700 dark:text-amber-300">
+                  {lastResult.extraction_warnings.map((w, idx) => (
+                    <li key={idx}>{w}</li>
+                  ))}
+                </ul>
+              )}
           </div>
         )}
       </div>
@@ -312,7 +455,7 @@ export const MemoryChapterPanel: React.FC<MemoryChapterPanelProps> = ({
 
         {groupedMemory.length === 0 ? (
           <p className="mt-2 rounded-lg border border-dashed border-slate-200 p-3 text-center text-xs text-slate-400 dark:border-slate-800">
-            本章暂无新增记忆。定稿后自动抽取的事实、状态、认知、关系与伏笔会显示在这里。
+            本章暂无新增记忆。定稿后自动抽取的事实、状态、人物记忆、关系与伏笔会显示在这里。
           </p>
         ) : (
           <div className="mt-2 space-y-3">
@@ -367,57 +510,96 @@ export const MemoryChapterPanel: React.FC<MemoryChapterPanelProps> = ({
             本章暂无待确认项（常规事实与伏笔线索已由信任模式自动入库）
           </p>
         ) : (
-          pendingItems.map((item) => (
-            <div
-              key={`${item.item_type}-${item.id}`}
-              className="rounded-lg border border-slate-200 bg-slate-50/70 p-2.5 text-xs dark:border-slate-800 dark:bg-slate-800/40"
-            >
-              <div className="flex items-center justify-between gap-2">
-                <Badge tone="indigo">
-                  {CATEGORY_LABEL[item.item_type] ?? item.item_type}
-                </Badge>
-                {Boolean(item.raw_payload.is_stale) && (
-                  <Badge tone="amber">来源正文已修改</Badge>
-                )}
-                <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={() =>
-                      updateItemMut.mutate({
-                        item_type: item.item_type,
-                        id: item.id,
-                        action: "confirm",
-                      })
-                    }
-                    className="rounded bg-emerald-600 px-2 py-0.5 text-[11px] text-white hover:bg-emerald-500 cursor-pointer"
-                  >
-                    <Check className="inline h-3 w-3" /> 确认
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      updateItemMut.mutate({
-                        item_type: item.item_type,
-                        id: item.id,
-                        action: "discard",
-                      })
-                    }
-                    className="rounded bg-slate-200 px-2 py-0.5 text-[11px] text-slate-700 hover:bg-rose-100 hover:text-rose-700 cursor-pointer dark:bg-slate-700 dark:text-slate-300"
-                  >
-                    <X className="inline h-3 w-3" /> 丢弃
-                  </button>
+          pendingItems.map((item) => {
+            const memType =
+              item.item_type === "cognitive"
+                ? String(item.raw_payload.memory_type || "secret")
+                : "";
+            const schedStatus =
+              item.item_type === "cognitive"
+                ? String(item.raw_payload.schedule_status || "pending")
+                : "";
+            const timeScope =
+              item.item_type === "cognitive"
+                ? String(item.raw_payload.time_scope || "")
+                : "";
+            return (
+              <div
+                key={`${item.item_type}-${item.id}`}
+                className="rounded-lg border border-slate-200 bg-slate-50/70 p-2.5 text-xs dark:border-slate-800 dark:bg-slate-800/40"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <Badge tone="indigo">
+                      {CATEGORY_LABEL[item.item_type] ?? item.item_type}
+                    </Badge>
+                    {item.item_type === "cognitive" && memType && (
+                      <Badge
+                        tone={
+                          memType === "daily"
+                            ? "indigo"
+                            : memType === "schedule"
+                              ? "amber"
+                              : "rose"
+                        }
+                      >
+                        {MEMORY_TYPE_LABEL[memType] || "秘密认知"}
+                      </Badge>
+                    )}
+                    {item.item_type === "cognitive" && memType === "schedule" && (
+                      <Badge tone="amber">
+                        安排：{SCHEDULE_STATUS_LABEL[schedStatus] || schedStatus}
+                      </Badge>
+                    )}
+                    {Boolean(item.raw_payload.is_stale) && (
+                      <Badge tone="amber">来源正文已修改</Badge>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        updateItemMut.mutate({
+                          item_type: item.item_type,
+                          id: item.id,
+                          action: "confirm",
+                        })
+                      }
+                      className="rounded bg-emerald-600 px-2 py-0.5 text-[11px] text-white hover:bg-emerald-500 cursor-pointer"
+                    >
+                      <Check className="inline h-3 w-3" /> 确认
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        updateItemMut.mutate({
+                          item_type: item.item_type,
+                          id: item.id,
+                          action: "discard",
+                        })
+                      }
+                      className="rounded bg-slate-200 px-2 py-0.5 text-[11px] text-slate-700 hover:bg-rose-100 hover:text-rose-700 cursor-pointer dark:bg-slate-700 dark:text-slate-300"
+                    >
+                      <X className="inline h-3 w-3" /> 丢弃
+                    </button>
+                  </div>
                 </div>
-              </div>
-              <p className="mt-1.5 font-medium text-slate-800 dark:text-slate-200">
-                {item.summary_text}
-              </p>
-              {item.source_quote && (
-                <p className="mt-1 border-l-2 border-slate-300 pl-2 text-[11px] italic text-slate-500">
-                  “{item.source_quote}”
+                <p className="mt-1.5 font-medium text-slate-800 dark:text-slate-200">
+                  {item.summary_text}
                 </p>
-              )}
-            </div>
-          ))
+                {timeScope && (
+                  <p className="mt-0.5 text-[11px] text-slate-500">
+                    适用时间：{timeScope}
+                  </p>
+                )}
+                {item.source_quote && (
+                  <p className="mt-1 border-l-2 border-slate-300 pl-2 text-[11px] italic text-slate-500">
+                    “{item.source_quote}”
+                  </p>
+                )}
+              </div>
+            );
+          })
         )}
       </div>
 

@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { EmptyState } from "@/components/common/EmptyState";
 import { useUiStore } from "@/stores/uiStore";
+import type { CharacterMemoryType, ScheduleStatus } from "@/types/api";
 import {
   useBatchPendingAction,
   usePendingQueue,
@@ -33,11 +34,24 @@ const TYPE_META: Record<
   { label: string; tone: "indigo" | "amber" | "rose" | "emerald" | "default" }
 > = {
   char_state: { label: "人物状态", tone: "amber" },
-  cognitive: { label: "秘密认知", tone: "rose" },
+  cognitive: { label: "人物记忆", tone: "rose" },
   relationship: { label: "人物关系", tone: "indigo" },
   foreshadowing: { label: "埋设/回收伏笔", tone: "emerald" },
   fact: { label: "剧情事实", tone: "default" },
   constraint_check: { label: "约束检查", tone: "rose" },
+};
+
+const MEMORY_TYPE_LABEL: Record<string, string> = {
+  daily: "日常认知",
+  schedule: "临时安排",
+  secret: "秘密认知",
+};
+
+const SCHEDULE_STATUS_LABEL: Record<string, string> = {
+  pending: "待办",
+  completed: "已完成",
+  cancelled: "已取消",
+  expired: "已过期",
 };
 
 export const PendingQueueSection: React.FC<PendingQueueSectionProps> = ({
@@ -48,6 +62,12 @@ export const PendingQueueSection: React.FC<PendingQueueSectionProps> = ({
   const [statusFilter, setStatusFilter] = useState<string>("pending");
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
+  const [editMemoryType, setEditMemoryType] =
+    useState<CharacterMemoryType>("secret");
+  const [editTimeScope, setEditTimeScope] = useState("");
+  const [editScheduleStatus, setEditScheduleStatus] =
+    useState<ScheduleStatus>("pending");
+  const [editLearnedBy, setEditLearnedBy] = useState("");
   const [ragQuery, setRagQuery] = useState("");
 
   const { data: items = [], isLoading } = usePendingQueue(
@@ -76,6 +96,27 @@ export const PendingQueueSection: React.FC<PendingQueueSectionProps> = ({
     setActiveSection("writing");
   };
 
+  const startEdit = (item: PendingQueueItem, key: string) => {
+    setEditingKey(key);
+    if (item.item_type === "cognitive") {
+      setEditText(String(item.raw_payload.secret || item.summary_text || ""));
+      setEditMemoryType(
+        (String(
+          item.raw_payload.memory_type || "secret"
+        ) as CharacterMemoryType) || "secret"
+      );
+      setEditTimeScope(String(item.raw_payload.time_scope || ""));
+      setEditScheduleStatus(
+        (String(
+          item.raw_payload.schedule_status || "pending"
+        ) as ScheduleStatus) || "pending"
+      );
+      setEditLearnedBy(String(item.raw_payload.learned_by || ""));
+    } else {
+      setEditText(item.summary_text);
+    }
+  };
+
   const submitEdit = (item: PendingQueueItem) => {
     updateMut.mutate(
       {
@@ -83,6 +124,15 @@ export const PendingQueueSection: React.FC<PendingQueueSectionProps> = ({
         id: item.id,
         action: "edit",
         updated_text: editText.trim(),
+        ...(item.item_type === "cognitive"
+          ? {
+              memory_type: editMemoryType,
+              time_scope: editTimeScope.trim(),
+              schedule_status:
+                editMemoryType === "schedule" ? editScheduleStatus : "pending",
+              learned_by: editLearnedBy.trim(),
+            }
+          : {}),
       },
       { onSuccess: () => setEditingKey(null) }
     );
@@ -97,7 +147,7 @@ export const PendingQueueSection: React.FC<PendingQueueSectionProps> = ({
             待确认记忆队列 & 混合检索中心
           </h2>
           <p className="mt-0.5 text-xs text-slate-500">
-            确认后才生效：未确认的状态变更与秘密认知不会注入后续章节上下文，杜绝连环幻觉污染。
+            确认后才生效：未确认的状态变更与人物记忆（日常认知、临时安排、秘密认知）不会注入后续章节上下文，杜绝连环幻觉污染。
           </p>
         </div>
 
@@ -120,7 +170,7 @@ export const PendingQueueSection: React.FC<PendingQueueSectionProps> = ({
           {[
             ["", "全部类型"],
             ["char_state", "人物状态"],
-            ["cognitive", "秘密认知"],
+            ["cognitive", "人物记忆"],
             ["relationship", "人物关系"],
             ["foreshadowing", "伏笔"],
             ["fact", "事实"],
@@ -168,7 +218,7 @@ export const PendingQueueSection: React.FC<PendingQueueSectionProps> = ({
       ) : items.length === 0 ? (
         <EmptyState
           title={statusFilter === "pending" ? "当前没有待确认的设定变更" : "该筛选条件下暂无记录"}
-          description="定稿章节后抽取的高风险人物状态、关系与秘密认知会在此处排队等待确认。"
+          description="定稿章节后抽取的高风险人物状态、关系与人物记忆会在此处排队等待确认。"
         />
       ) : (
         <div className="space-y-2.5">
@@ -176,6 +226,27 @@ export const PendingQueueSection: React.FC<PendingQueueSectionProps> = ({
             const key = `${item.item_type}-${item.id}`;
             const meta = TYPE_META[item.item_type] ?? TYPE_META.fact;
             const isEditing = editingKey === key;
+            const memType =
+              item.item_type === "cognitive"
+                ? String(item.raw_payload.memory_type || "secret")
+                : "";
+            const schedStatus =
+              item.item_type === "cognitive"
+                ? String(item.raw_payload.schedule_status || "pending")
+                : "";
+            const timeScope =
+              item.item_type === "cognitive"
+                ? String(item.raw_payload.time_scope || "")
+                : "";
+            const knowerNames =
+              item.item_type === "cognitive" &&
+              Array.isArray(item.raw_payload.knower_names)
+                ? (item.raw_payload.knower_names as string[])
+                : [];
+            const learnedBy =
+              item.item_type === "cognitive"
+                ? String(item.raw_payload.learned_by || "")
+                : "";
 
             return (
               <div
@@ -183,10 +254,28 @@ export const PendingQueueSection: React.FC<PendingQueueSectionProps> = ({
                 className="rounded-xl border border-slate-200 bg-white p-4 shadow-2xs dark:border-slate-800 dark:bg-slate-900"
               >
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <Badge tone={meta.tone}>{meta.label}</Badge>
+                    {item.item_type === "cognitive" && memType && (
+                      <Badge
+                        tone={
+                          memType === "daily"
+                            ? "indigo"
+                            : memType === "schedule"
+                              ? "amber"
+                              : "rose"
+                        }
+                      >
+                        {MEMORY_TYPE_LABEL[memType] || "秘密认知"}
+                      </Badge>
+                    )}
+                    {item.item_type === "cognitive" && memType === "schedule" && (
+                      <Badge tone={schedStatus === "pending" ? "amber" : "emerald"}>
+                        安排状态：{SCHEDULE_STATUS_LABEL[schedStatus] || schedStatus}
+                      </Badge>
+                    )}
                     {item.is_disabled && <Badge tone="default">已停用·不注入</Badge>}
-                    {item.chapter_id && (
+                    {item.chapter_id ? (
                       <button
                         type="button"
                         onClick={() => handleJumpChapter(item.chapter_id)}
@@ -195,6 +284,10 @@ export const PendingQueueSection: React.FC<PendingQueueSectionProps> = ({
                         第 {item.chapter_display_index ?? item.chapter_id} 章《{item.chapter_title}》
                         <ExternalLink className="h-3 w-3" />
                       </button>
+                    ) : (
+                      item.item_type === "cognitive" && (
+                        <span className="text-xs text-slate-500">故事开始前已知</span>
+                      )
                     )}
                   </div>
 
@@ -203,10 +296,7 @@ export const PendingQueueSection: React.FC<PendingQueueSectionProps> = ({
                       <Button
                         variant="ghost"
                         size="sm"
-                        onClick={() => {
-                          setEditingKey(key);
-                          setEditText(item.summary_text);
-                        }}
+                        onClick={() => startEdit(item, key)}
                       >
                         编辑
                       </Button>
@@ -268,18 +358,81 @@ export const PendingQueueSection: React.FC<PendingQueueSectionProps> = ({
                 </div>
 
                 {isEditing ? (
-                  <div className="mt-2 flex items-center gap-2">
-                    <input
-                      type="text"
-                      value={editText}
-                      onChange={(e) => setEditText(e.target.value)}
-                      className="flex-1 rounded-lg border border-indigo-300 px-3 py-1.5 text-xs dark:border-indigo-700 dark:bg-slate-800"
-                    />
-                    <Button size="sm" onClick={() => submitEdit(item)}>保存并确认</Button>
-                    <Button variant="ghost" size="sm" onClick={() => setEditingKey(null)}>取消</Button>
+                  <div className="mt-2 space-y-2">
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={editText}
+                        onChange={(e) => setEditText(e.target.value)}
+                        className="flex-1 rounded-lg border border-indigo-300 px-3 py-1.5 text-xs dark:border-indigo-700 dark:bg-slate-800"
+                      />
+                      <Button size="sm" onClick={() => submitEdit(item)}>保存并确认</Button>
+                      <Button variant="ghost" size="sm" onClick={() => setEditingKey(null)}>取消</Button>
+                    </div>
+                    {item.item_type === "cognitive" && (
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-4">
+                        <select
+                          value={editMemoryType}
+                          onChange={(e) =>
+                            setEditMemoryType(
+                              e.target.value as CharacterMemoryType
+                            )
+                          }
+                          className="rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs dark:border-slate-700 dark:bg-slate-800"
+                        >
+                          <option value="daily">日常认知</option>
+                          <option value="schedule">临时安排</option>
+                          <option value="secret">秘密认知</option>
+                        </select>
+                        <input
+                          type="text"
+                          value={editTimeScope}
+                          onChange={(e) => setEditTimeScope(e.target.value)}
+                          placeholder="适用时间说明（如：今天早八）"
+                          className="rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs dark:border-slate-700 dark:bg-slate-800"
+                        />
+                        {editMemoryType === "schedule" && (
+                          <select
+                            value={editScheduleStatus}
+                            onChange={(e) =>
+                              setEditScheduleStatus(
+                                e.target.value as ScheduleStatus
+                              )
+                            }
+                            className="rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs dark:border-slate-700 dark:bg-slate-800"
+                          >
+                            <option value="pending">待办</option>
+                            <option value="completed">已完成</option>
+                            <option value="cancelled">已取消</option>
+                            <option value="expired">已过期</option>
+                          </select>
+                        )}
+                        <input
+                          type="text"
+                          value={editLearnedBy}
+                          onChange={(e) => setEditLearnedBy(e.target.value)}
+                          placeholder="获知方式"
+                          className="rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs dark:border-slate-700 dark:bg-slate-800"
+                        />
+                      </div>
+                    )}
                   </div>
                 ) : (
-                  <p className="mt-2 text-sm font-medium text-slate-800 dark:text-slate-100">{item.summary_text}</p>
+                  <>
+                    <p className="mt-2 text-sm font-medium text-slate-800 dark:text-slate-100">
+                      {item.summary_text}
+                    </p>
+                    {item.item_type === "cognitive" &&
+                      (knowerNames.length > 0 || timeScope || learnedBy) && (
+                        <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
+                          {knowerNames.length > 0 && (
+                            <span>知情人物：{knowerNames.join("、")}</span>
+                          )}
+                          {timeScope && <span>适用时间：{timeScope}</span>}
+                          {learnedBy && <span>获知方式：{learnedBy}</span>}
+                        </div>
+                      )}
+                  </>
                 )}
 
                 {item.source_quote && (

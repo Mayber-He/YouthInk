@@ -13,6 +13,10 @@ from app.db.repositories.memory_repo import MemoryRepository
 from app.schemas.memory import (
     BatchQueueActionRequest,
     ChapterMemoryItem,
+    CharacterMemoryCreate,
+    CharacterMemoryResponse,
+    CharacterMemoryType,
+    CharacterMemoryUpdate,
     DisableableMemoryCategory,
     FinalizeChapterResponse,
     ForeshadowCreate,
@@ -23,6 +27,7 @@ from app.schemas.memory import (
     PendingItemUpdateRequest,
     PendingQueueItem,
     RagSearchResponse,
+    ReextractChapterMemoryResponse,
     SummaryResponse,
 )
 from app.services.memory.finalizer import ChapterFinalizerService
@@ -43,12 +48,65 @@ async def finalize_chapter(
     return await finalizer.finalize_chapter(chapter_id)
 
 
+@router.post(
+    "/chapters/{chapter_id}/reextract-memories",
+    response_model=ReextractChapterMemoryResponse,
+)
+async def reextract_chapter_memories(
+    chapter_id: int,
+    finalizer: ChapterFinalizerService = Depends(get_chapter_finalizer),
+) -> ReextractChapterMemoryResponse:
+    """Re-extract memories from finalized chapter prose without regenerating text or rebuilding vector index."""
+    return await finalizer.reextract_chapter_memories(chapter_id)
+
+
 @router.post("/memory/rebuild-index")
 async def rebuild_memory_index(
     finalizer: ChapterFinalizerService = Depends(get_chapter_finalizer),
 ) -> dict[str, int]:
     """Rebuild all vector embeddings and FTS5 indexes for finalized chapters."""
     return await finalizer.rebuild_all_indexes()
+
+
+@router.get("/memory/character-memories", response_model=list[CharacterMemoryResponse])
+def list_character_memories(
+    character_id: int | None = Query(None, description="按知情人物过滤"),
+    up_to_chapter_sort: float = Query(999999.0, description="截至章节序号"),
+    memory_type: CharacterMemoryType | None = Query(None, description="按记忆类别过滤"),
+    include_disabled: bool = Query(True, description="是否包含已停用条目"),
+    include_pending: bool = Query(False, description="是否包含待确认条目"),
+    repo: MemoryRepository = Depends(get_memory_repo),
+) -> list[CharacterMemoryResponse]:
+    """List character memories (daily / schedule / secret) with temporal schedule status."""
+    return repo.list_character_memories(
+        character_id=character_id,
+        up_to_chapter_sort=up_to_chapter_sort,
+        memory_type=memory_type,
+        include_disabled=include_disabled,
+        include_pending=include_pending,
+    )
+
+
+@router.post("/memory/character-memories", response_model=CharacterMemoryResponse)
+def create_character_memory(
+    payload: CharacterMemoryCreate,
+    repo: MemoryRepository = Depends(get_memory_repo),
+) -> CharacterMemoryResponse:
+    """Manually create a character memory (takes effect immediately)."""
+    return repo.create_character_memory(payload)
+
+
+@router.put(
+    "/memory/character-memories/{record_id}",
+    response_model=CharacterMemoryResponse,
+)
+def update_character_memory(
+    record_id: int,
+    payload: CharacterMemoryUpdate,
+    repo: MemoryRepository = Depends(get_memory_repo),
+) -> CharacterMemoryResponse:
+    """Update, disable, or restore a character memory item."""
+    return repo.update_character_memory(record_id, payload)
 
 
 @router.get("/memory/pending-queue", response_model=list[PendingQueueItem])

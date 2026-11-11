@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Literal
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
 MemoryItemCategory = Literal[
     "fact", "char_state", "cognitive", "relationship", "foreshadowing",
@@ -13,9 +13,31 @@ MemoryItemCategory = Literal[
 DisableableMemoryCategory = Literal[
     "fact", "char_state", "cognitive", "relationship", "foreshadowing",
 ]
+CharacterMemoryType = Literal["daily", "schedule", "secret"]
+ScheduleStatus = Literal["pending", "completed", "cancelled", "expired"]
 ConfirmStatus = Literal["pending", "confirmed", "locked", "discarded"]
 ForeshadowStatus = Literal["planted", "hinted", "recovered", "abandoned"]
 SummaryLevel = Literal["chapter", "arc", "volume", "novel"]
+
+
+def normalize_memory_type(value: object) -> CharacterMemoryType:
+    raw = str(value or "").strip().lower()
+    if raw in ("daily", "日常认知", "日常", "preference", "habit", "偏好", "习惯"):
+        return "daily"
+    if raw in ("schedule", "临时安排", "日程", "约定", "安排", "todo", "plan"):
+        return "schedule"
+    return "secret"
+
+
+def normalize_schedule_status(value: object) -> ScheduleStatus:
+    raw = str(value or "").strip().lower()
+    if raw in ("completed", "已完成", "完成", "done", "finished"):
+        return "completed"
+    if raw in ("cancelled", "canceled", "已取消", "取消"):
+        return "cancelled"
+    if raw in ("expired", "已过期", "过期", "overdue"):
+        return "expired"
+    return "pending"
 
 
 class PendingQueueItem(BaseModel):
@@ -35,10 +57,113 @@ class PendingQueueItem(BaseModel):
 class PendingItemUpdateRequest(BaseModel):
     action: Literal["confirm", "discard", "edit"]
     updated_text: str | None = None
+    memory_type: CharacterMemoryType | None = None
+    time_scope: str | None = None
+    schedule_status: ScheduleStatus | None = None
+    knower_ids: list[int] | None = None
+    learned_by: str | None = None
+    chapter_id: int | None = None
 
 
 class MemoryItemDisableRequest(BaseModel):
     is_disabled: bool
+
+
+class CharacterMemoryCreate(BaseModel):
+    content: str = Field(
+        default="",
+        validation_alias=AliasChoices("content", "secret"),
+    )
+    secret: str = ""
+    memory_type: CharacterMemoryType = "daily"
+    knower_ids: list[int] = Field(default_factory=list)
+    chapter_id: int | None = None
+    learned_by: str = ""
+    time_scope: str = ""
+    schedule_status: ScheduleStatus = "pending"
+    related_record_id: int | None = None
+    resolved_chapter_id: int | None = None
+    source_quote: str = ""
+
+    @field_validator("memory_type", mode="before")
+    @classmethod
+    def _coerce_memory_type(cls, value: object) -> CharacterMemoryType:
+        return normalize_memory_type(value)
+
+    @field_validator("schedule_status", mode="before")
+    @classmethod
+    def _coerce_schedule_status(cls, value: object) -> ScheduleStatus:
+        return normalize_schedule_status(value)
+
+    @model_validator(mode="after")
+    def _sync_content_and_secret(self) -> CharacterMemoryCreate:
+        text = (self.content or self.secret or "").strip()
+        self.content = text
+        self.secret = text
+        return self
+
+
+class CharacterMemoryUpdate(BaseModel):
+    content: str | None = None
+    secret: str | None = None
+    memory_type: CharacterMemoryType | None = None
+    knower_ids: list[int] | None = None
+    chapter_id: int | None = None
+    prior_to_story: bool | None = None
+    learned_by: str | None = None
+    time_scope: str | None = None
+    schedule_status: ScheduleStatus | None = None
+    related_record_id: int | None = None
+    resolved_chapter_id: int | None = None
+    source_quote: str | None = None
+    is_disabled: bool | None = None
+    confirm_status: Literal["pending", "confirmed", "discarded"] | None = None
+
+    @field_validator("memory_type", mode="before")
+    @classmethod
+    def _coerce_memory_type(cls, value: object) -> CharacterMemoryType | None:
+        if value is None:
+            return None
+        return normalize_memory_type(value)
+
+    @field_validator("schedule_status", mode="before")
+    @classmethod
+    def _coerce_schedule_status(cls, value: object) -> ScheduleStatus | None:
+        if value is None:
+            return None
+        return normalize_schedule_status(value)
+
+
+class CharacterMemoryResponse(BaseModel):
+    id: int
+    content: str
+    secret: str
+    memory_type: CharacterMemoryType = "secret"
+    time_scope: str = ""
+    schedule_status: ScheduleStatus = "pending"
+    effective_schedule_status: ScheduleStatus = "pending"
+    related_record_id: int | None = None
+    knower_ids: list[int] = Field(default_factory=list)
+    knower_names: list[str] = Field(default_factory=list)
+    learned_by: str = ""
+    chapter_id: int | None = None
+    chapter_title: str = ""
+    chapter_display_index: int | None = None
+    chapter_sort_order: float | None = None
+    story_time: str = ""
+    source_quote: str = ""
+    origin: str = "manual"
+    confirm_status: str = "confirmed"
+    is_disabled: bool = False
+    is_stale: bool = False
+    is_effective: bool = True
+    resolved_chapter_id: int | None = None
+    resolved_chapter_title: str = ""
+    resolved_chapter_display_index: int | None = None
+    resolved_story_time: str = ""
+    resolved_quote: str = ""
+    resolution_record_id: int | None = None
+    created_at: str = ""
 
 
 class ChapterMemoryItem(BaseModel):
@@ -144,9 +269,19 @@ class FinalizeChapterResponse(BaseModel):
     # 记忆抽取结果：'ok' 全部成功 | 'partial' 部分条目被丢弃 | 'failed' 整批失败走兜底。
     # 前端据此显示“本章记忆抽取失败/部分失败”标记。
     extraction_status: str = "ok"
+    extraction_warnings: list[str] = Field(default_factory=list)
     # 向量索引是旁路：编码/写入失败时章节仍定稿，这里标记 'pending_rebuild'。
     vector_index_status: str = "ok"
     vector_index_error: str | None = None
+
+
+class ReextractChapterMemoryResponse(BaseModel):
+    chapter_id: int
+    extraction_status: str = "ok"
+    auto_confirmed_count: int = 0
+    pending_count: int = 0
+    preserved_previous: bool = False
+    warnings: list[str] = Field(default_factory=list)
 
 
 # --- LLM Memory Extraction Structured Output Schemas ---
@@ -170,9 +305,32 @@ class LlmExtractedStateChange(BaseModel):
 
 class LlmExtractedCognitive(BaseModel):
     secret: str
+    memory_type: CharacterMemoryType = Field(
+        default="secret",
+        validation_alias=AliasChoices("memory_type", "category", "type"),
+    )
+    time_scope: str = Field(
+        default="",
+        validation_alias=AliasChoices("time_scope", "applicable_time", "time_condition"),
+    )
+    schedule_status: ScheduleStatus = Field(
+        default="pending",
+        validation_alias=AliasChoices("schedule_status", "status"),
+    )
+    related_record_id: int | None = None
     knower_names: list[str] = Field(default_factory=list)
     learned_by: str = ""
     source_quote: str = ""
+
+    @field_validator("memory_type", mode="before")
+    @classmethod
+    def _coerce_memory_type(cls, value: object) -> CharacterMemoryType:
+        return normalize_memory_type(value)
+
+    @field_validator("schedule_status", mode="before")
+    @classmethod
+    def _coerce_schedule_status(cls, value: object) -> ScheduleStatus:
+        return normalize_schedule_status(value)
 
 
 class LlmExtractedRelationship(BaseModel):

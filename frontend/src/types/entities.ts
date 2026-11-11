@@ -15,6 +15,69 @@ export type CharacterRole =
   | "minor"
   | "extra";
 
+export type CharacterMemoryType = "daily" | "schedule" | "secret";
+
+export type ScheduleStatus = "pending" | "completed" | "cancelled" | "expired";
+
+export interface CharacterMemoryItem {
+  id: number;
+  content: string;
+  secret: string;
+  memory_type: CharacterMemoryType;
+  time_scope: string;
+  schedule_status: ScheduleStatus;
+  effective_schedule_status: ScheduleStatus;
+  related_record_id: number | null;
+  knower_ids: number[];
+  knower_names: string[];
+  learned_by: string;
+  chapter_id: number | null;
+  chapter_title: string;
+  chapter_display_index: number | null;
+  chapter_sort_order: number | null;
+  story_time: string;
+  source_quote: string;
+  origin: string;
+  confirm_status: string;
+  is_disabled: boolean;
+  is_stale: boolean;
+  is_effective: boolean;
+  resolved_chapter_id: number | null;
+  resolved_chapter_title: string;
+  resolved_chapter_display_index: number | null;
+  resolved_story_time: string;
+  resolved_quote: string;
+  resolution_record_id: number | null;
+  created_at: string;
+}
+
+export interface CharacterMemoryCreateInput {
+  content: string;
+  memory_type: CharacterMemoryType;
+  time_scope?: string;
+  schedule_status?: ScheduleStatus;
+  related_record_id?: number | null;
+  knower_ids: number[];
+  learned_by?: string;
+  chapter_id?: number | null;
+  source_quote?: string;
+}
+
+export interface CharacterMemoryUpdateInput {
+  content?: string;
+  memory_type?: CharacterMemoryType;
+  time_scope?: string;
+  schedule_status?: ScheduleStatus;
+  related_record_id?: number | null;
+  knower_ids?: number[];
+  learned_by?: string;
+  chapter_id?: number | null;
+  clear_chapter?: boolean;
+  source_quote?: string;
+  is_disabled?: boolean;
+  resolved_chapter_id?: number | null;
+}
+
 export interface WorldviewEntry {
   id: number;
   category: WorldviewCategory;
@@ -57,10 +120,28 @@ export interface CharacterTimelineSnapshot {
     change_reason: string | null;
   }>;
   known_secrets: Array<{
+    id?: number;
     secret: string;
+    content?: string;
+    memory_type?: CharacterMemoryType;
+    time_scope?: string;
+    schedule_status?: ScheduleStatus;
+    effective_schedule_status?: ScheduleStatus;
+    knower_ids?: number[];
+    knower_names?: string[];
     learned_by: string | null;
+    chapter_id?: number | null;
     chapter_title: string | null;
+    chapter_display_index?: number | null;
+    story_time?: string | null;
+    source_quote?: string | null;
+    origin?: string;
+    is_disabled?: boolean;
+    resolved_chapter_id?: number | null;
+    resolved_chapter_title?: string | null;
+    resolved_chapter_display_index?: number | null;
   }>;
+  character_memories?: CharacterMemoryItem[];
 }
 
 export interface LocationItem {

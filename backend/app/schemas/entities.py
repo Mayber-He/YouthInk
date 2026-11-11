@@ -77,6 +77,7 @@ class CharacterTimelineSnapshot(BaseModel):
     state_sources: dict[str, dict[str, object]] = Field(default_factory=dict)
     relationships: list[dict[str, object]]
     known_secrets: list[dict[str, object]]
+    character_memories: list[dict[str, object]] = Field(default_factory=list)
 
 
 # --- Locations ---

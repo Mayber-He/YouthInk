@@ -21,6 +21,7 @@ Strategy here:
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass, field
 import re
 from typing import Any
@@ -81,6 +82,7 @@ class ExtractionParseResult:
     raw_items: int = 0
     # Human-readable drop reasons (category + short message), for logging / retry.
     drop_log: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def status(self) -> str:
@@ -101,12 +103,19 @@ def _coerce_list(value: Any) -> list[Any]:
 
 
 def parse_extraction_items(
-    raw_text: str, chapter_text: str
+    raw_text: str,
+    chapter_text: str,
+    known_char_names: Collection[str] | None = None,
 ) -> ExtractionParseResult:
     """Parse model output into a validated ``LlmMemoryExtractionOutput``.
 
     Each list element is validated independently. Invalid items and items whose
     quote is not found verbatim in ``chapter_text`` are dropped (not fatal).
+
+    When ``known_char_names`` is provided, ``cognitive_records`` items whose
+    ``knower_names`` cannot be matched to any known character are skipped and
+    reported in ``drop_log`` / ``warnings`` instead of falling back to a default
+    character.
 
     Raises ``ValueError`` only when the outer JSON itself cannot be parsed at all
     — the caller treats that as a batch failure and may retry.
@@ -120,6 +129,11 @@ def parse_extraction_items(
         raise ValueError("extraction root is not a JSON object")
 
     chapter_norm = normalize_for_quote_match(chapter_text)
+    known_set = (
+        {n.strip() for n in known_char_names if n and n.strip()}
+        if known_char_names is not None
+        else None
+    )
     result = ExtractionParseResult(output=LlmMemoryExtractionOutput())
 
     for key, schema_cls, quote_field, require_verbatim in _CATEGORY_SPECS:
@@ -152,6 +166,26 @@ def parse_extraction_items(
                     f"{key}[{idx}]: {quote_field} not found verbatim in chapter"
                 )
                 continue
+
+            if key == "cognitive_records" and known_set is not None:
+                raw_knowers = [str(n).strip() for n in obj.knower_names if str(n).strip()]
+                matched = [n for n in raw_knowers if n in known_set]
+                unknown = [n for n in raw_knowers if n not in known_set]
+                if not matched:
+                    result.dropped_invalid += 1
+                    warn = (
+                        f"跳过人物记忆「{obj.secret}」：知情者 {raw_knowers or ['未提供']} 无法匹配已知角色"
+                    )
+                    result.drop_log.append(f"{key}[{idx}]: {warn}")
+                    result.warnings.append(warn)
+                    continue
+                if unknown:
+                    obj.knower_names = list(dict.fromkeys(matched))
+                    warn = f"人物记忆「{obj.secret}」忽略未知知情者：{', '.join(unknown)}"
+                    result.drop_log.append(f"{key}[{idx}]: {warn}")
+                    result.warnings.append(warn)
+                else:
+                    obj.knower_names = list(dict.fromkeys(matched))
 
             if key == "constraint_checks" and obj.verdict == "resolved":
                 if quote not in chapter_text:

@@ -14,12 +14,19 @@ from app.db.repositories.entity_repo import EntityRepository
 from app.db.repositories.memory_repo import MemoryRepository
 from app.db.repositories.outline_repo import OutlineRepository
 from app.db.repositories.settings_repo import SettingsRepository
+from app.db.repositories.timeline_repo import (
+    match_pending_schedule_id,
+    query_character_memories,
+)
 from app.db.repositories.writing_repo import WritingRepository
 from app.db.vector_store import NovelVectorStore, VectorChunkRecord
 from app.schemas.memory import (
     FinalizeChapterResponse,
     LlmExtractedFact,
     LlmMemoryExtractionOutput,
+    ReextractChapterMemoryResponse,
+    normalize_memory_type,
+    normalize_schedule_status,
 )
 from app.services.backup_service import create_novel_backup
 from app.services.embedding.encoder import (
@@ -57,8 +64,16 @@ MEMORY_EXTRACTION_SCHEMA_GUIDE = (
     '   {"character_name": "角色名", '
     '"field": "location|body|emotion|goal|identity|item|appearance", '
     '"value": "新状态值", "source_quote": "正文原句（逐字）"}\n'
-    "3) cognitive_records（谁知道了什么秘密/认知）：\n"
-    '   {"secret": "秘密或认知内容", "knower_names": ["知情角色名"], '
+    "3) cognitive_records（人物记忆：谁在何时得知了什么日常认知、临时安排或秘密认知）：\n"
+    "   只提取正文中明确获知的饮食/生活偏好、习惯、约定、临时日程安排和秘密，跳过无后续意义的一次性动作；\n"
+    "   必须严格按原文证据填写 knower_names（只有亲历、亲耳听到或有明确证据得知的角色才能列入，未获知角色绝不可列入）：\n"
+    "   - memory_type: \"daily\"（日常认知：偏好、习惯、常态认知）| \"schedule\"（临时安排：早八上课、约饭、待办日程或该安排的完成/取消/过期）| \"secret\"（秘密认知：隐情、关键秘密）\n"
+    "   - time_scope: 适用时间条件（如“今天早八”“开学第二天早晨”“周六下午”；非 schedule 可填 \"\"；保留原文时间条件，时间不明时保留条件提示）\n"
+    "   - schedule_status: \"pending\"（待办）| \"completed\"（已完成）| \"cancelled\"（已取消）| \"expired\"（已过期）；非 schedule 固定填 \"pending\"\n"
+    "   - related_record_id: 若本章正文明确完成、取消或使某条既有待办安排过期，填写对应待办记录编号（整数），否则填 null\n"
+    '   {"secret": "记忆/认知/安排内容", "memory_type": "daily|schedule|secret", '
+    '"time_scope": "适用时间说明", "schedule_status": "pending|completed|cancelled|expired", '
+    '"related_record_id": null, "knower_names": ["知情角色名"], '
     '"learned_by": "如何得知", "source_quote": "正文原句（逐字）"}\n'
     "4) relationship_changes（人物关系变化，a≠b）：\n"
     '   {"char_a_name": "角色A", "char_b_name": "角色B", "rel_type": "关系类型", '
@@ -126,6 +141,7 @@ class ChapterFinalizerService:
         self.constraint_repo = ConstraintRepository(novel_conn)
         self.memory_repo = MemoryRepository(novel_conn)
         self.vector_store = NovelVectorStore(novel_uid)
+        self._last_extraction_warnings: list[str] = []
 
     async def finalize_chapter(self, chapter_id: int) -> FinalizeChapterResponse:
         ch = self.outline_repo.get_chapter(chapter_id)
@@ -138,6 +154,7 @@ class ChapterFinalizerService:
 
         source_hash = text_sha256(raw_content)
         backup_info = create_novel_backup(self.novel_uid, reason=f"finalize_ch_{chapter_id}")
+        self._last_extraction_warnings = []
         # Complete upstream calls and validation before taking a SQLite write lock.
         summary_text = await self._generate_chapter_summary(chapter_id, ch.title, content)
         extraction, extraction_status = await self._extract_chapter_memories(
@@ -213,6 +230,7 @@ class ChapterFinalizerService:
             else:
                 self.vector_store.clear_chapter_pending(chapter_id)
         index_status = self.vector_store.read_index_status()
+        warnings = list(dict.fromkeys(self._last_extraction_warnings))
         return FinalizeChapterResponse(
             chapter_id=chapter_id,
             status="final",
@@ -222,12 +240,82 @@ class ChapterFinalizerService:
             auto_confirmed_count=auto_confirmed,
             pending_count=pending_cnt,
             extraction_status=extraction_status,
+            extraction_warnings=warnings,
             vector_index_status=(
                 "pending_rebuild" if index_status["pending_rebuild"] else "ok"
             ),
             vector_index_error=(
                 str(index_status["reason"]) if index_status["pending_rebuild"] else None
             ),
+        )
+
+    async def reextract_chapter_memories(
+        self, chapter_id: int
+    ) -> ReextractChapterMemoryResponse:
+        """Re-run memory extraction on a finalized chapter without touching prose or vectors.
+
+        - Requires ``ch.status == 'final'``.
+        - Replaces ``origin='extracted'`` records for ``chapter_id`` while keeping
+          ``origin='manual'`` records intact and deduplicated.
+        - On extraction failure, preserves all existing extracted and manual records.
+        """
+        ch = self.outline_repo.get_chapter(chapter_id)
+        if ch.status != "final":
+            raise AppError(
+                "CHAPTER_NOT_FINALIZED",
+                "仅已定稿章节可执行重新提取记忆。",
+                status_code=400,
+            )
+        versions = self.writing_repo.list_versions(chapter_id)
+        latest_ver = versions[0] if versions else None
+        raw_content = latest_ver.content if latest_ver else ""
+        content = raw_content.strip()
+        if not content:
+            raise AppError("EMPTY_CHAPTER_CONTENT", "章节正文为空，无法重新提取记忆。", 400)
+
+        source_hash = text_sha256(raw_content)
+        self._last_extraction_warnings = []
+        extraction, extraction_status = await self._extract_chapter_memories(
+            chapter_id, ch.title, content
+        )
+        warnings = list(dict.fromkeys(self._last_extraction_warnings))
+        if extraction_status == "failed":
+            if not warnings:
+                warnings.append("自动提取失败，已保留本章原有记忆记录。")
+            return ReextractChapterMemoryResponse(
+                chapter_id=chapter_id,
+                extraction_status="failed",
+                auto_confirmed_count=0,
+                pending_count=0,
+                preserved_previous=True,
+                warnings=warnings,
+            )
+
+        with self.conn:
+            self.conn.execute("BEGIN IMMEDIATE")
+            current_versions = self.writing_repo.list_versions(chapter_id)
+            if (
+                not current_versions
+                or current_versions[0].id != latest_ver.id
+                or text_sha256(current_versions[0].content) != source_hash
+            ):
+                raise AppError(
+                    "CHAPTER_CONTENT_CHANGED",
+                    "重新提取期间章节正文已变化，请刷新后重试",
+                    status_code=409,
+                )
+            auto_confirmed, pending_cnt = self._persist_extracted_memories(
+                chapter_id, extraction, source_hash, force_pending=False
+            )
+
+        warnings = list(dict.fromkeys(self._last_extraction_warnings))
+        return ReextractChapterMemoryResponse(
+            chapter_id=chapter_id,
+            extraction_status=extraction_status,
+            auto_confirmed_count=auto_confirmed,
+            pending_count=pending_cnt,
+            preserved_previous=False,
+            warnings=warnings,
         )
 
     def _current_embedding_model_id(self) -> str:
@@ -337,11 +425,24 @@ class ChapterFinalizerService:
         return f"【《{title}》章节摘要】" + content[:240].replace("\n", " ")
 
     def _build_extraction_prompt(
-        self, title: str, content: str, char_names: list[str], constraint_lines: str, story_time: str = ""
+        self,
+        title: str,
+        content: str,
+        char_names: list[str],
+        constraint_lines: str,
+        story_time: str = "",
+        schedule_lines: str = "",
     ) -> str:
         constraint_section = (
             f"\n\n本章生效中的硬约束清单（仅报告真实违反或剧情正式解除，其余不输出）：\n{constraint_lines}\n"
             if constraint_lines
+            else ""
+        )
+        schedule_section = (
+            "\n\n当前待办中的人物临时安排清单（若本章正文有明确证据表明某条安排已完成/取消/过期，"
+            "请在 cognitive_records 中输出一条 memory_type=\"schedule\"、schedule_status 为 completed/cancelled/expired、"
+            f"related_record_id 指向该记录编号的后续记录，并附原文证据）：\n{schedule_lines}\n"
+            if schedule_lines
             else ""
         )
         return (
@@ -351,7 +452,9 @@ class ChapterFinalizerService:
             "state_changes、facts、foreshadowing 中明天/下周/过几天等相对时间，"
             "必须改写成相对本章时间（story_time）的次日/下一周/数日后，或可确定的具体日期；"
             "不得把相对时间原样写入跨章记忆，无法确定日期时不得猜补年份或日期。\n"
+            "cognitive_records 中的临时安排（memory_type=\"schedule\"）请在 time_scope 中保留原文或本章语境下的原始时间条件（如“今天早八”“开学第二天早晨”），时间不明时保留条件提示，不自动猜补过期。\n"
             f"{MEMORY_EXTRACTION_SCHEMA_GUIDE}"
+            f"{schedule_section}"
             f"{constraint_section}\n\n"
             f"章节正文：\n{content[:5000]}"
         )
@@ -365,7 +468,16 @@ class ChapterFinalizerService:
         means the batch could not be parsed at all and a non-auto-confirmable
         fallback fact was produced.
         """
-        char_names = [c.name for c in self.entity_repo.list_characters()]
+        chars = self.entity_repo.list_characters()
+        char_names = [c.name for c in chars]
+        known_char_names: set[str] = set()
+        for c in chars:
+            if c.name and c.name.strip():
+                known_char_names.add(c.name.strip())
+            for alias in c.aliases:
+                if alias and alias.strip():
+                    known_char_names.add(alias.strip())
+
         ch = self.outline_repo.get_chapter(chapter_id)
         scenes = self.writing_repo.list_scenes(chapter_id)
         char_ids = sorted(
@@ -380,8 +492,35 @@ class ChapterFinalizerService:
             f"·{c.target_type}{'「' + c.target_name + '」' if c.target_name else ''}】{c.content}"
             for c in active_constraints
         )
+        prior_schedules = query_character_memories(
+            self.conn,
+            up_to_chapter_sort=float(ch.sort_order) - 1e-6,
+            include_disabled=False,
+            include_pending=True,
+            memory_type="schedule",
+        )
+        pending_schedules = [
+            s
+            for s in prior_schedules
+            if str(
+                s.get("effective_schedule_status")
+                or s.get("schedule_status")
+                or "pending"
+            )
+            == "pending"
+        ]
+        schedule_lines = "\n".join(
+            f"[#{s['id']}] 知情者：{'、'.join(s.get('knower_names') or [])}｜安排：{s['secret']}"
+            f"｜适用时间：{s.get('time_scope') or s.get('story_time') or '未注明'}"
+            for s in pending_schedules
+        )
         base_prompt = self._build_extraction_prompt(
-            title, content, char_names, constraint_lines, story_time=ch.story_time or ""
+            title,
+            content,
+            char_names,
+            constraint_lines,
+            story_time=ch.story_time or "",
+            schedule_lines=schedule_lines,
         )
 
         try:
@@ -416,13 +555,15 @@ class ChapterFinalizerService:
         last_error = ""
         try:
             raw = await _call_with_budget(base_prompt)
-            parse_result = parse_extraction_items(raw, content)
+            parse_result = parse_extraction_items(
+                raw, content, known_char_names=known_char_names or None
+            )
         except Exception as exc:  # outer-JSON failure or network error
             last_error = str(exc)
             logger.warning("memory extract attempt 1 failed (chapter_id=%s): %s", chapter_id, last_error)
 
         # Attempt 2 (only when the whole batch was unusable): feed the error back.
-        if parse_result is None or parse_result.kept == 0:
+        if parse_result is None or (parse_result.kept == 0 and not parse_result.warnings):
             retry_hint = (
                 "\n\n上一次输出无法解析或没有任何合法条目。"
                 f"错误信息：{last_error or '所有条目字段不符合要求或引文不在正文中'}。"
@@ -430,12 +571,17 @@ class ChapterFinalizerService:
             )
             try:
                 raw2 = await _call_with_budget(base_prompt + retry_hint)
-                retry_result = parse_extraction_items(raw2, content)
+                retry_result = parse_extraction_items(
+                    raw2, content, known_char_names=known_char_names or None
+                )
                 if parse_result is None or retry_result.kept >= parse_result.kept:
                     parse_result = retry_result
             except Exception as exc:
                 last_error = str(exc)
                 logger.warning("memory extract retry failed (chapter_id=%s): %s", chapter_id, last_error)
+
+        if parse_result is not None and parse_result.warnings:
+            self._last_extraction_warnings.extend(parse_result.warnings)
 
         if parse_result is not None and parse_result.kept > 0:
             if parse_result.drop_log:
@@ -445,6 +591,12 @@ class ChapterFinalizerService:
                     parse_result.dropped_quote, "; ".join(parse_result.drop_log[:10]),
                 )
             return parse_result.output, parse_result.status
+
+        # If all items in the batch were skipped purely due to unknown character names,
+        # treat the extraction itself as partial (empty output with warnings) rather than
+        # inserting a fake fallback fact.
+        if parse_result is not None and parse_result.raw_items > 0 and parse_result.warnings:
+            return parse_result.output, "partial"
 
         # Batch still unusable: non-auto-confirmable fallback fact.
         logger.warning(
@@ -486,9 +638,34 @@ class ChapterFinalizerService:
                 self.conn.execute(f"UPDATE {table} SET is_stale = 1 WHERE {column} = ? AND origin = 'extracted'", (chapter_id,))
         trust = self.settings_repo.get_trust_mode()
         chars = self.entity_repo.list_characters()
-        name_to_id = {c.name: c.id for c in chars}
+        name_to_id: dict[str, int] = {}
+        for c in chars:
+            if c.name and c.name.strip():
+                name_to_id[c.name.strip()] = c.id
+            for alias in c.aliases:
+                if alias and alias.strip():
+                    name_to_id.setdefault(alias.strip(), c.id)
         default_cid = chars[0].id if chars else None
+        ch_row = self.conn.execute(
+            "SELECT sort_order, story_time FROM chapters WHERE id = ?", (chapter_id,)
+        ).fetchone()
+        ch_sort_order = float(ch_row["sort_order"]) if ch_row else 0.0
+        ch_story_time = str(ch_row["story_time"] or "").strip() if ch_row else ""
         auto_cnt, pend_cnt = 0, 0
+
+        # Active manual records in the same chapter (never overwritten; deduplicate against them).
+        manual_fact_norms = {
+            normalize_for_quote_match(str(r["content"]))
+            for r in self.conn.execute(
+                "SELECT content FROM facts WHERE chapter_id = ? AND origin = 'manual' AND is_stale = 0 AND is_disabled = 0",
+                (chapter_id,),
+            ).fetchall()
+        }
+        manual_cog_rows = self.conn.execute(
+            "SELECT secret, knower_ids, memory_type, schedule_status FROM cognitive_records "
+            "WHERE chapter_id = ? AND origin = 'manual' AND is_stale = 0 AND is_disabled = 0",
+            (chapter_id,),
+        ).fetchall()
 
         fact_st = (
             "pending"
@@ -496,7 +673,9 @@ class ChapterFinalizerService:
             else ("confirmed" if (trust.enabled and trust.auto_confirm_facts) else "pending")
         )
         for f in extraction.facts:
-            eids = [name_to_id[n] for n in f.character_names if n in name_to_id]
+            if normalize_for_quote_match(f.content) in manual_fact_norms:
+                continue
+            eids = [name_to_id[n.strip()] for n in f.character_names if n and n.strip() in name_to_id]
             cur = self.conn.execute(
                 "INSERT INTO facts (content, fact_type, entity_ids, chapter_id, source_quote, status, source_hash, origin, is_stale) VALUES (?, ?, ?, ?, ?, ?, ?, 'extracted', 0)",
                 (f.content, f.fact_type or "event", json.dumps(eids), chapter_id, f.source_quote, fact_st, source_hash),
@@ -509,7 +688,7 @@ class ChapterFinalizerService:
 
         cs_st = "confirmed" if (trust.enabled and trust.auto_confirm_char_state) else "pending"
         for sc in extraction.state_changes:
-            cid = name_to_id.get(sc.character_name, default_cid)
+            cid = name_to_id.get((sc.character_name or "").strip(), default_cid)
             if cid is not None:
                 self.conn.execute(
                     "INSERT INTO character_state_changes (character_id, chapter_id, field, value, source_quote, confirm_status, source_hash, origin, is_stale) VALUES (?, ?, ?, ?, ?, ?, ?, 'extracted', 0)",
@@ -520,17 +699,120 @@ class ChapterFinalizerService:
 
         cog_st = "confirmed" if (trust.enabled and trust.auto_confirm_cognitive) else "pending"
         for cog in extraction.cognitive_records:
-            kids = [name_to_id[n] for n in cog.knower_names if n in name_to_id] or ([default_cid] if default_cid else [])
+            kids: list[int] = []
+            unknown_names: list[str] = []
+            for raw_name in cog.knower_names:
+                clean_name = (raw_name or "").strip()
+                if not clean_name:
+                    continue
+                if clean_name in name_to_id:
+                    cid_val = name_to_id[clean_name]
+                    if cid_val not in kids:
+                        kids.append(cid_val)
+                else:
+                    unknown_names.append(clean_name)
+            if not kids:
+                warn_msg = (
+                    f"跳过人物记忆「{cog.secret}」：知情者 {cog.knower_names or ['未提供']} 无法匹配已知角色"
+                )
+                if warn_msg not in self._last_extraction_warnings:
+                    self._last_extraction_warnings.append(warn_msg)
+                logger.info("skipping cognitive record with unmatched knowers: %s", warn_msg)
+                continue
+            if unknown_names:
+                warn_msg = f"人物记忆「{cog.secret}」忽略未知知情者：{', '.join(unknown_names)}"
+                if warn_msg not in self._last_extraction_warnings:
+                    self._last_extraction_warnings.append(warn_msg)
+
+            mem_type = normalize_memory_type(cog.memory_type)
+            sched_status = (
+                normalize_schedule_status(cog.schedule_status)
+                if mem_type == "schedule"
+                else "pending"
+            )
+            time_scope = (cog.time_scope or "").strip()
+            if mem_type == "schedule" and sched_status == "pending" and not time_scope:
+                time_scope = ch_story_time or "按本章时间语境"
+
+            related_id: int | None = None
+            if mem_type == "schedule" and sched_status in ("completed", "cancelled", "expired"):
+                if cog.related_record_id is not None:
+                    parent = self.conn.execute(
+                        "SELECT id, time_scope FROM cognitive_records WHERE id = ? AND memory_type = 'schedule'",
+                        (int(cog.related_record_id),),
+                    ).fetchone()
+                    if parent is not None:
+                        related_id = int(parent["id"])
+                        if not time_scope:
+                            time_scope = str(parent["time_scope"] or "").strip()
+                if related_id is None:
+                    prior_candidates = query_character_memories(
+                        self.conn,
+                        up_to_chapter_sort=ch_sort_order - 1e-6,
+                        memory_type="schedule",
+                        include_disabled=False,
+                        include_pending=True,
+                    )
+                    related_id = match_pending_schedule_id(
+                        prior_candidates,
+                        kids,
+                        cog.secret,
+                        time_scope,
+                    )
+                    if related_id is not None and not time_scope:
+                        parent = self.conn.execute(
+                            "SELECT time_scope FROM cognitive_records WHERE id = ?",
+                            (related_id,),
+                        ).fetchone()
+                        if parent is not None:
+                            time_scope = str(parent["time_scope"] or "").strip()
+
+            # Skip if an identical active manual record already exists in this chapter.
+            cog_norm = normalize_for_quote_match(cog.secret)
+            duplicate_manual = False
+            for mrow in manual_cog_rows:
+                m_norm = normalize_for_quote_match(str(mrow["secret"]))
+                try:
+                    m_kids = set(json.loads(mrow["knower_ids"] or "[]"))
+                except (ValueError, TypeError):
+                    m_kids = set()
+                if (
+                    m_norm == cog_norm
+                    and normalize_memory_type(str(mrow["memory_type"] or "secret")) == mem_type
+                    and normalize_schedule_status(str(mrow["schedule_status"] or "pending")) == sched_status
+                    and bool(m_kids.intersection(kids))
+                ):
+                    duplicate_manual = True
+                    break
+            if duplicate_manual:
+                continue
+
             self.conn.execute(
-                "INSERT INTO cognitive_records (secret, knower_ids, chapter_id, learned_by, source_quote, confirm_status, source_hash, origin, is_stale) VALUES (?, ?, ?, ?, ?, ?, ?, 'extracted', 0)",
-                (cog.secret, json.dumps(kids), chapter_id, cog.learned_by, cog.source_quote, cog_st, source_hash),
+                "INSERT INTO cognitive_records ("
+                "secret, memory_type, time_scope, schedule_status, related_record_id, "
+                "knower_ids, chapter_id, learned_by, source_quote, confirm_status, source_hash, origin, is_stale"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'extracted', 0)",
+                (
+                    cog.secret,
+                    mem_type,
+                    time_scope,
+                    sched_status,
+                    related_id,
+                    json.dumps(kids),
+                    chapter_id,
+                    cog.learned_by,
+                    cog.source_quote,
+                    cog_st,
+                    source_hash,
+                ),
             )
             auto_cnt += 1 if cog_st == "confirmed" else 0
             pend_cnt += 0 if cog_st == "confirmed" else 1
 
         rel_st = "confirmed" if (trust.enabled and trust.auto_confirm_relationship) else "pending"
         for rel in extraction.relationship_changes:
-            ca, cb = name_to_id.get(rel.char_a_name), name_to_id.get(rel.char_b_name)
+            ca = name_to_id.get((rel.char_a_name or "").strip())
+            cb = name_to_id.get((rel.char_b_name or "").strip())
             if ca and cb and ca != cb:
                 self.conn.execute(
                     "INSERT INTO relationship_changes (char_a_id, char_b_id, chapter_id, rel_type, intimacy, publicity, change_reason, source_quote, confirm_status, source_hash, origin, is_stale) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'extracted', 0)",

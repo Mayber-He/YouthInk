@@ -31,6 +31,18 @@ _MENTION_RE = re.compile(r"@([^\s，,。；;！!？?\n]+)")
 _FORBIDDEN_LINE_RE = re.compile(r"^\s*本场禁止出现\s*[:：]")
 _PRESENT_LINE_RE = re.compile(r"^\s*在场人物\s*[:：](.*)$", re.MULTILINE)
 
+_MEMORY_TYPE_LABELS = {
+    "daily": "日常认知",
+    "schedule": "临时安排",
+    "secret": "秘密认知",
+}
+_SCHEDULE_STATUS_LABELS = {
+    "pending": "待办安排",
+    "completed": "已完成",
+    "cancelled": "已取消",
+    "expired": "已过期",
+}
+
 
 def _chapter_display_indices(conn: sqlite3.Connection) -> dict[int, int]:
     rows = conn.execute(
@@ -51,6 +63,48 @@ def _memory_provenance(
         return fallback
     when = (story_time or "").strip()
     return f"（第{display_index}章·{when}）" if when else f"（第{display_index}章）"
+
+
+def _format_character_memory_item(
+    item: dict[str, object], chapter_indices: dict[int, int]
+) -> str:
+    ch_id = item.get("chapter_id")
+    display_idx = chapter_indices.get(int(ch_id)) if ch_id else None
+    prov = _memory_provenance(
+        display_idx,
+        str(item.get("story_time") or ""),
+        fallback="（故事开始前已知）",
+    )
+    mtype = str(item.get("memory_type") or "secret")
+    type_label = _MEMORY_TYPE_LABELS.get(mtype, "秘密认知")
+    tags: list[str] = [f"类型：{type_label}"]
+
+    time_scope = str(item.get("time_scope") or "").strip()
+    if time_scope:
+        tags.append(f"适用时间：{time_scope}")
+
+    if mtype == "schedule":
+        sched_st = str(
+            item.get("effective_schedule_status")
+            or item.get("schedule_status")
+            or "pending"
+        )
+        if sched_st == "pending":
+            tags.append("状态：待办安排（在适用时间内需体现对行动的影响）")
+        else:
+            st_label = _SCHEDULE_STATUS_LABELS.get(sched_st, "已结束")
+            res_ch_id = item.get("resolved_chapter_id")
+            res_idx = chapter_indices.get(int(res_ch_id)) if res_ch_id else None
+            res_prefix = f"于第{res_idx}章" if res_idx else ""
+            tags.append(
+                f"状态：{res_prefix}{st_label}（已结束安排，仅作历史经历，不得继续作为待办）"
+            )
+
+    learned_by = str(item.get("learned_by") or "").strip()
+    if learned_by:
+        tags.append(f"获知方式：{learned_by}")
+
+    return f"{prov} {item['secret']} [{'｜'.join(tags)}]"
 
 
 class ContextAssembler:
@@ -213,11 +267,10 @@ class ContextAssembler:
             )
             if snap.known_secrets:
                 sec_list = "；".join(
-                    f"{_memory_provenance(chapter_indices.get(int(s.get('chapter_id') or 0)), str(s.get('story_time') or ''))}"
-                    f" {s['secret']}"
+                    _format_character_memory_item(s, chapter_indices)
                     for s in snap.known_secrets
                 )
-                known_secrets_lines.append(f"• 【{c.name}】已知秘密：{sec_list}")
+                known_secrets_lines.append(f"• 【{c.name}】已生效记忆：{sec_list}")
             else:
                 known_secrets_lines.append(
                     f"• 【{c.name}】未记录已确认的认知信息，不代表角色一无所知；以正文中实际获知的事件为准，不得据此抹去已知信息。"
@@ -226,6 +279,13 @@ class ContextAssembler:
         if char_lines:
             char_lines.append(
                 "⚠️ 人物连续性与认知边界：人物卡中的既有经历和关系历史是故事事实，正文不得与之冲突；但人物卡不代表 POV 自动知晓其他角色的私密背景或内心。关系栏仅记录结构化确认的关系变化，若标为未记录，不等于初见或不熟，须结合人物卡和前文判断；关系栏有明确状态时，按该状态及更晚的前文事件推进。"
+            )
+
+        if known_secrets_lines:
+            known_secrets_lines.append(
+                "⚠️ 人物记忆与安排使用规范：①只有明确列在某个角色名下的记忆，该角色才知晓；其他未列出的角色不得自动知晓，严禁超知；"
+                "②日常认知（如饮食偏好、习惯）与处于「待办安排」状态的临时安排（如当天早八有课、约定事项），应在符合适用时间条件时自然体现在人物行动、选择与对话细节中，避免把已知信息当作新发现重复讲述；"
+                "③标记为「已完成 / 已取消 / 已过期」的临时安排只作为历史经历参考，严禁继续当作当前待办事项执行。"
             )
 
         blocks.append(
@@ -237,11 +297,11 @@ class ContextAssembler:
             )
         )
 
-        # 3. 出场人物认知约束
+        # 3. 出场人物记忆与认知约束
         blocks.append(
             self._make_block(
                 "cognitive_constraints",
-                "出场人物认知边界（防超知幻觉）",
+                "出场人物记忆与认知边界（日常认知 / 临时安排 / 防超知）",
                 "\n".join(known_secrets_lines) or "无特殊认知约束",
                 disabled,
             )
@@ -314,7 +374,8 @@ class ContextAssembler:
               AND s.source_hash = c.content_hash
               AND c.status = 'final' AND c.continuity_review_required = 0
             ORDER BY c.sort_order DESC LIMIT 6
-            """,
+            """
+            ,
             (ch.sort_order,),
         ).fetchall()
         sum_lines = [

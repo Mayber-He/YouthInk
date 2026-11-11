@@ -145,7 +145,17 @@ export interface FinalizeChapterResponse {
   pending_count: number;
   // 'ok' | 'partial' | 'failed'：记忆抽取结果，用于显示失败/部分失败标记
   extraction_status: string;
+  extraction_warnings?: string[];
   // 'ok' | 'pending_rebuild'：向量索引失败不影响章节/摘要/记忆定稿
   vector_index_status: string;
   vector_index_error: string | null;
+}
+
+export interface ReextractChapterMemoryResponse {
+  chapter_id: number;
+  extraction_status: string;
+  auto_confirmed_count: number;
+  pending_count: number;
+  preserved_previous: boolean;
+  warnings: string[];
 }

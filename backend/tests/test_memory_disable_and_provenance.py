@@ -143,9 +143,9 @@ def test_conflict_flags_use_simple_pair_and_knower_rules(repo):
     assert items[("relationship", 7)].conflict is True
     assert items[("relationship", 8)].conflict is True
     assert "同一对人物" in items[("relationship", 8)].conflict_reason
-    # 认知 13 与第 1 章认知 11 都含江澈。
-    assert items[("cognitive", 13)].conflict is True
-    assert "同一人物" in items[("cognitive", 13)].conflict_reason
+    # 认知 13 与第 1 章认知 11 都含江澈，但同一人物有多条认知不再误判为冲突。
+    assert items[("cognitive", 13)].conflict is False
+    assert items[("cognitive", 13)].conflict_reason == ""
     # 事实/状态/伏笔不参与这两条简单规则。
     assert items[("fact", 1)].conflict is False
 
