@@ -399,6 +399,40 @@ def test_cross_chapter_continuity_guards(
 
 # ---------------------------------------------------------------- T14 tolerance
 
+
+@pytest.mark.parametrize("overlap", [False, True])
+def test_batch_apply_saves_one_version_or_rejects_entire_batch(
+    client: TestClient, novel_uid: str, monkeypatch: pytest.MonkeyPatch,
+    character_id: int, overlap: bool,
+) -> None:
+    _setup_llm_profile(client)
+    content = "林夏走进校园。她找到了宿舍。"
+    chapter_id = _make_chapter_with_content(client, novel_uid, character_id, content)
+    base = f"/api/v1/novels/{novel_uid}"
+    quotes = ["林夏走进校园", "走进校园" if overlap else "她找到了宿舍"]
+    _mock_review_response(monkeypatch, [
+        {"check_type": "prose", "verdict": "suspicious", "evidence_quote": quote,
+         "suggested_rewrite": rewrite}
+        for quote, rewrite in zip(quotes, ["林夏摸索着走进校园", "她终于找到了宿舍"])
+    ])
+    report = client.post(f"{base}/chapters/{chapter_id}/consistency-review").json()
+    before = client.get(f"{base}/chapters/{chapter_id}/workspace").json()
+    result = client.post(f"{base}/consistency-reviews/{report['id']}/apply", json={
+        "issue_indices": [0, 1], "expected_content": content,
+    })
+    after = client.get(f"{base}/chapters/{chapter_id}/workspace").json()
+    if overlap:
+        assert result.status_code == 409, result.text
+        assert after["latest_content"] == content
+        assert len(after["versions"]) == len(before["versions"])
+    else:
+        assert result.status_code == 200, result.text
+        assert after["latest_content"] == "林夏摸索着走进校园。她终于找到了宿舍。"
+        assert len(after["versions"]) == len(before["versions"]) + 1
+        old_review = client.get(f"{base}/consistency-reviews/{report['id']}").json()
+        assert old_review["is_stale"] is True
+
+
 def test_failed_review_sample_keeps_all_four_issues(
     client: TestClient, novel_uid: str, monkeypatch: pytest.MonkeyPatch, character_id: int
 ) -> None:

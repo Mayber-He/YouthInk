@@ -1,6 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/http";
 import type {
+  CharacterMemoryCreateInput,
+  CharacterMemoryItem,
+  CharacterMemoryType,
+  CharacterMemoryUpdateInput,
+  ScheduleStatus,
+} from "@/types/api";
+import type {
   ChapterMemoryItem,
   ConsistencyReviewResponse,
   ConsistencyReviewSummary,
@@ -11,6 +18,7 @@ import type {
   MemoryItemCategory,
   PendingQueueItem,
   RagSearchResponse,
+  ReextractChapterMemoryResponse,
   SummaryItem,
 } from "./types";
 
@@ -86,6 +94,8 @@ export function useSetMemoryItemDisabled(novelUid: string) {
       qc.invalidateQueries({ queryKey: ["chapter-memory", novelUid] });
       qc.invalidateQueries({ queryKey: ["pending-queue", novelUid] });
       qc.invalidateQueries({ queryKey: ["context-preview", novelUid] });
+      qc.invalidateQueries({ queryKey: ["novels", novelUid, "characters"] });
+      qc.invalidateQueries({ queryKey: ["character-memories", novelUid] });
     },
   });
 }
@@ -98,6 +108,11 @@ export function useUpdatePendingItem(novelUid: string) {
       id: number;
       action: "confirm" | "discard" | "edit";
       updated_text?: string;
+      memory_type?: CharacterMemoryType;
+      time_scope?: string;
+      schedule_status?: ScheduleStatus;
+      knower_ids?: number[];
+      learned_by?: string;
     }) =>
       apiRequest<{ status: string }>(
         `/api/v1/novels/${novelUid}/memory/pending-queue/${payload.item_type}/${payload.id}`,
@@ -106,14 +121,21 @@ export function useUpdatePendingItem(novelUid: string) {
           body: JSON.stringify({
             action: payload.action,
             updated_text: payload.updated_text,
+            memory_type: payload.memory_type,
+            time_scope: payload.time_scope,
+            schedule_status: payload.schedule_status,
+            knower_ids: payload.knower_ids,
+            learned_by: payload.learned_by,
           }),
         }
       ),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["pending-queue", novelUid] });
+      qc.invalidateQueries({ queryKey: ["chapter-memory", novelUid] });
       qc.invalidateQueries({ queryKey: ["novels", novelUid] });
       qc.invalidateQueries({ queryKey: ["foreshadowing", novelUid] });
       qc.invalidateQueries({ queryKey: ["context-preview", novelUid] });
+      qc.invalidateQueries({ queryKey: ["character-memories", novelUid] });
     },
   });
 }
@@ -134,9 +156,11 @@ export function useBatchPendingAction(novelUid: string) {
       ),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["pending-queue", novelUid] });
+      qc.invalidateQueries({ queryKey: ["chapter-memory", novelUid] });
       qc.invalidateQueries({ queryKey: ["novels", novelUid] });
       qc.invalidateQueries({ queryKey: ["foreshadowing", novelUid] });
       qc.invalidateQueries({ queryKey: ["context-preview", novelUid] });
+      qc.invalidateQueries({ queryKey: ["character-memories", novelUid] });
     },
   });
 }
@@ -157,6 +181,114 @@ export function useFinalizeChapter(novelUid: string, chapterId: number) {
       qc.invalidateQueries({ queryKey: ["summaries", novelUid] });
       qc.invalidateQueries({ queryKey: ["foreshadowing", novelUid] });
       qc.invalidateQueries({ queryKey: ["novels", novelUid] });
+      qc.invalidateQueries({ queryKey: ["character-memories", novelUid] });
+    },
+  });
+}
+
+export function useReextractChapterMemories(novelUid: string, chapterId: number) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      apiRequest<ReextractChapterMemoryResponse>(
+        `/api/v1/novels/${novelUid}/chapters/${chapterId}/reextract-memories`,
+        { method: "POST" }
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["pending-queue", novelUid] });
+      qc.invalidateQueries({ queryKey: ["chapter-memory", novelUid] });
+      qc.invalidateQueries({ queryKey: ["foreshadowing", novelUid] });
+      qc.invalidateQueries({ queryKey: ["context-preview", novelUid] });
+      qc.invalidateQueries({ queryKey: ["novels", novelUid] });
+      qc.invalidateQueries({ queryKey: ["character-memories", novelUid] });
+    },
+  });
+}
+
+export function useCharacterMemories(
+  novelUid: string | null,
+  params?: {
+    characterId?: number | null;
+    upToChapterSort?: number | null;
+    memoryType?: CharacterMemoryType | "";
+    includeDisabled?: boolean;
+    includePending?: boolean;
+  }
+) {
+  const charId = params?.characterId ?? null;
+  const sortOrder = params?.upToChapterSort ?? null;
+  const memType = params?.memoryType ?? "";
+  const incDisabled = params?.includeDisabled ?? true;
+  const incPending = params?.includePending ?? false;
+
+  return useQuery({
+    queryKey: [
+      "character-memories",
+      novelUid,
+      charId,
+      sortOrder,
+      memType,
+      incDisabled,
+      incPending,
+    ],
+    queryFn: () => {
+      const sp = new URLSearchParams();
+      if (charId !== null) sp.set("character_id", String(charId));
+      if (sortOrder !== null) sp.set("up_to_chapter_sort", String(sortOrder));
+      if (memType) sp.set("memory_type", memType);
+      sp.set("include_disabled", String(incDisabled));
+      sp.set("include_pending", String(incPending));
+      return apiRequest<CharacterMemoryItem[]>(
+        `/api/v1/novels/${novelUid}/memory/character-memories?${sp.toString()}`
+      );
+    },
+    enabled: Boolean(novelUid),
+  });
+}
+
+export function useCreateCharacterMemory(novelUid: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: CharacterMemoryCreateInput) =>
+      apiRequest<CharacterMemoryItem>(
+        `/api/v1/novels/${novelUid}/memory/character-memories`,
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+        }
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["character-memories", novelUid] });
+      qc.invalidateQueries({ queryKey: ["novels", novelUid, "characters"] });
+      qc.invalidateQueries({ queryKey: ["chapter-memory", novelUid] });
+      qc.invalidateQueries({ queryKey: ["context-preview", novelUid] });
+    },
+  });
+}
+
+export function useUpdateCharacterMemory(novelUid: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id,
+      input,
+    }: {
+      id: number;
+      input: CharacterMemoryUpdateInput;
+    }) =>
+      apiRequest<CharacterMemoryItem>(
+        `/api/v1/novels/${novelUid}/memory/character-memories/${id}`,
+        {
+          method: "PUT",
+          body: JSON.stringify(input),
+        }
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["character-memories", novelUid] });
+      qc.invalidateQueries({ queryKey: ["novels", novelUid, "characters"] });
+      qc.invalidateQueries({ queryKey: ["chapter-memory", novelUid] });
+      qc.invalidateQueries({ queryKey: ["pending-queue", novelUid] });
+      qc.invalidateQueries({ queryKey: ["context-preview", novelUid] });
     },
   });
 }
@@ -291,10 +423,10 @@ export function useRunConsistencyReview(novelUid: string, chapterId: number) {
 export function useApplyReviewRevision(novelUid: string, chapterId: number) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (input: { reviewId: number; issueIndex: number; expectedContent: string }) =>
+    mutationFn: (input: { reviewId: number; issueIndices: number[]; expectedContent: string }) =>
       apiRequest<import("@/features/editor/types").ChapterWorkspace>(
         `/api/v1/novels/${novelUid}/consistency-reviews/${input.reviewId}/apply`,
-        { method: "POST", body: JSON.stringify({ issue_index: input.issueIndex, expected_content: input.expectedContent }) }
+        { method: "POST", body: JSON.stringify({ issue_indices: input.issueIndices, expected_content: input.expectedContent }) }
       ),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["novels", novelUid] });

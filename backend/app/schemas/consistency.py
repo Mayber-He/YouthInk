@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 ConsistencyCheckType = Literal["constraint", "fact", "character", "common_sense", "continuity", "prose"]
 ConsistencyVerdict = Literal["violation", "suspicious"]
@@ -52,8 +52,17 @@ class LlmConsistencyOutput(BaseModel):
 
 
 class ApplyReviewRequest(BaseModel):
-    issue_index: int = Field(ge=0)
+    issue_index: int | None = Field(default=None, ge=0)
+    issue_indices: list[Annotated[int, Field(ge=0)]] | None = Field(default=None, min_length=1)
     expected_content: str
+
+    @model_validator(mode="after")
+    def validate_selection(self) -> ApplyReviewRequest:
+        if (self.issue_index is None) == (self.issue_indices is None):
+            raise ValueError("Provide either issue_index or issue_indices.")
+        if self.issue_indices is not None and len(set(self.issue_indices)) != len(self.issue_indices):
+            raise ValueError("issue_indices must be unique.")
+        return self
 
 
 class ConsistencyReviewResponse(BaseModel):

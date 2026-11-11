@@ -1,5 +1,5 @@
-import React, { useState } from "react";
-import { AlertTriangle, Check, CheckCircle2, HelpCircle, Sparkles } from "lucide-react";
+import React, { useEffect, useState } from "react";
+import { AlertTriangle, CheckCircle2, HelpCircle, Sparkles } from "lucide-react";
 import { Modal } from "@/components/ui/Modal";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -14,7 +14,7 @@ interface Props {
   review: ConsistencyReviewResponse | null;
   running: boolean;
   error: string | null;
-  onApplyRewrite?: (issueIndex: number) => Promise<boolean>;
+  onApplyRewrite?: (issueIndices: number[]) => Promise<boolean>;
 }
 
 const TYPE_LABEL: Record<ConsistencyIssue["check_type"], string> = {
@@ -29,27 +29,12 @@ const TYPE_LABEL: Record<ConsistencyIssue["check_type"], string> = {
 const IssueCard: React.FC<{
   issue: ConsistencyIssue;
   issueIndex: number;
-  onApplyRewrite?: (issueIndex: number) => Promise<boolean>;
-}> = ({ issue, issueIndex, onApplyRewrite }) => {
+  onApplyRewrite?: (issueIndex: number) => void;
+  selected: boolean;
+  disabled: boolean;
+  onToggle?: () => void;
+}> = ({ issue, issueIndex, onApplyRewrite, selected, disabled, onToggle }) => {
   const isViolation = issue.verdict === "violation";
-  const [applied, setApplied] = useState(false);
-  const [applyError, setApplyError] = useState("");
-  const [applying, setApplying] = useState(false);
-
-  const handleApply = async () => {
-    if (!issue.evidence_quote || !issue.suggested_rewrite || !onApplyRewrite) return;
-    setApplying(true);
-    try {
-      const ok = await onApplyRewrite(issueIndex);
-      if (!ok) throw new Error("当前正文已变化或正在生成，请保存后重新审查。");
-      setApplied(true);
-      setApplyError("");
-    } catch (error) {
-      setApplyError(error instanceof Error ? error.message : "保存失败，请重试。");
-    } finally {
-      setApplying(false);
-    }
-  };
 
   return (
     <div
@@ -60,6 +45,16 @@ const IssueCard: React.FC<{
       }`}
     >
       <div className="flex flex-wrap items-center gap-2">
+        {onToggle && (
+          <input
+            type="checkbox"
+            aria-label={`选择建议 ${issueIndex + 1}`}
+            checked={selected}
+            disabled={disabled}
+            onChange={onToggle}
+            className="h-4 w-4 accent-indigo-600"
+          />
+        )}
         <Badge tone={isViolation ? "rose" : "amber"}>
           {isViolation ? "违反" : "可疑"}
         </Badge>
@@ -105,33 +100,19 @@ const IssueCard: React.FC<{
             {onApplyRewrite && (
               <Button
                 size="sm"
-                variant={applied ? "outline" : "primary"}
-                disabled={applied || applying}
-                onClick={handleApply}
+                variant="primary"
+                disabled={disabled}
+                onClick={() => onApplyRewrite(issueIndex)}
                 className="h-6 gap-1 px-2.5 text-xs cursor-pointer"
               >
-                {applied ? (
-                  <>
-                    <Check className="h-3 w-3 text-emerald-600" />
-                    <span className="text-emerald-700 dark:text-emerald-400">已替换入正文</span>
-                  </>
-                ) : (
-                  <>
-                    <Sparkles className="h-3 w-3" />
-                    {applying ? "保存并复核中…" : "采纳并保存、复核"}
-                  </>
-                )}
+                <Sparkles className="h-3 w-3" />
+                采纳并保存、复核
               </Button>
             )}
           </div>
           <div className="mt-1.5 rounded border border-indigo-100 bg-indigo-50/50 p-2 text-xs font-serif leading-relaxed text-slate-800 dark:border-indigo-950 dark:bg-indigo-950/40 dark:text-slate-200">
             {issue.suggested_rewrite}
           </div>
-          {applyError && (
-            <p className="mt-1 text-[11px] text-rose-500">
-              {applyError}
-            </p>
-          )}
         </div>
       )}
     </div>
@@ -145,12 +126,41 @@ export const ConsistencyReviewModal: React.FC<Props> = ({
   running,
   error,
   onApplyRewrite,
-}) => (
+}) => {
+  const [selected, setSelected] = useState<number[]>([]);
+  const [applying, setApplying] = useState(false);
+  const [applyError, setApplyError] = useState("");
+  useEffect(() => {
+    setSelected([]);
+    setApplyError("");
+  }, [open, review?.id]);
+
+  const eligible = review && !review.is_stale && onApplyRewrite
+    ? review.issues.flatMap((issue, index) =>
+      issue.evidence_quote.trim() && issue.suggested_rewrite?.trim() ? [index] : [])
+    : [];
+  const selectedIndices = selected.filter((index) => eligible.includes(index));
+  const handleApply = async (indices: number[]) => {
+    if (!onApplyRewrite || applying || running || !indices.length) return;
+    setApplying(true);
+    setApplyError("");
+    try {
+      const ok = await onApplyRewrite(indices);
+      if (!ok) throw new Error("当前正文已变化或正在生成，请保存后重新审查。");
+      setSelected([]);
+    } catch (error) {
+      setApplyError(error instanceof Error ? error.message : "保存失败，请重试。");
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  return (
   <Modal open={open} onClose={onClose} title="一致性审查报告" maxWidthClass="max-w-3xl">
-    {running && (
+    {(running || applying) && (
       <div className="flex items-center gap-3 py-8 text-sm text-slate-500">
         <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-indigo-500" />
-        审查员正在逐项核对检查表与情境常理，请稍候……
+        {applying ? "正在保存所选建议并复核，请稍候……" : "审查员正在逐项核对检查表与情境常理，请稍候……"}
       </div>
     )}
     {!running && error && (
@@ -185,6 +195,16 @@ export const ConsistencyReviewModal: React.FC<Props> = ({
             本次审查之后章节正文或前文发生过修改，审查结果已过期，请重新审查。
           </p>
         )}
+        {eligible.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+            <Button size="sm" variant="outline" disabled={applying} onClick={() => setSelected(eligible)}>全选</Button>
+            <Button size="sm" variant="ghost" disabled={applying || !selectedIndices.length} onClick={() => setSelected([])}>取消全选</Button>
+            <Button size="sm" disabled={applying || !selectedIndices.length} onClick={() => void handleApply(selectedIndices)}>
+              采用所选（{selectedIndices.length}）
+            </Button>
+          </div>
+        )}
+        {applyError && <p role="alert" className="text-xs text-rose-500">{applyError}</p>}
         {review.issue_count === 0 ? (
           <p className="text-xs text-slate-500 dark:text-slate-400">
             本次审查覆盖了生效中的约束清单、已确认事实、出场人物核心属性及情境常理逻辑（环境熟悉度、人际初见边界、限知视角边界、时空物理连续性、在场状态），未发现冲突。
@@ -192,7 +212,16 @@ export const ConsistencyReviewModal: React.FC<Props> = ({
         ) : (
           <div className="space-y-3">
             {review.issues.map((issue, idx) => (
-              <IssueCard key={`${review.id}-${idx}`} issue={issue} issueIndex={idx} onApplyRewrite={review.is_stale ? undefined : onApplyRewrite} />
+              <IssueCard
+                key={`${review.id}-${idx}`}
+                issue={issue}
+                issueIndex={idx}
+                selected={selectedIndices.includes(idx)}
+                disabled={applying}
+                onToggle={eligible.includes(idx) ? () => setSelected((prev) =>
+                  prev.includes(idx) ? prev.filter((index) => index !== idx) : [...prev, idx]) : undefined}
+                onApplyRewrite={eligible.includes(idx) ? (index) => void handleApply([index]) : undefined}
+              />
             ))}
             <p className="flex items-start gap-1.5 text-[11px] text-slate-400">
               <HelpCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
@@ -203,4 +232,5 @@ export const ConsistencyReviewModal: React.FC<Props> = ({
       </div>
     )}
   </Modal>
-);
+  );
+};
